@@ -1,0 +1,32 @@
+{
+  "format": 1,
+  "mcp_version": "0.6.0",
+  "mcp_base_zip_sha256": "5596ffa8c3ff768978a3f3b6bc68a47bc48bf0a5f4a592945d03409a14250f2b",
+  "mcp_base_files_unchanged": true,
+  "driver": {
+    "version": "0.28.2",
+    "platform": "windows-x86_64",
+    "upstream_repository": "https://github.com/trycua/cua",
+    "upstream_release": "https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.28.2",
+    "upstream_archive": "cua-driver-rs-0.28.2-windows-x86_64.zip",
+    "upstream_archive_sha256": "3c1fcf10ff9513b94e4af78ad6a216ab62aa95b2c9a3b70dfbdba9f04e021533",
+    "license": "MIT",
+    "license_file": "driver/LICENSE.md",
+    "license_sha256": "c0779290c1d4783169aa3dbfb55feb505e563ef8a004bbf55298ceffcfbda8d9",
+    "files": {
+      "driver/LICENSE.md": "c0779290c1d4783169aa3dbfb55feb505e563ef8a004bbf55298ceffcfbda8d9",
+      "driver/cua-cursor-theme.exe": "5b1d9421217edbdeafa4b2b77029217b0ba0e6e3fc449d5afdf87fccfd85637d",
+      "driver/cua-driver-uia.exe": "2aa7bde5774c12771b994ba5500e1b948e90a3129fd1182a486e462606bde7f8",
+      "driver/cua-driver.exe": "dbbd52d75759900155fbf3d5f0a13c759a12d06ef17338b88b3f2b8b9c1ef8dc",
+      "driver/cua_driver_abi.h": "c17169f41da321baa5e7e953323c3ad660b00790176ba381e93189fba3506587",
+      "driver/cua_driver_node_runtime.node": "93f220e8a5cbf25aff23321f20a868368a204f1026b8dce45c5a4f84290de09f",
+      "driver/cua_driver_sdk.dll": "7605fe15bcda9257dc485c779bc7d0f08832e1766165d87e120b345614bd734b"
+    }
+  },
+  "integrity": {
+    "SHA256SUMS.txt": "Unchanged hashes of the original MCP package",
+    "BUNDLE-SHA256SUMS.txt": "All combined-package files except this hash list"
+  },
+  "downloads_performed_by_builder": false,
+  "executable_launches_performed_by_builder": false
+}

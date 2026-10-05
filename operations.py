@@ -1,0 +1,615 @@
+"""Small, verified UIA operations built exclusively from guarded runtime calls.
+
+Selectors and assertions are data, never code. A delivery acknowledgement is not
+task success, and uncertain mutations are never replayed by this module.
+"""
+from __future__ import annotations
+
+import copy
+import json
+import math
+import time
+from accessibility_tree import normalize_snapshot
+
+
+class OperationError(ValueError):
+    def __init__(self, message, code="invalid_operation"):
+        super().__init__(message)
+        self.code = code
+
+
+ANCESTOR_SELECTOR_SCHEMA = {
+    "type": "object", "additionalProperties": False, "minProperties": 1,
+    "properties": {key: {"type": "string", "minLength": 1, "maxLength": 1000}
+                   for key in ("name", "role", "automation_id")},
+}
+SELECTOR_SCHEMA = copy.deepcopy(ANCESTOR_SELECTOR_SCHEMA)
+SELECTOR_SCHEMA["properties"]["within"] = dict(copy.deepcopy(ANCESTOR_SELECTOR_SCHEMA),
+    description="One exact unique ancestor identified in the same UIA snapshot. Restricts matches to its descendants; nested within is not allowed.")
+ASSERTION_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {"selector": SELECTOR_SCHEMA,
+                   "property": {"enum": ["value", "name", "selected", "enabled"]},
+                   "equals": {"type": ["string", "boolean", "integer", "number", "null"]}},
+    "required": ["selector", "property", "equals"],
+}
+OPERATION_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {
+        "operation": {"enum": ["set_value", "select_option", "select_item", "set_checked",
+                                 "click", "double_click", "right_click", "press_key", "hotkey", "assert"]},
+        "selector": SELECTOR_SCHEMA,
+        "value": {"type": "string", "maxLength": 16000},
+        "checked": {"type": "boolean", "description": "Desired state for set_checked. Requires an observed boolean selected state and toggle capability."},
+        "key": {"type": "string", "minLength": 1, "maxLength": 80},
+        "key_target": {"enum": ["element", "window"], "description": "press_key/hotkey only. Default element requires selector. Explicit window omits selector and targets the currently focused control in the freshly observed approved window. Requires expect; never used as an automatic fallback."},
+        "modifiers": {"type": "array", "maxItems": 4, "uniqueItems": True,
+                      "items": {"type": "string", "minLength": 1, "maxLength": 80}},
+        "keys": {"type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": True,
+                 "items": {"type": "string", "minLength": 1, "maxLength": 80}},
+        "option_order": {"type": "array", "minItems": 1, "maxItems": 30, "uniqueItems": True,
+                         "items": {"type": "string", "minLength": 1, "maxLength": 1000},
+                         "description": "select_option only. Exact option labels in observed or user-confirmed order; never infer or guess this order. Uses at most 12 verified Up/Down transitions without opening a native popup."},
+        "expect": {"type": "array", "minItems": 1, "maxItems": 20, "items": ASSERTION_SCHEMA},
+        "verification_timeout_ms": {"type": "integer", "minimum": 0, "maximum": 5000},
+    },
+    "required": ["operation"],
+}
+
+
+def validate_selector(selector, allow_within=True):
+    permitted = {"name", "role", "automation_id"} | ({"within"} if allow_within else set())
+    if not isinstance(selector, dict) or not selector or set(selector) - permitted:
+        raise OperationError("selector에는 정확한 name, role, automation_id와 단일 부모 범위 within만 사용할 수 있습니다.")
+    if any(not isinstance(v, str) or not v.strip() or len(v) > 1000 for k, v in selector.items() if k != "within"):
+        raise OperationError("선택 기준은 1~1000자의 비어 있지 않은 문자열이어야 합니다.")
+    if not ({"name", "automation_id"} & set(selector)):
+        raise OperationError("role만으로는 대상을 선택할 수 없습니다. name 또는 automation_id를 함께 지정하세요.")
+    if "within" in selector:
+        validate_selector(selector["within"], allow_within=False)
+    return copy.deepcopy(selector)
+
+
+def validate_step(step):
+    if not isinstance(step, dict) or set(step) - set(OPERATION_SCHEMA["properties"]):
+        raise OperationError("작업 단계의 형식 또는 인자가 올바르지 않습니다.")
+    operation = step.get("operation")
+    if operation not in OPERATION_SCHEMA["properties"]["operation"]["enum"]:
+        raise OperationError("지원하지 않는 작업 종류입니다.")
+    result = copy.deepcopy(step)
+    key_target = step.get("key_target", "element")
+    if "key_target" in step and (operation not in ("press_key", "hotkey") or key_target not in ("element", "window")):
+        raise OperationError("key_target은 press_key/hotkey에서 element 또는 window로만 지정하세요.")
+    window_key = operation in ("press_key", "hotkey") and key_target == "window"
+    if window_key and "selector" in step:
+        raise OperationError("key_target: window는 특정 요소가 아닌 현재 창의 키 입력입니다. selector를 함께 지정할 수 없습니다.")
+    if not window_key and (operation != "assert" or "selector" in step):
+        result["selector"] = validate_selector(step.get("selector"))
+    if operation in ("set_value", "select_option"):
+        if not isinstance(step.get("value"), str) or len(step["value"]) > 16000:
+            raise OperationError("입력하거나 선택할 value는 16000자 이하 문자열이어야 합니다.")
+        if operation == "select_option" and not step["value"].strip():
+            raise OperationError("선택할 항목의 이름이 필요합니다.")
+    elif "value" in step:
+        raise OperationError("이 작업에는 value를 사용할 수 없습니다.")
+    if operation == "set_checked":
+        if type(step.get("checked")) is not bool:
+            raise OperationError("set_checked에는 원하는 상태 checked: true 또는 false가 필요합니다.")
+    elif "checked" in step:
+        raise OperationError("checked는 set_checked에만 사용할 수 있습니다.")
+    if operation == "press_key":
+        if not isinstance(step.get("key"), str) or not step["key"].strip() or len(step["key"]) > 80:
+            raise OperationError("press_key에는 1~80자의 key 이름이 필요합니다.")
+        if "modifiers" in step:
+            modifiers = step["modifiers"]
+            if (not isinstance(modifiers, list) or len(modifiers) > 4
+                    or any(not isinstance(v, str) or not v.strip() or len(v) > 80 for v in modifiers)
+                    or len(set(modifiers)) != len(modifiers)):
+                raise OperationError("modifiers에는 중복 없는 최대 4개의 수정키 이름을 지정하세요.")
+    elif "key" in step or "modifiers" in step:
+        raise OperationError("key와 modifiers는 press_key에만 사용할 수 있습니다.")
+    if operation == "hotkey":
+        keys = step.get("keys")
+        if (not isinstance(keys, list) or not 1 <= len(keys) <= 8
+                or any(not isinstance(v, str) or not v.strip() or len(v) > 80 for v in keys)
+                or len(set(keys)) != len(keys)):
+            raise OperationError("hotkey에는 1~8개 키 이름 목록 keys가 필요합니다.")
+    elif "keys" in step:
+        raise OperationError("keys는 hotkey에만 사용할 수 있습니다.")
+    if "option_order" in step:
+        order = step["option_order"]
+        if (operation != "select_option" or not isinstance(order, list) or not 1 <= len(order) <= 30
+                or any(not isinstance(v, str) or not v.strip() or len(v) > 1000 for v in order)
+                or len(set(order)) != len(order)):
+            raise OperationError("option_order는 select_option에만 사용하는, 직접 관찰하거나 사용자가 확인한 중복 없는 1~30개 항목 순서입니다.")
+        if step["value"] not in order:
+            raise OperationError("선택할 value가 확인된 option_order에 없습니다.")
+    if "expect" in step:
+        if not isinstance(step["expect"], list) or not 1 <= len(step["expect"]) <= 20:
+            raise OperationError("완료 조건 expect는 1~20개여야 합니다.")
+        for item in step["expect"]:
+            if not isinstance(item, dict) or set(item) != {"selector", "property", "equals"}:
+                raise OperationError("완료 조건에는 selector, property, equals가 필요합니다.")
+            validate_selector(item["selector"])
+            if item["property"] not in ("value", "name", "selected", "enabled"):
+                raise OperationError("지원하지 않는 완료 조건 속성입니다.")
+            value = item["equals"]
+            if type(value) not in (str, bool, int, float, type(None)) or (isinstance(value, float) and not math.isfinite(value)):
+                raise OperationError("equals는 유한한 JSON 기본 값이어야 합니다.")
+            if isinstance(value, str) and len(value) > 16000:
+                raise OperationError("완료 조건 문자열이 너무 깁니다.")
+            if item["property"] in ("selected", "enabled") and type(value) is not bool:
+                raise OperationError("selected와 enabled의 equals는 true 또는 false여야 합니다.")
+    if operation in ("click", "double_click", "right_click", "press_key", "hotkey", "assert") and not step.get("expect"):
+        raise OperationError("클릭, 키 입력, assert에는 실제 완료를 확인할 expect 조건이 필요합니다.")
+    timeout = step.get("verification_timeout_ms", 1200)
+    if type(timeout) is not int or not 0 <= timeout <= 5000:
+        raise OperationError("verification_timeout_ms는 0~5000 사이 정수여야 합니다.")
+    return result
+
+
+def verification_step(step):
+    """Return a read-only recheck; useful when resuming without replaying input."""
+    step = validate_step(step)
+    checks = copy.deepcopy(step.get("expect", []))
+    if step["operation"] in ("set_value", "select_option"):
+        checks.insert(0, {"selector": step["selector"], "property": "value", "equals": step["value"]})
+    elif step["operation"] in ("set_checked", "select_item"):
+        checks.insert(0, {"selector": step["selector"], "property": "selected",
+                          "equals": step["checked"] if step["operation"] == "set_checked" else True})
+    return {"operation": "assert", "expect": checks,
+            "verification_timeout_ms": step.get("verification_timeout_ms", 1200)}
+
+
+def _payload(answer):
+    if not isinstance(answer, dict):
+        raise OperationError("화면 도구 응답 형식이 올바르지 않습니다.", "invalid_response")
+    structured = answer.get("structuredContent")
+    if isinstance(structured, dict) and "elements" in structured:
+        return normalize_snapshot(structured)
+    for item in answer.get("content", []):
+        if isinstance(item, dict) and item.get("type") == "text":
+            try:
+                parsed = json.loads(item.get("text", ""))
+            except (TypeError, ValueError):
+                continue
+            if isinstance(parsed, dict) and "elements" in parsed:
+                # Runtime timing/recovery metadata can create structuredContent
+                # even when an older Driver returned its tree only as JSON text.
+                # Do not let that metadata hide the actual observed elements.
+                if isinstance(structured, dict):
+                    parsed.update(structured)
+                return normalize_snapshot(parsed)
+    return structured if isinstance(structured, dict) else answer
+
+
+def _name(element):
+    return element.get("name", element.get("label"))
+
+
+def _matches(element, selector):
+    for key, value in selector.items():
+        if key == "within":
+            continue
+        actual = _name(element) if key == "name" else element.get(key)
+        if actual != value:
+            return False
+    return True
+
+
+def _elements(snapshot):
+    elements = snapshot.get("elements")
+    if not isinstance(elements, list) or any(not isinstance(e, dict) for e in elements):
+        raise OperationError("구조화된 UIA 요소를 읽지 못했습니다.", "missing_accessibility")
+    return elements
+
+
+def _limited(snapshot, depth, count):
+    # This Driver also marks elements_complete=false when non-actionable tree
+    # nodes are omitted from the structured projection. That flag alone is not
+    # proof of a truncated walk (normal 27-element captures contain it).
+    elements = _elements(snapshot)
+    return (snapshot.get("truncated") is True or snapshot.get("max_elements_reached") is True
+            or snapshot.get("max_depth_reached") is True
+            or len(elements) >= count
+            or any(type(e.get("depth")) is int and e["depth"] >= depth for e in elements)
+            or (type(snapshot.get("total_element_count")) is int
+                and snapshot["total_element_count"] > len(elements)))
+
+
+def _find(snapshot, selector):
+    found = [e for e in _elements(snapshot) if _matches(e, selector)]
+    if "within" in selector:
+        ancestors = [e for e in _elements(snapshot) if _matches(e, selector["within"])]
+        if len(ancestors) > 1:
+            raise OperationError("within에 해당하는 부모 영역이 여러 개입니다. 부모 선택 기준을 더 구체적으로 지정하세요.", "ambiguous_scope")
+        if not ancestors:
+            return []
+        found = [e for e in found if _descendant(e, ancestors[0], _elements(snapshot))]
+    return found
+
+
+def _unique(snapshot, selector):
+    found = _find(snapshot, selector)
+    if len(found) != 1:
+        raise OperationError("일치하는 화면 요소가 없습니다." if not found else "같은 조건의 화면 요소가 여러 개입니다. 선택 기준을 더 구체적으로 지정하세요.",
+                             "selector_not_found" if not found else "ambiguous_selector")
+    return found[0]
+
+
+def _descendant(element, ancestor, elements):
+    ancestor_index = ancestor.get("element_index")
+    if type(ancestor_index) is not int:
+        return False
+    parents = {e.get("element_index"): e for e in elements if type(e.get("element_index")) is int}
+    seen = set()
+    parent = element.get("parent_index")
+    while type(parent) is int and parent not in seen:
+        if parent == ancestor_index:
+            return True
+        seen.add(parent)
+        parent = parents.get(parent, {}).get("parent_index")
+    return False
+
+
+class Operations:
+    def __init__(self, runtime):
+        self.runtime = runtime
+        self._verified_observation = None
+
+    def execute(self, step, target, delivery_mode="background", reuse_verified=False):
+        # Reuse is exclusively for adjacent steps in one caller-locked recipe.
+        # Standalone calls and resume assertions always observe again.
+        previous = self._verified_observation
+        self._verified_observation = None
+        step = validate_step(step)
+        if not isinstance(target, dict) or set(target) != {"pid", "window_id"} or any(type(v) is not int or v < 1 for v in target.values()):
+            raise OperationError("pid와 window_id로 정확한 창을 지정하세요.")
+        if delivery_mode not in ("background", "foreground"):
+            raise OperationError("delivery_mode는 background 또는 foreground여야 합니다.")
+        if self.runtime.mode != "uia":
+            raise OperationError("검증 작업은 uia 세션에서만 사용할 수 있습니다.", "unsupported_mode")
+        initial = None
+        guard = getattr(self.runtime, "guard", None)
+        observed_targets = getattr(guard, "observed_targets", set())
+        if (reuse_verified is True and step["operation"] != "assert" and previous is not None
+                and previous["target"] == target and time.monotonic() - previous["observed_at"] < 0.5
+                and (target["pid"], target["window_id"]) in observed_targets):
+            initial = previous
+        execution = _Execution(self.runtime, step, dict(target), delivery_mode, initial)
+        result = execution.run()
+        if (result["status"] == "verified" and step["operation"] != "assert" and execution.snapshot is not None
+                and execution.snapshot_target == target):
+            self._verified_observation = {"snapshot": execution.snapshot, "target": dict(target),
+                                          "observed_at": execution.observed_at, "limits": execution.observation_limits}
+        return result
+
+
+class _Execution:
+    def __init__(self, runtime, step, target, delivery, initial_observation=None):
+        self.runtime, self.step, self.target, self.delivery = runtime, step, target, delivery
+        self.started = time.monotonic()
+        self.metrics = {"tool_calls": 0, "observations": 0, "discovery_calls": 0, "mutations": 0,
+                        "observation_ms": 0, "discovery_ms": 0, "action_ms": 0, "expanded_observations": 0,
+                        "reused_observations": 0, "focus_actions": 0, "focus_ms": 0}
+        self.dispatched = False
+        self.focus_dispatched = False
+        self.focus_attempted = False
+        self.checks = []
+        self.snapshot = None
+        self.last_guidance = None
+        self.no_parent_recovery = False
+        self.read_failed = False
+        self.strategy = None
+        self.initial_observation = initial_observation
+        self.snapshot_target = None
+        self.observed_at = 0
+        self.observation_limits = (12, 600)
+
+    def _call(self, name, args, mutation=False):
+        self.runtime.check_active()
+        began = time.monotonic()
+        self.metrics["tool_calls"] += 1
+        discovery = name == "list_windows"
+        focus = name == "bring_to_front"
+        self.metrics["mutations" if mutation else "discovery_calls" if discovery else "observations"] += 1
+        previous_dispatched = self.dispatched
+        previous_focus = self.focus_dispatched
+        if mutation:
+            # Changing focus is an observable side effect, but it does not
+            # establish that business input reached a field or button.
+            if focus:
+                self.focus_dispatched = True
+                self.metrics["focus_actions"] += 1
+            else:
+                self.dispatched = True  # Unknown exceptions may follow actual dispatch.
+        try:
+            answer = self.runtime.call(name, args)
+        except Exception as error:
+            if not mutation:
+                self.read_failed = True
+            raise OperationError(str(error)[:1000], "mutation_error" if mutation else "observation_error") from error
+        finally:
+            duration = round((time.monotonic() - began) * 1000, 2)
+            self.metrics["action_ms" if mutation else "discovery_ms" if discovery else "observation_ms"] += duration
+            if focus:
+                self.metrics["focus_ms"] += duration
+        data = _payload(answer)
+        if mutation and data.get("input_sent") is False:
+            if focus:
+                self.focus_dispatched = previous_focus
+            else:
+                self.dispatched = previous_dispatched
+        if answer.get("isError"):
+            if not mutation:
+                self.read_failed = True
+            guidance = data.get("computer_use_guidance", {})
+            self.last_guidance = {key: guidance[key] for key in ("diagnostic_code", "next_step") if key in guidance}
+            message = guidance.get("diagnostic") or next((i.get("text") for i in answer.get("content", [])
+                                                          if isinstance(i, dict) and i.get("type") == "text"), "화면 도구가 실패했습니다.")
+            raise OperationError(str(message)[:1000], data.get("error_code") or guidance.get("diagnostic_code") or ("mutation_error" if mutation else "observation_error"))
+        return data
+
+    def _capture(self, target, depth, count):
+        snapshot = self._call("get_window_state", dict(target, include_accessibility_tree=True,
+                                                      include_screenshot=False, max_depth=depth, max_elements=count))
+        _elements(snapshot)
+        self.snapshot = snapshot
+        for key in ("pid", "window_id"):
+            if key in snapshot and snapshot[key] != target[key]:
+                raise OperationError("관찰 결과의 창 식별자가 요청한 창과 다릅니다.", "target_mismatch")
+        return snapshot
+
+    def _observe(self, selectors=(), option=None, target=None):
+        target = self.target if target is None else target
+        previous, self.initial_observation = self.initial_observation, None
+        if previous is not None and previous["target"] == target and option is None:
+            snapshot = previous["snapshot"]
+            if (not _limited(snapshot, *previous["limits"])
+                    and all(_find(snapshot, selector) for selector in selectors)):
+                self.snapshot, self.snapshot_target = snapshot, dict(target)
+                self.observed_at, self.observation_limits = previous["observed_at"], previous["limits"]
+                self.metrics["reused_observations"] += 1
+                return snapshot
+        for depth, count in ((12, 600), (32, 5000)):
+            if depth == 32:
+                self.metrics["expanded_observations"] += 1
+            snapshot = self._capture(target, depth, count)
+            limited = _limited(snapshot, depth, count)
+            missing = any(not _find(snapshot, s) for s in selectors)
+            if (missing and selectors and target == self.target and option is None and depth == 12
+                    and self.delivery == "foreground" and self.step["operation"] != "assert"
+                    and not self.focus_attempted and not self.read_failed and self.metrics["mutations"] == 0):
+                self.focus_attempted = True
+                self._call("bring_to_front", dict(target), mutation=True)
+                # Some native web views expose only their blank document until
+                # first activated. This explicitly requested foreground route
+                # tries readiness once; it does not retry business input.
+                snapshot = self._capture(target, depth, count)
+                limited = _limited(snapshot, depth, count)
+                missing = any(not _find(snapshot, s) for s in selectors)
+            if option is not None:
+                missing = missing or not self._options(snapshot, option[0], option[1])
+            if depth == 12 and (limited or missing):
+                continue
+            if limited:
+                raise OperationError("화면 요소가 잘려 정확한 대상을 확인할 수 없습니다. 더 작은 창이나 단순한 화면에서 확인하세요.", "incomplete_observation")
+            self.snapshot_target, self.observed_at, self.observation_limits = dict(target), time.monotonic(), (depth, count)
+            return snapshot
+        raise AssertionError("observation loop exhausted")
+
+    def _handle(self, element, snapshot):
+        if element.get("synthetic_ancestor") is True or (type(element.get("element_index")) is int and element["element_index"] < 0):
+            raise OperationError("복원된 상위 영역은 선택 범위 확인용이며 직접 조작할 수 없습니다.", "read_only_ancestor")
+        if element.get("enabled") is False:
+            raise OperationError("비활성화된 화면 요소는 조작하지 않습니다.", "disabled_element")
+        token = element.get("element_token")
+        if isinstance(token, str) and token:
+            return {"element_token": token}
+        if type(element.get("element_index")) is int and isinstance(snapshot.get("snapshot_id"), str):
+            return {"element_index": element["element_index"], "snapshot_id": snapshot["snapshot_id"]}
+        raise OperationError("새 화면에서 유효한 요소 핸들을 받지 못했습니다.", "missing_handle")
+
+    def _mutate(self, name, element, snapshot, target=None, **args):
+        request = dict(self.target if target is None else target, **self._handle(element, snapshot), **args)
+        if name in ("click", "double_click", "right_click", "press_key", "hotkey"):
+            request["delivery_mode"] = self.delivery
+        self._call(name, request, mutation=True)
+
+    def _options(self, snapshot, selector, value):
+        try:
+            combo = _unique(snapshot, selector)
+        except OperationError:
+            return []
+        return [e for e in _elements(snapshot) if _name(e) == value
+                and e.get("role") in ("ListItem", "MenuItem", "Option")
+                and _descendant(e, combo, _elements(snapshot))]
+
+    def _visible_windows(self):
+        data = self._call("list_windows", {"pid": self.target["pid"], "on_screen_only": True})
+        windows = data.get("windows")
+        if not isinstance(windows, list) or any(not isinstance(w, dict) for w in windows):
+            raise OperationError("선택 목록을 열기 전후의 창 목록을 확인하지 못했습니다.", "window_discovery_unavailable")
+        return [w for w in windows if w.get("pid") == self.target["pid"] and type(w.get("window_id")) is int
+                and w["window_id"] > 0 and w.get("is_on_screen") is True]
+
+    def _new_owned_popup(self, before, after):
+        previous = {w["window_id"] for w in before}
+        candidates = [w for w in after if w["window_id"] not in previous and w["window_id"] != self.target["window_id"]
+                      and self.target["window_id"] in (w.get("owner_window_id"), w.get("root_owner_window_id"))]
+        if len(candidates) > 1:
+            self.no_parent_recovery = True
+            raise OperationError("새로 열린 연결된 창이 여러 개여서 선택 목록을 특정할 수 없습니다.", "ambiguous_popup")
+        return {"pid": candidates[0]["pid"], "window_id": candidates[0]["window_id"]} if candidates else None
+
+    def _popup_options(self, snapshot, value):
+        elements = _elements(snapshot)
+        containers = [e for e in elements if e.get("role") in ("List", "ListBox", "Menu")]
+        return [e for e in elements if _name(e) == value and e.get("role") in ("ListItem", "MenuItem", "Option")
+                and any(_descendant(e, container, elements) for container in containers)]
+
+    def _select_known_order(self, snapshot, element):
+        """Use only supplied, confirmed order; verify each single transition."""
+        self.strategy = "confirmed_option_order"
+        order = self.step["option_order"]
+        current = element.get("value")
+        if current not in order:
+            raise OperationError("현재 선택값이 확인된 option_order와 다릅니다. 순서를 다시 확인하세요.", "option_order_mismatch")
+        start, end = order.index(current), order.index(self.step["value"])
+        if abs(end - start) > 12:
+            raise OperationError("한 번에 12개를 초과하는 항목 이동은 지원하지 않습니다.", "selection_distance_exceeded")
+        direction = 1 if end > start else -1
+        for index in range(start + direction, end + direction, direction):
+            self._mutate("press_key", element, snapshot, key="down" if direction == 1 else "up")
+            snapshot = self._observe([self.step["selector"]])
+            element = _unique(snapshot, self.step["selector"])
+            if element.get("role") != "ComboBox" or element.get("value") != order[index]:
+                self._evaluate(snapshot, verification_step(self.step)["expect"])
+                return snapshot, False
+        return snapshot, True
+
+    def _evaluate(self, snapshot, assertions):
+        checks = []
+        for assertion in assertions:
+            check = dict(copy.deepcopy(assertion), passed=False)
+            try:
+                element = _unique(snapshot, assertion["selector"])
+                prop = assertion["property"]
+                present = ("name" in element or "label" in element) if prop == "name" else prop in element
+                actual = _name(element) if prop == "name" else element.get(prop)
+                check["observed"] = actual
+                # Missing false/null values cannot count as a satisfied check.
+                check["passed"] = present and type(actual) is type(assertion["equals"]) and actual == assertion["equals"]
+                if not present:
+                    check["reason"] = "property_unavailable"
+            except OperationError as error:
+                check["reason"] = error.code
+            checks.append(check)
+        self.checks = checks
+        return bool(checks) and all(c["passed"] for c in checks)
+
+    def _verify(self, assertions, initial=None):
+        deadline = time.monotonic() + self.step.get("verification_timeout_ms", 1200) / 1000
+        for attempt in range(3):
+            snapshot = initial if attempt == 0 and initial is not None else self._observe([a["selector"] for a in assertions])
+            if self._evaluate(snapshot, assertions):
+                return True
+            if time.monotonic() >= deadline or attempt == 2:
+                break
+            self.runtime.check_active()
+            self.runtime.stop_event.wait(min(0.15, max(0, deadline - time.monotonic())))
+            self.runtime.check_active()
+        return False
+
+    def _result(self, status, code, message):
+        self.metrics["elapsed_ms"] = round((time.monotonic() - self.started) * 1000, 2)
+        diagnostic = {"code": code, "message": message, "automatic_replay": False}
+        if self.strategy:
+            diagnostic["selection_strategy"] = self.strategy
+        if self.last_guidance:
+            diagnostic["driver_guidance"] = self.last_guidance
+        if status != "verified":
+            diagnostic["next_step"] = ("새 관찰로 현재 결과부터 확인하세요. 입력을 자동 반복하지 않습니다. "
+                "배경 입력의 미적용이 확인되면 foreground를 명시해 필요한 작업만 다시 요청할 수 있습니다.")
+        return {"status": status, "task_verified": status == "verified", "operation": self.step["operation"],
+                "input_dispatched": self.dispatched, "focus_dispatched": self.focus_dispatched,
+                "checks": self.checks, "metrics": self.metrics,
+                "diagnostic": diagnostic}
+
+    def run(self):
+        assertions = verification_step(self.step)["expect"]
+        try:
+            self.runtime.check_active()
+            if self.step["operation"] == "assert":
+                passed = self._verify(assertions)
+            else:
+                operation = self.step["operation"]
+                window_key = operation in ("press_key", "hotkey") and self.step.get("key_target") == "window"
+                selector = self.step.get("selector")
+                snapshot = self._observe([] if window_key else [selector])
+                element = None if window_key else _unique(snapshot, selector)
+                if operation == "set_value":
+                    if element.get("role") not in ("Edit", "Document", "TextBox") or element.get("read_only") is True or element.get("is_read_only") is True:
+                        raise OperationError("set_value는 편집 가능한 입력칸에만 사용할 수 있습니다. 선택 상자는 select_option을 사용하세요.", "unsupported_control")
+                    if "actions" in element and "set_value" not in element["actions"]:
+                        raise OperationError("이 입력칸은 값 변경 기능을 제공하지 않습니다.", "unsupported_control")
+                    if element.get("value") == self.step["value"] and "value" in element:
+                        passed = self._verify(assertions, snapshot)
+                        return self._result("verified" if passed else "failed", "already_satisfied" if passed else "verification_failed", "현재 값과 완료 조건을 확인했습니다.")
+                    self._mutate("set_value", element, snapshot, value=self.step["value"])
+                elif operation in ("click", "double_click", "right_click"):
+                    self._mutate(operation, element, snapshot)
+                elif operation in ("press_key", "hotkey"):
+                    arguments = ({"key": self.step["key"], **({"modifiers": self.step["modifiers"]} if "modifiers" in self.step else {})}
+                                 if operation == "press_key" else {"keys": self.step["keys"]})
+                    # Fresh exact element handles are forwarded unchanged. The
+                    # Driver focuses that element; the Guard retains all key,
+                    # modifier, foreground and shortcut restrictions.
+                    if window_key:
+                        self.strategy = "explicit_window_keyboard"
+                        self._call(operation, dict(self.target, delivery_mode=self.delivery, **arguments), mutation=True)
+                    else:
+                        self._mutate(operation, element, snapshot, **arguments)
+                elif operation in ("set_checked", "select_item"):
+                    desired = self.step["checked"] if operation == "set_checked" else True
+                    roles = ("CheckBox", "ToggleButton", "Button") if operation == "set_checked" else ("ListItem", "TabItem", "TreeItem", "RadioButton")
+                    action = "toggle" if operation == "set_checked" else "select"
+                    actions = element.get("actions")
+                    if (element.get("role") not in roles or not isinstance(actions, list) or action not in actions
+                            or type(element.get("selected")) is not bool):
+                        raise OperationError("이 요소는 필요한 선택 상태 또는 조작 기능을 명확히 제공하지 않습니다. 상태를 추측하여 클릭하지 않습니다.", "unsupported_control")
+                    if element["selected"] is desired:
+                        passed = self._verify(assertions, snapshot)
+                        return self._result("verified" if passed else "failed", "already_satisfied" if passed else "verification_failed",
+                                            "현재 선택 상태와 완료 조건을 확인했습니다.")
+                    self._mutate("click", element, snapshot)
+                else:
+                    if element.get("role") != "ComboBox":
+                        raise OperationError("select_option은 ComboBox 선택 상자에만 사용할 수 있습니다. 목록·탭·트리의 항목은 select_item과 해당 항목의 selector로 지정하세요.", "unsupported_control")
+                    if element.get("value") == self.step["value"] and "value" in element:
+                        passed = self._verify(assertions, snapshot)
+                        return self._result("verified" if passed else "failed", "already_satisfied" if passed else "verification_failed", "현재 선택값과 완료 조건을 확인했습니다.")
+                    if "option_order" in self.step:
+                        snapshot, expected_transition = self._select_known_order(snapshot, element)
+                        if not expected_transition:
+                            return self._result("failed", "unexpected_selection", "키 입력 후 선택값이 확인된 순서와 다릅니다. 추가 이동이나 재입력을 하지 않았습니다.")
+                        passed = self._verify(assertions, snapshot)
+                        return self._result("verified" if passed else "failed", "verified" if passed else "verification_failed",
+                                            "확인된 순서로 선택하고 완료 조건을 확인했습니다." if passed else "선택 후 완료 조건을 충족하지 못했습니다.")
+                    options = self._options(snapshot, selector, self.step["value"])
+                    option_target = self.target
+                    if not options:
+                        before = self._visible_windows()
+                        self._mutate("click", element, snapshot)
+                        popup = self._new_owned_popup(before, self._visible_windows())
+                        if popup is not None:
+                            self.strategy = "owned_popup"
+                            # Some Drivers cannot observe untitled native popups.
+                            # Parent UIA can block while that popup is open, so do
+                            # not fall back to a parent read after this route fails.
+                            self.no_parent_recovery = True
+                            snapshot = self._observe([{"name": self.step["value"]}], target=popup)
+                            options = self._popup_options(snapshot, self.step["value"])
+                            option_target = popup
+                        else:
+                            self.strategy = "combo_descendants"
+                            snapshot = self._observe([selector], option=(selector, self.step["value"]))
+                            options = self._options(snapshot, selector, self.step["value"])
+                    if len(options) != 1:
+                        raise OperationError("해당 선택 상자에 속한 항목을 유일하게 확인하지 못했습니다. 임의 키 입력이나 다른 위치의 같은 이름을 클릭하지 않습니다.", "unsupported_option_structure")
+                    self._mutate("click", options[0], snapshot, target=option_target)
+                    self.no_parent_recovery = False
+                passed = self._verify(assertions)
+            return self._result("verified" if passed else "failed", "verified" if passed else "verification_failed",
+                                "모든 완료 조건을 확인했습니다." if passed else "현재 화면에서 완료 조건을 충족하지 못했습니다.")
+        except Exception as error:
+            code = getattr(error, "code", "session_unavailable")
+            # One read-only recovery attempt can document current conditions;
+            # even if they match, an errored mutation stays unknown, never replayed.
+            if self.dispatched and not self.no_parent_recovery and not self.read_failed and code not in ("observation_error", "driver_timeout", "stopped", "session_unavailable"):
+                try:
+                    snapshot = self._observe([a["selector"] for a in assertions])
+                    self._evaluate(snapshot, assertions)
+                except Exception:
+                    pass
+            return self._result("unknown" if self.dispatched else "failed", code, str(error)[:1000])
