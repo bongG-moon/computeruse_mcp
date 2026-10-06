@@ -4,7 +4,7 @@ from __future__ import annotations
 import copy
 import json
 
-from operations import OperationError, _elements, _name, _payload, _unique
+from operations import OperationError, _descendant, _elements, _name, _payload, _unique, validate_selector
 
 
 def _selector_candidates(element):
@@ -77,15 +77,24 @@ def suggested_operations(element):
     return supported
 
 
-def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elements=600):
+def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elements=600,
+                   search="", within=None, offset=0, actionable_only=False):
     if (not isinstance(target, dict) or set(target) != {"pid", "window_id"}
             or any(type(v) is not int or v < 1 for v in target.values())):
         raise OperationError("관찰할 현재 창의 pid/window_id를 지정하세요.")
     for name, value, ceiling in (("max_controls", max_controls, 200), ("max_depth", max_depth, 32), ("max_elements", max_elements, 5000)):
         if type(value) is not int or not 1 <= value <= ceiling:
             raise OperationError(f"{name}는 1~{ceiling} 범위의 정수여야 합니다.")
+    if not isinstance(search, str) or len(search) > 200:
+        raise OperationError("search는 200자 이하 검색어여야 합니다.")
+    if type(offset) is not int or not 0 <= offset <= 5000 or type(actionable_only) is not bool:
+        raise OperationError("목록 시작 위치와 조작 요소 필터를 확인하세요.")
+    if within is not None:
+        within = validate_selector(within)
     runtime.check_active()
     uia = runtime.mode == "uia"
+    if not uia and (search or within is not None or offset or actionable_only):
+        raise OperationError("요소 검색·영역·페이지 필터는 UIA 방식에서만 사용할 수 있습니다.")
     args = {**target, "include_accessibility_tree": uia, "include_screenshot": not uia}
     if uia:
         args.update(max_depth=max_depth, max_elements=max_elements)
@@ -109,6 +118,9 @@ def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elemen
             elements = []
         controls = []
         candidate_count = 0
+        all_candidates = 0
+        scope = _unique(snapshot, within) if within is not None else None
+        query = search.casefold().strip()
         for element in elements:
             actions = element.get("actions", [])
             if not isinstance(actions, list):
@@ -116,10 +128,20 @@ def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elemen
             # Keep app text/status for completion checks, not just actionable widgets.
             if not (_base_selector(element) or actions):
                 continue
+            all_candidates += 1
+            if scope is not None and not _descendant(element, scope, elements):
+                continue
+            if actionable_only and not actions:
+                continue
+            searchable = " ".join(str(value) for value in (_name(element) or "", element.get("role", ""), element.get("automation_id", "")))
+            if query and query not in searchable.casefold():
+                continue
             candidate_count += 1
+            if candidate_count <= offset:
+                continue
             if len(controls) >= max_controls:
                 continue
-            item = {k: copy.deepcopy(element[k]) for k in ("role", "value", "selected", "enabled", "read_only", "automation_id") if k in element}
+            item = {k: copy.deepcopy(element[k]) for k in ("element_index", "parent_index", "role", "value", "selected", "enabled", "read_only", "automation_id") if k in element}
             if _name(element) is not None:
                 item["name"] = _name(element)
             item["actions"] = [a for a in actions if isinstance(a, str)]
@@ -133,11 +155,14 @@ def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elemen
             controls.append(item)
         inspection.update(status="uia_observation" if controls else "no_accessible_controls",
                           control_count=candidate_count, controls=controls,
-                          controls_omitted=max(0, candidate_count-max_controls),
+                          observed_control_count=all_candidates, offset=offset,
+                          next_offset=offset+len(controls) if offset+len(controls) < candidate_count else None,
+                          controls_omitted=max(0, candidate_count-len(controls)),
+                          filters={"search": search, "within": within, "actionable_only": actionable_only},
                           traversal_may_be_limited=bool(len(elements) >= max_elements or snapshot.get("truncated") or snapshot.get("max_depth_reached") or snapshot.get("max_elements_reached")
                                                        or any(type(e.get("depth")) is int and e["depth"] >= max_depth for e in elements)
                                                        or type(snapshot.get("total_element_count")) is int and snapshot["total_element_count"] > len(elements)),
-                          next_step="관찰된 selector와 완료 조건으로 computer_perform을 사용하세요. 목록은 해당 화면에서 보인 기능이며 앱 전체의 동작 보장이 아닙니다." if controls else
+                          next_step="저장한 요소는 computer_elements로 찾고 computer_use_element로 검증하며 사용하세요. 새 요소는 사용자가 직접 computer_teach_element로 가르칠 수 있습니다. 검색·within·offset으로 목록을 좁힐 수 있으며 번호는 현재 관찰에만 유효합니다. 일반 작업은 관찰된 selector와 완료 조건으로 computer_perform을 사용하세요." if controls else
                                     "이 창에서 UIA 조작 대상을 확인하지 못했습니다. 창 준비 상태를 확인하거나 현재 세션을 끝내고 명시적으로 visual 방식으로 관찰하세요. 자동 입력·방식 전환은 하지 않았습니다.")
     data = {**target, "inspection": inspection}
     for key in ("window_title", "snapshot_id", "computer_use_metrics", "screenshot_width", "screenshot_height", "window_bounds", "capture_coverage", "accessibility_normalization"):

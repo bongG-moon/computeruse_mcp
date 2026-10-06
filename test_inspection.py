@@ -92,6 +92,38 @@ class InspectionTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.inspect(runtime)
         self.assertEqual(runtime.calls, [])
+    def test_complex_form_search_scope_and_paging_keep_global_uniqueness(self):
+        runtime = Runtime([
+            {"element_index": 1, "label": "검색 조건", "role": "Group"},
+            {"element_index": 2, "label": "다른 조건", "role": "Group"},
+            *[{"element_index": 10+i, "parent_index": 1, "label": "조건 " + str(i),
+               "role": "Edit", "actions": ["set_value"]} for i in range(6)],
+            {"element_index": 30, "parent_index": 2, "label": "조건 2", "role": "Edit", "actions": ["set_value"]},
+        ])
+        data = self.inspect(runtime, search="조건", within={"name": "검색 조건"},
+                            actionable_only=True, offset=2, max_controls=2)["structuredContent"]["inspection"]
+        self.assertEqual(data["control_count"], 6)
+        self.assertEqual(data["next_offset"], 4)
+        self.assertEqual([c["element_index"] for c in data["controls"]], [12, 13])
+        self.assertEqual(data["controls"][0]["selector"]["within"], {"name": "검색 조건", "role": "Group"})
+        self.assertEqual(runtime.calls[0][0], "get_window_state")
+        self.assertFalse(runtime.calls[0][1]["include_screenshot"])
+    def test_search_does_not_match_current_input_values_or_guess_duplicate_scope(self):
+        runtime = Runtime([{"element_index": 1, "label": "입력", "role": "Edit", "value": "사내 비공개 검색값"}])
+        self.assertEqual(self.inspect(runtime, search="비공개")["structuredContent"]["inspection"]["controls"], [])
+        runtime = Runtime([{"element_index": i, "label": "같은 영역", "role": "Group"} for i in (1, 2)])
+        with self.assertRaises(OperationError):
+            self.inspect(runtime, within={"name": "같은 영역"})
+    def test_bad_filters_and_visual_filtering_fail_before_observation(self):
+        for options in ({"offset": True}, {"offset": -1}, {"search": "x"*201}, {"actionable_only": 1}, {"within": {"role": "Group"}}):
+            runtime = Runtime()
+            with self.assertRaises(OperationError):
+                self.inspect(runtime, **options)
+            self.assertEqual(runtime.calls, [])
+        runtime = Runtime(mode="visual")
+        with self.assertRaises(OperationError):
+            self.inspect(runtime, search="조회")
+        self.assertEqual(runtime.calls, [])
     def test_mcp_tool_requires_session_and_validates_bounds_before_reading(self):
         from server import ComputerManager, SessionError, MANAGEMENT
         from test_server import config_at

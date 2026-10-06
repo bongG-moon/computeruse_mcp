@@ -1,4 +1,4 @@
-# Computer Use MCP 0.7.1
+# Computer Use MCP 0.8.0
 
 Claude Code 등 MCP를 지원하는 클라이언트에서 **이 PC의 프로그램 화면을 읽고 조작하는 Windows용 도구**입니다. Chrome, 메모장, 설치된 Excel뿐 아니라 사용자가 실행파일을 지정한 다른 프로그램도 등록할 수 있습니다. 실제 화면을 확인해 클릭·입력하고, 요청한 결과까지 확인하는 것을 목표로 합니다.
 
@@ -8,12 +8,12 @@ Claude Code 등 MCP를 지원하는 클라이언트에서 **이 PC의 프로그�
 
 | 파일 | 용도 |
 | --- | --- |
-| [Computer-Use-MCP-0.7.1-with-driver.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.7.1/Computer-Use-MCP-0.7.1-with-driver.zip) | MCP와 Cua Driver 0.28.2를 함께 준비하는 권장 묶음 |
-| [Computer-Use-MCP-0.7.1.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.7.1/Computer-Use-MCP-0.7.1.zip) | Driver를 직접 준비하는 기존 배포본 |
-| [Computer-Use-MCP-0.7.1-source.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.7.1/Computer-Use-MCP-0.7.1-source.zip) | 개발·코드 확인용 원본 소스 |
-| [cua-driver.exe](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.7.1/cua-driver.exe) | 실행파일만 받기. 전체 구성은 Driver 포함 ZIP 사용 |
+| [Computer-Use-MCP-0.8.0-with-driver.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.8.0/Computer-Use-MCP-0.8.0-with-driver.zip) | MCP와 Cua Driver 0.28.2를 함께 준비하는 권장 묶음 |
+| [Computer-Use-MCP-0.8.0.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.8.0/Computer-Use-MCP-0.8.0.zip) | Driver를 직접 준비하는 기존 배포본 |
+| [Computer-Use-MCP-0.8.0-source.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.8.0/Computer-Use-MCP-0.8.0-source.zip) | 개발·코드 확인용 원본 소스 |
+| [cua-driver.exe](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.8.0/cua-driver.exe) | 실행파일만 받기. 전체 구성은 Driver 포함 ZIP 사용 |
 
-[전체 릴리스와 파일 해시](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.7.1) · [SHA256SUMS.txt](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.7.1/SHA256SUMS.txt)
+[전체 릴리스와 파일 해시](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.8.0) · [SHA256SUMS.txt](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.8.0/SHA256SUMS.txt)
 
 GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실행파일과 동봉 Python이 필요한 일반 사용자는 위의 배포 ZIP을 받으세요. 지원 대상은 Windows x86_64이며, 사용할 프로그램과 Claude Code 등 MCP 클라이언트는 이 PC에 설치되어 있어야 합니다.
 
@@ -57,7 +57,27 @@ GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실�
 
 저장 또는 버리기 방침이 불명확하면 임의로 선택하지 않습니다. 저장 내용 확인은 종료 확인과 별도이며, 저장이 목적이면 파일을 다시 열어 내용까지 확인해야 합니다. `computer_end`는 화면 작업 세션을 끝내는 기능이고 앱 종료 확인을 대신하지 않습니다.
 
+## 0.8.0: 직접 화면 요소 가르치기
+
+채팅에서 **“이 프로그램의 신청 화면에서 ‘신청 상태’를 직접 가르쳐줄게. 요소 학습을 시작해줘.”**라고 요청하세요. 해당 프로그램을 화면 작업 대상으로 선택한 뒤, 요소 선택 창이 열리면 실제 입력창·선택 상자·버튼 위에 마우스를 올리고 **F8**을 누릅니다. 업무 버튼을 클릭할 필요는 없습니다. **Esc** 또는 취소 버튼으로 그만둘 수 있습니다.
+
+저장한 뒤에는 **“배운 ‘신청 상태’를 사용해서 신청으로 바꾸고 적용됐는지 확인해줘.”**라고 요청합니다. MCP가 현재 화면에서 같은 요소를 다시 찾아 작업하고 결과를 확인합니다. 화면을 다시 열어 창 번호가 달라져도 저장한 요소를 다시 찾습니다. 이름이 같은 버튼은 고유한 상위 영역으로 구분하고, 화면이 달라지거나 일치 항목이 여러 개면 다시 가르치도록 안내합니다.
+
+이는 LLM 자체를 재학습하는 기능이 아닙니다. 이 PC의 설정 폴더에 요소 이름·화면 분류·사용 설명·찾는 기준을 저장하는 기능입니다. 입력한 값, 화면 이미지, 마우스 좌표, 임시 창 번호는 학습 파일에 저장하지 않습니다. 화면 분류 이름은 정리용이며 현재 화면이 맞다는 증거가 아닙니다. UIA가 요소를 제공하지 않는 그림 화면이나 고유하게 구분할 수 없는 요소는 이 방식으로 학습할 수 없습니다.
+
+**“배운 요소 목록을 보여줘”**, **“조회 버튼을 다시 가르칠게”**, **“저장한 조회 버튼을 지워줘”**라고 관리할 수 있습니다. 수정할 때는 최신 revision으로 해당 항목만 갱신합니다. 검증한 선택 기준은 기존 단계 작업에도 사용할 수 있으며, 요소를 다시 학습한 후 기존 단계 작업의 선택 기준까지 자동 변경하지는 않습니다.
+
+요소가 많은 화면은 검색어·상위 영역·조작 가능한 요소·페이지로 목록을 좁혀 봅니다. 학습 후에는 전체 화면에서 매번 이름을 추측하기보다 저장한 요소를 먼저 사용합니다. 앱 자체의 화면 읽기 속도와 UIA 지원 범위까지 보장하는 기능은 아닙니다.
+
+## 0.8.0: 프로그램 시작 방식 수정
+
+이전에는 프로그램을 MCP 임시 기록 폴더에서 시작했습니다. 이제 EXE가 있는 폴더에서 시작하고, 동봉 Python/Tcl 환경 변수가 업무 프로그램에 전달되지 않도록 정리합니다. 창이 표시됐는지와 요청한 프로세스의 조기 종료를 확인하며, 런처가 종료되고 다른 창이 열린 경우에는 정상 인계로 단정하지 않습니다. 불확실한 실행을 자동 반복하지 않습니다.
+
+`NullReferenceException`이 종료 처리 함수에서 나왔다는 로그만으로 최초 실행 실패 원인을 확정할 수는 없습니다. 이 변경은 작업 폴더·환경 변수 차이를 보완하며, 관리자 실행 여부는 MCP의 현재 권한을 그대로 따릅니다. 해당 운영 프로그램의 실제 정상 실행은 운영 PC에서 다시 확인해야 합니다.
+
 ## 검증 범위와 안내
+
+0.8.0 자동 검사 562개 중 560개 통과, 2개 조건부 제외. 실제 MCP·Driver로 소스와 내장 Python 배포본에서 각각 학습 5개 시나리오를 확인했습니다. 별도의 합성 시험에서 F8 선택·Esc 취소와 업무 입력이 전달되지 않는 점을 확인했고, 선택 도우미를 200% 배율에서 검수했습니다. 아래에는 이전 버전의 검증 범위도 보존했습니다.
 
 0.7.1은 설치 연결 진단을 수정합니다. 0.7.0에서 Job 객체를 만들지 못하면 연결 검사 전에 중단하던 조건을 보완하고, 실제 시작 오류·종료 코드·UAC 취소를 구분합니다. Job을 사용할 수 없어도 읽기 전용 연결과 정상 종료를 따로 확인하며, 종료 확인 실패는 설치 성공으로 처리하지 않습니다. 이 오류 메시지만으로 회사 보안 정책 차단을 단정하지 않습니다.
 
@@ -78,4 +98,4 @@ GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실�
 
 GitHub에서는 HTML이 소스로 보일 수 있습니다. **배포 ZIP을 압축 푼 뒤 README.html 또는 VALIDATION.html을 두 번 누르면 브라우저에서 안내와 보고서를 읽을 수 있습니다.**
 
-Driver는 Git 소스에 넣지 않고 릴리스 파일로 제공합니다. 포함판과 별도 준비판을 함께 유지하며, 실제 환경 시험 후 Driver 포함 배포를 제외할 수 있습니다. 기존 0.7.1 MCP 본체는 그대로 제공됩니다.
+Driver는 Git 소스에 넣지 않고 릴리스 파일로 제공합니다. 포함판과 별도 준비판을 함께 유지하며, 실제 환경 시험 후 Driver 포함 배포를 제외할 수 있습니다. Driver 별도 준비판도 함께 제공합니다.

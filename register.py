@@ -22,6 +22,7 @@ SERVER_NAME = "local-computer-use"
 # Version labels alone are never trusted; a foreign same-name MCP is preserved.
 # This proves these exact distributions, not signed-code security.
 PREVIOUS_MANIFESTS = {
+    "fa9db7c4f1371c014dcb558f2b2fb89732dc31e89957bd9b16bd93370919b8af": "0.7.1",
     "6d0c32b2338ddc185a4cc15cc0d52ea447e5bad1415df6b1a38601828c7bd47d": "0.7.0",
     "1778b37b2ed5fc839dcf0de1a7a11c145f96693269981eb70935f2968dff58a8": "0.6.0",
     "17e2c4cb787c6b54f001b0bbed58c88adb949d1c14f4b4e2b22cd43b82bb8ba9": "0.5.0",
@@ -90,7 +91,7 @@ def make_server_entry(config_path: str | Path) -> dict:
         entry["args"] = ["--config", str(config)]
     elif bundled.is_file() and (APP_DIR / "BUILD-MANIFEST.json").is_file():
         manifest = _read_object(APP_DIR / "BUILD-MANIFEST.json")
-        if manifest.get("product") == "Computer-Use-MCP" and manifest.get("version") in {"0.7.0", "0.7.1"}:
+        if manifest.get("product") == "Computer-Use-MCP" and manifest.get("version") in {"0.7.0", "0.7.1", "0.8.0"}:
             raise RegistrationError("관리자 연결 실행파일이 없습니다. ZIP 전체를 다시 압축 해제해 주세요. 일반 권한 연결로 대체하지 않았습니다.")
     return entry
 
@@ -142,7 +143,7 @@ def _previous_entry(existing) -> dict | None:
         version = PREVIOUS_MANIFESTS.get(hashlib.sha256(manifest_bytes).hexdigest())
         if not version:
             return None
-        if bridge is not None and version != "0.7.0":
+        if bridge is not None and version not in {"0.7.0", "0.7.1"}:
             return None
         checked_folders = set()
         checked_names = set()

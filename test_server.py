@@ -489,6 +489,8 @@ class RuntimeTests(unittest.TestCase):
         calls = []
         class Process:
             pid = 321
+            def poll(self):
+                return None
         runtime = self.create(process_factory=lambda argv, **kw: (calls.append((argv, kw)) or Process()))
         runtime.start()
         with self.assertRaises(SessionError):
@@ -499,6 +501,10 @@ class RuntimeTests(unittest.TestCase):
         self.assertIs(calls[0][1]["shell"], False)
         self.assertEqual(calls[0][1]["stdout"], subprocess.DEVNULL)
         self.assertEqual(calls[0][1]["stderr"], subprocess.DEVNULL)
+        self.assertEqual(Path(calls[0][1]["cwd"]), Path(self.config["programs"][0]["exe"]).parent)
+        self.assertEqual(calls[0][1]["creationflags"], 0)
+        self.assertFalse(output["application_ready_verified"])
+        self.assertFalse(output["automatic_retry"])
         self.assertEqual(runtime.guard.action_count, 1)
 
     def test_manifest_is_bounded_and_contains_only_selected_apps(self):

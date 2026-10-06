@@ -41,15 +41,18 @@ ZIP_NAME = f"Computer-Use-MCP-{VERSION}.zip"
 SOURCE_ZIP_NAME = f"Computer-Use-MCP-{VERSION}-source.zip"
 LAUNCHER_NAME = "Computer Use MCP 설정.exe"
 ADMINISTRATOR_LAUNCHER_NAME = "Computer Use MCP 관리자 연결.exe"
+ELEMENT_PICKER_NAME = "Computer Use MCP 요소 선택.exe"
 APP_FILES = (
     "server.py", "settings.py", "setup.py", "consent.py", "register.py", "README.html", "VALIDATION.html",
     "maintenance.py", "diagnostics.py", "install.py", "programs.py", "INSTALL.md", "vendor/__init__.py", "vendor/guard.py", "vendor/windows.py",
     "session_runtime.py", "configuration_state.py", "operations.py", "workflows.py", "inspection.py", "accessibility_tree.py", "closing.py", "close_actions.py", "privileges.py",
+    "program_launch.py", "learning.py", "learning_picker.py",
     "README.md", "DRIVER-BUNDLE.md", "CUA-DRIVER-LICENSE.md",
 )
 OPTIONAL_APP_FILES = ()
 SOURCE_SUPPORT_FILES = (
     "Launcher.cs", "AdministratorBridge.cs", "build_portable.py", "bundle_driver.py", ".gitignore", "test_consent.py", "test_register.py", "test_administrator.py", "administrator_validation.py",
+    "ElementPicker.cs", "test_program_launch.py", "test_learning.py", "test_learning_picker.py", "test_learning_tools.py", "learning_validation.py",
     "test_maintenance.py", "test_server.py", "test_settings.py", "test_diagnostics.py",
     "test_setup.py", "test_task_store.py", "test_install.py", "test_install_review.py", "test_install_live.py", "test_acceptance_workflows.py", "acceptance_workflows.py", "live_validation.py",
     "test_browser_defaults.py", "test_consent_ui.py", "test_programs.py", "test_setup_programs.py", "fixtures/blank.xlsx",
@@ -178,6 +181,16 @@ def compile_launcher(destination: Path, source_name="Launcher.cs") -> None:
         print(result.stdout.strip())
 
 
+def compile_element_picker(destination: Path) -> None:
+    references = ["System.dll", "System.Core.dll", "System.Drawing.dll", "System.Windows.Forms.dll", "System.Web.Extensions.dll"]
+    references.extend(str(COMPILER.parent / "WPF" / name) for name in ("WindowsBase.dll", "UIAutomationClient.dll", "UIAutomationTypes.dll"))
+    command = [str(COMPILER), "/nologo", "/target:winexe", "/platform:anycpu", "/optimize+", "/codepage:65001",
+               *["/reference:" + ref for ref in references], f"/out:{destination}", str(SOURCE / "ElementPicker.cs")]
+    output = run_hidden(command, cwd=SOURCE)
+    if output.stdout.strip():
+        print(output.stdout.strip())
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -252,6 +265,7 @@ def main() -> int:
     if args.check:
         compile_launcher(staging / LAUNCHER_NAME)
         compile_launcher(staging / ADMINISTRATOR_LAUNCHER_NAME, "AdministratorBridge.cs")
+        compile_element_picker(staging / ELEMENT_PICKER_NAME)
         result = run_hidden([str(python_root / "python.exe"), "-B", "-s", "-c", IMPORT_CHECK], cwd=staging, env=runtime_environment(python_root))
         print(result.stdout.strip())
         print(f"Source check passed. Compiler output retained at: {staging}")
@@ -273,6 +287,7 @@ def main() -> int:
     copy_runtime(python_root, runtime)
     compile_launcher(bundle / LAUNCHER_NAME)
     compile_launcher(bundle / ADMINISTRATOR_LAUNCHER_NAME, "AdministratorBridge.cs")
+    compile_element_picker(bundle / ELEMENT_PICKER_NAME)
     result = run_hidden([str(runtime / "python.exe"), "-B", "-s", "-c", IMPORT_CHECK], cwd=bundle, env=runtime_environment(runtime))
     proof = json.loads(result.stdout)
     if not proof.get("ok"):

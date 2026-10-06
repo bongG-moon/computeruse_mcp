@@ -12,6 +12,7 @@ import uuid
 
 from settings import VERSION
 from closing import ClosureManager
+from program_launch import LaunchObservation, create_application
 from vendor.guard import (Guard, GuardError, DriverTransport, COMMON_TOOLS, MODE_TOOLS,
                           OBSERVATIONS, check_app, utc_now, atomic_json, journal_route)
 
@@ -251,19 +252,24 @@ class SessionRuntime:
                 raise SessionError("승인한 최대 조작 횟수에 도달했습니다.")
             if self.config["approval"] == "each" and not self.confirm("launch", "프로그램 실행 승인", f"{app['name']}\n{executable}"):
                 raise SessionError("사용자가 프로그램 실행을 거절했습니다.")
+            observation = LaunchObservation([executable] + list(app.get("control_exes", [])),
+                lambda: self.guard.call("list_windows", {"on_screen_only": True}),
+                check_active=self.check_active, wait=self.stop_event.wait)
+            observation.capture()
             with self.resource_lock:
                 self.check_active()
-                proc = self.process_factory([executable], cwd=str(self.run_dir), shell=False,
-                                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                proc = create_application(executable, self.process_factory)
                 self.guard.action_count += 1
                 self.guard.observed_targets.clear()
+            result = observation.finish(proc)
+            result.update(program_id=program_id, working_directory=str(Path(executable).parent),
+                          runtime_environment_isolated=True)
             call_id = uuid.uuid4().hex
             self.guard.log("result", request_id=call_id, tool="computer_launch", route="management",
-                           pid=proc.pid, exe=executable, success=True,
-                           summary={"text": "Program launch requested; discover its actual window before acting.", "task_verified": False})
-            return {"program_id": program_id, "requested_pid": proc.pid, "launched": True,
-                    "next": "list_windows로 실제 창의 pid/window_id를 확인한 후 get_window_state를 호출하세요."}
+                           pid=proc.pid, exe=executable, success=result["launch_status"] != "startup_failed",
+                           summary={"launch_status": result["launch_status"], "exit_code": result["exit_code"],
+                                    "window_verified": result["window_verified"], "task_verified": False})
+            return result
 
     def status(self):
         return {"session_id": self.id, "state": self.state, "reason": self.reason, "mode": self.mode,
