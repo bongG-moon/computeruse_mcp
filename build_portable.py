@@ -43,15 +43,17 @@ LAUNCHER_NAME = "Computer Use MCP 설정.exe"
 ADMINISTRATOR_LAUNCHER_NAME = "Computer Use MCP 관리자 연결.exe"
 ELEMENT_PICKER_NAME = "Computer Use MCP 요소 선택.exe"
 PROCESS_EDITOR_NAME = "Computer Use MCP 프로세스 만들기.exe"
+VISUAL_TOOLS_NAME = "Computer Use MCP 이미지 도구.exe"
 APP_FILES = (
     "server.py", "settings.py", "setup.py", "consent.py", "register.py", "README.html", "VALIDATION.html",
     "maintenance.py", "diagnostics.py", "install.py", "programs.py", "INSTALL.md", "vendor/__init__.py", "vendor/guard.py", "vendor/windows.py",
     "session_runtime.py", "configuration_state.py", "operations.py", "workflows.py", "inspection.py", "accessibility_tree.py", "closing.py", "close_actions.py", "privileges.py",
-    "program_launch.py", "learning.py", "learning_picker.py", "teaching_sessions.py", "process_editor.py", "process_steps.py",
+    "program_launch.py", "learning.py", "learning_picker.py", "teaching_sessions.py", "process_editor.py", "process_steps.py", "image_targets.py", "image_steps.py",
     "README.md", "DRIVER-BUNDLE.md", "CUA-DRIVER-LICENSE.md", "PROCESS_GUIDE.html",
 )
 OPTIONAL_APP_FILES = ()
 SOURCE_SUPPORT_FILES = (
+    "VisualTools.cs", "test_image_targets.py", "test_image_steps.py", "test_image_guard.py", "test_visual_native.py", "test_driver_overlay.py", "visual_fixture.py", "visual_validation.py",
     "ProcessEditor.cs", "test_process_editor.py", "test_process_steps.py", "test_checkpoint_capture.py", "test_store_locks.py", "process_validation.py",
     "Launcher.cs", "AdministratorBridge.cs", "build_portable.py", "bundle_driver.py", ".gitignore", "test_consent.py", "test_register.py", "test_administrator.py", "administrator_validation.py",
     "ElementPicker.cs", "test_program_launch.py", "test_learning.py", "test_learning_picker.py", "test_learning_tools.py", "learning_validation.py", "test_teaching_sessions.py", "picker_validation.py",
@@ -209,6 +211,15 @@ def compile_process_editor(destination: Path) -> None:
         print(output.stdout.strip())
 
 
+def compile_visual_tools(destination: Path) -> None:
+    references = ["System.dll", "System.Core.dll", "System.Drawing.dll", "System.Windows.Forms.dll", "System.Web.Extensions.dll"]
+    references.extend(str(COMPILER.parent / "WPF" / name) for name in ("WindowsBase.dll", "UIAutomationClient.dll", "UIAutomationTypes.dll"))
+    output = run_hidden([str(COMPILER), "/nologo", "/target:winexe", "/platform:anycpu", "/optimize+", "/codepage:65001",
+                         *["/reference:" + ref for ref in references], f"/out:{destination}", str(SOURCE / "VisualTools.cs")], cwd=SOURCE)
+    if output.stdout.strip():
+        print(output.stdout.strip())
+
+
 def write_bundle_manifest(bundle: Path) -> None:
     entries = []
     for path in sorted(bundle.rglob("*")):
@@ -277,6 +288,7 @@ def main() -> int:
         compile_launcher(staging / ADMINISTRATOR_LAUNCHER_NAME, "AdministratorBridge.cs")
         compile_element_picker(staging / ELEMENT_PICKER_NAME)
         compile_process_editor(staging / PROCESS_EDITOR_NAME)
+        compile_visual_tools(staging / VISUAL_TOOLS_NAME)
         result = run_hidden([str(python_root / "python.exe"), "-B", "-s", "-c", IMPORT_CHECK], cwd=staging, env=runtime_environment(python_root))
         print(result.stdout.strip())
         print(f"Source check passed. Compiler output retained at: {staging}")
@@ -300,6 +312,7 @@ def main() -> int:
     compile_launcher(bundle / ADMINISTRATOR_LAUNCHER_NAME, "AdministratorBridge.cs")
     compile_element_picker(bundle / ELEMENT_PICKER_NAME)
     compile_process_editor(bundle / PROCESS_EDITOR_NAME)
+    compile_visual_tools(bundle / VISUAL_TOOLS_NAME)
     result = run_hidden([str(runtime / "python.exe"), "-B", "-s", "-c", IMPORT_CHECK], cwd=bundle, env=runtime_environment(runtime))
     proof = json.loads(result.stdout)
     if not proof.get("ok"):
@@ -311,7 +324,7 @@ def main() -> int:
     if not json.loads(launched.stdout).get("ok"):
         raise RuntimeError("Launcher self-test did not return a successful result.")
     run_hidden([str(runtime / "python.exe"), "-B", "-s", "-c",
-        "import server,settings,consent,register,maintenance,diagnostics,install,programs,learning,learning_picker,teaching_sessions,process_editor,process_steps,vendor.guard,vendor.windows; print(\"Application imports passed\")"],
+        "import server,settings,consent,register,maintenance,diagnostics,install,programs,learning,learning_picker,teaching_sessions,process_editor,process_steps,image_targets,image_steps,vendor.guard,vendor.windows; print(\"Application imports passed\")"],
         cwd=bundle, env=runtime_environment(runtime))
     print("Bundled Python, application imports, and launcher checks passed.", flush=True)
     source_zip = write_source_archive(staging, bundle, snapshot, proof)

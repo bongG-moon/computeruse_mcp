@@ -1,5 +1,6 @@
 """Declarative process authoring and native IPC; business programs receive no input."""
 import copy
+import base64
 import gc
 import json
 import os
@@ -8,16 +9,27 @@ import tempfile
 import threading
 import time
 import unittest
+import struct
+import zlib
 from unittest import mock
 
 from operations import OperationError
-from process_editor import ProcessDraft, ProcessEditors
+from process_editor import ProcessDraft, ProcessEditors, task_view
 from server import ComputerManager
 from test_learning import TARGET
 from test_learning_tools import MutableRuntime, FIELD_SELECTOR
 from test_server import config_at
 from test_teaching_sessions import native_choice
 from vendor.guard import atomic_json
+
+
+def image_choice(**extra):
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff)
+    raw = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 8, 8, 8, 2, 0, 0, 0))
+    raw += chunk(b"IDAT", zlib.compress((b"\x00" + bytes(range(24))) * 8)) + chunk(b"IEND", b"")
+    return {**TARGET, "human_confirmed": True, "status": "selected", "template_png": base64.b64encode(raw).decode(),
+            "width": 8, "height": 8, "anchor": {"x": .5, "y": .5}, "capture_window": {"width": 800, "height": 600}, **extra}
 
 
 class DraftTests(unittest.TestCase):
@@ -102,6 +114,104 @@ class DraftTests(unittest.TestCase):
             ProcessDraft([self.program], original)
 
 
+class ImageDraftTests(unittest.TestCase):
+    def setUp(self):
+        DraftTests.setUp(self)
+        self.image = self.draft.remember_image(self.program, image_choice())
+        self.image_base = {**TARGET, "program_id": "editor", "selection_id": self.image["selection_id"]}
+
+    def test_image_selection_requires_human_and_same_window(self):
+        for values in ({"human_confirmed": False}, {"pid": 900}, {"window_id": 900}):
+            with self.subTest(values=values), self.assertRaises(OperationError):
+                self.draft.remember_image(self.program, image_choice(**values))
+
+    def test_image_click_adds_review_and_never_stores_desktop_coordinates(self):
+        self.draft.add({**self.image_base, "action": "click"})
+        self.assertEqual([s["operation"] for s in self.draft.steps], ["image_click", "checkpoint"])
+        self.assertEqual(self.draft.steps[0]["image_target"]["template_png"], image_choice()["template_png"])
+        encoded = json.dumps(self.draft.steps)
+        for forbidden in ('"pid"', '"window_id"', '"selection_id"', '"thumbnail_png"'):
+            self.assertNotIn(forbidden, encoded)
+        self.assertNotIn("template_png", json.dumps(self.draft.summaries()))
+
+    def test_image_wait_has_no_input_or_checkpoint_and_can_be_reordered(self):
+        self.draft.add({**self.image_base, "action": "wait_for_element", "timeout_seconds": 3})
+        self.assertEqual([s["operation"] for s in self.draft.steps], ["wait_for_image"])
+        self.draft.add({**self.image_base, "action": "click"})
+        self.draft.change("move_step", {"index": 2, "direction": -1})
+        self.assertEqual([s["operation"] for s in self.draft.steps], ["image_click", "checkpoint", "wait_for_image"])
+        self.draft.change("remove_step", {"index": 1})
+        self.assertEqual([s["operation"] for s in self.draft.steps], ["wait_for_image"])
+
+    def test_unknown_recorded_input_requires_explicit_resolution_and_leaks_no_typed_keys(self):
+        self.draft.recorded([{**image_choice(), "operation": "manual_entry", "program_id": "editor", "value": "PRIVATE", "keys": ["SECRET"]}])
+        self.assertEqual(self.draft.steps[0]["operation"], "manual_entry")
+        self.assertTrue(self.draft.summaries()[0]["requires_input"])
+        self.assertNotIn("PRIVATE", json.dumps(self.draft.steps)); self.assertNotIn("SECRET", json.dumps(self.draft.steps))
+        with self.assertRaises(OperationError) as caught: self.draft.validate()
+        self.assertEqual(caught.exception.code, "recording_input_required")
+        self.draft.resolve_input({"index": 0, "value": "user typed intended value"})
+        self.draft.validate()
+        self.assertEqual(self.draft.steps[0]["operation"], "image_type_text")
+        self.assertEqual(self.draft.steps[0]["value"], "user typed intended value")
+
+    def test_recording_scope_and_invalid_event_are_atomic(self):
+        before = copy.deepcopy(self.draft.steps)
+        for extra in ({"program_id": "unbound"}, {"operation": "execute"}, {"width": 999}):
+            with self.subTest(extra=extra), self.assertRaises((OperationError, ValueError)):
+                self.draft.recorded([{**image_choice(), "operation": "click", "program_id": "editor", **extra}])
+            self.assertEqual(before, self.draft.steps)
+
+    def test_recording_capacity_includes_each_review_checkpoint(self):
+        event = {**image_choice(), "operation": "click", "program_id": "editor"}
+        self.draft.recorded([event] * 15)
+        self.assertEqual(len(self.draft.steps), 30)
+        with self.assertRaises((OperationError, ValueError)):
+            self.draft.recorded([event])
+        self.assertEqual(len(self.draft.steps), 30)
+
+    def test_unsupported_drag_and_missing_image_remain_reviewable_and_cannot_become_text(self):
+        self.draft.recorded([{**image_choice(), "program_id": "editor", "operation": "manual_entry", "reason": "drag_requires_manual_setup"},
+                             {"program_id": "editor", "operation": "press_key", "key": "ENTER", "reason": "image_capture_required"}])
+        self.assertEqual(len(self.draft.steps), 4)
+        for index in (0, 2):
+            self.assertEqual(self.draft.steps[index]["operation"], "manual_entry")
+            self.assertFalse(self.draft.summaries()[index]["editable_input"])
+            with self.assertRaises(OperationError): self.draft.resolve_input({"index": index, "value": "text"})
+        self.assertNotIn("key", self.draft.steps[2])
+        with self.assertRaises(OperationError): self.draft.validate()
+        self.draft.change("remove_step", {"index": 3})
+        self.assertEqual(len(self.draft.steps), 2)
+
+    def test_task_text_view_redacts_pixels_without_mutating_storage(self):
+        self.draft.add({**self.image_base, "action": "click"})
+        task = {"steps": self.draft.steps}
+        view = task_view(task)
+        self.assertNotIn("template_png", json.dumps(view))
+        self.assertTrue(view["steps"][0]["image_target"]["template_stored_locally"])
+        self.assertIn("template_png", task["steps"][0]["image_target"])
+
+    def test_protected_recording_placeholder_stays_noneditable_without_image(self):
+        self.draft.recorded([{"operation": "manual_entry", "program_id": "editor", "reason": "protected_input", "value": "NEVER_STORE"}])
+        self.assertEqual(self.draft.steps[0]["manual_reason"], "protected_input")
+        self.assertFalse(self.draft.summaries()[0]["editable_input"])
+        self.assertIn("보호된 입력칸", self.draft.summaries()[0]["detail"])
+        self.assertNotIn("NEVER_STORE", json.dumps(self.draft.steps))
+        with self.assertRaises(OperationError): self.draft.resolve_input({"index": 0, "value": "not allowed"})
+
+    def test_retarget_preserves_action_order_and_same_window_review_checkpoint(self):
+        self.draft.add({**self.image_base, "action": "click"})
+        checkpoint = copy.deepcopy(self.draft.steps[1])
+        self.draft.retarget(0, image_choice(anchor={"x": .8, "y": .4}))
+        self.assertEqual([step["operation"] for step in self.draft.steps], ["image_click", "checkpoint"])
+        self.assertEqual(self.draft.steps[0]["image_target"]["anchor"], {"x": .8, "y": .4})
+        self.assertEqual(self.draft.steps[1], checkpoint)
+        original = copy.deepcopy(self.draft.steps)
+        for index, chosen in ((1, image_choice()), (0, image_choice(window_id=88)), (0, image_choice(human_confirmed=False))):
+            with self.subTest(index=index), self.assertRaises(OperationError): self.draft.retarget(index, chosen)
+            self.assertEqual(self.draft.steps, original)
+
+
 class Child:
     pid = 999
     returncode = None
@@ -161,7 +271,7 @@ class EditorIPCTests(unittest.TestCase):
         deadline = time.monotonic()+5
         while time.monotonic()<deadline:
             if self.paths["event"].exists():
-                answer = json.loads(self.paths["event"].read_text(encoding="utf-8"))
+                answer = ProcessEditors._read(self.paths["event"], self.nonce)
                 if answer["seq"] == self.seq: return answer
             time.sleep(.01)
         self.fail("command did not return an event")
@@ -179,12 +289,14 @@ class EditorIPCTests(unittest.TestCase):
         job = self.start()
         self.assertEqual(job["status"], "editing")
         self.assertTrue(job["editor_visible"])
+        self.assertTrue(job["pending"])
         again = self.start()
         self.assertEqual(again["editor_id"], job["editor_id"])
         self.assertEqual(self.spawn_count, 1)
         self.status(job, cancel=True)
         done = self.terminal(job)
         self.assertEqual(done["status"], "cancelled")
+        self.assertFalse(done["pending"])
         self.assertTrue(self.child.terminated)
         self.assertEqual(self.manager.tasks.all(), [])
         self.assertEqual(self.runtime.calls, [])
@@ -420,20 +532,122 @@ class EditorIPCTests(unittest.TestCase):
         self.assertFalse(done["input_dispatched"])
         self.assertEqual(self.runtime.calls, [])
 
-    def test_unsupported_native_projection_does_not_save_or_execute_and_editor_remains_open(self):
+    def test_unsupported_native_projection_offers_image_without_save_or_execution(self):
         self.context(); job = self.start()
         self.runtime.answer["structuredContent"] = {**TARGET, "elements": [], "elements_complete": False,
             "tree_markdown": '- Window "Synthetic rendered screen"\n'}
-        with mock.patch("process_editor._run_helper", return_value=native_choice()):
+        with mock.patch("process_editor._run_helper", return_value=native_choice()), \
+                mock.patch.object(self.editors, "_visual", return_value=image_choice()) as visual:
             answer = self.command("pick_element", {"program_id": "editor", **TARGET, "purpose": "action"})
-        self.assertEqual(answer["status"], "error")
-        self.assertEqual(answer["code"], "picker_controls_not_exposed")
+        self.assertEqual(answer["status"], "ok")
+        self.assertEqual(answer["selection"]["recognition"], "image")
+        self.assertEqual(visual.call_count, 1)
         self.assertEqual(answer["steps"], [])
         self.assertEqual(self.status(job)["status"], "editing")
         self.assertEqual(self.manager.tasks.all(), [])
         self.assertEqual(self.runtime.mutations, [])
         self.assertEqual([name for name, _ in self.runtime.calls], ["get_window_state"])
         self.status(job, cancel=True); self.terminal(job)
+
+    def test_picker_cancel_protection_mismatch_and_cleanup_never_fall_back(self):
+        self.context(); job = self.start()
+        for code in ("picker_cancelled", "protected_element", "target_mismatch", "picker_not_visible", "picker_read_timeout"):
+            with self.subTest(code=code), mock.patch("process_editor._run_helper", side_effect=OperationError("blocked", code)), \
+                    mock.patch.object(self.editors, "_visual") as visual:
+                answer = self.command("pick_element", {"program_id": "editor", **TARGET, "purpose": "action"})
+                self.assertEqual(answer["status"], "error"); self.assertEqual(answer["code"], code)
+                visual.assert_not_called()
+        self.status(job, cancel=True); self.terminal(job)
+
+    def test_selected_but_unmatched_falls_back_once_to_visible_image_picker(self):
+        self.context(); job = self.start()
+        with mock.patch("process_editor._run_helper", side_effect=OperationError("unmatched", "picker_not_found")), \
+                mock.patch.object(self.editors, "_visual", return_value=image_choice()) as visual:
+            answer = self.command("pick_element", {"program_id": "editor", **TARGET, "purpose": "action"})
+        self.assertEqual(answer["status"], "ok"); self.assertEqual(answer["selection"]["recognition"], "image")
+        self.assertEqual(visual.call_count, 1); self.assertEqual(self.runtime.mutations, [])
+        self.assertNotIn("thumbnail_png", json.dumps(self.status(job)))
+        self.status(job, cancel=True); self.terminal(job)
+
+    def test_recording_is_reviewable_not_saved_and_unknown_input_blocks_save(self):
+        self.context(); job = self.start()
+        event = {**image_choice(), "operation": "manual_entry", "program_id": "editor"}
+        with mock.patch.object(self.editors, "_visual", return_value={"events": [event]}) as visual:
+            recorded = self.command("record", {})
+        self.assertEqual(recorded["status"], "ok"); self.assertTrue(recorded["steps"][0]["requires_input"])
+        self.assertEqual(visual.call_args.args[2]["max_events"], 15)
+        self.assertEqual(self.manager.tasks.all(), [])
+        rejected = self.command("save", {"name": "recorded", "description": ""})
+        self.assertEqual(rejected["code"], "recording_input_required")
+        resolved = self.command("resolve_input", {"index": 0, "value": "intended"})
+        self.assertEqual(resolved["status"], "ok")
+        saved = self.command("save", {"name": "recorded", "description": ""})
+        self.assertEqual(saved["status"], "ok")
+        value = self.manager.call("computer_get_task", {"id": saved["saved_task"]["id"]})
+        self.assertNotIn("template_png", json.dumps(value))
+        self.assertEqual(self.runtime.mutations, [])
+        atomic_json(self.paths["response"], {"nonce": self.nonce, "status": "saved"})
+        self.terminal(job)
+
+    def test_step_thumbnail_is_only_returned_to_native_preview_not_mcp_status(self):
+        self.context(); job = self.start()
+        with mock.patch.object(self.editors, "_visual", return_value=image_choice()):
+            picked = self.command("pick_image", {"program_id": "editor", **TARGET, "purpose": "action"})
+        self.command("add_step", {"program_id": "editor", **TARGET, "action": "click", "selection_id": picked["selection"]["selection_id"]})
+        preview = self.command("preview_step", {"index": 0})
+        self.assertEqual(preview["preview"]["thumbnail_png"], image_choice()["template_png"])
+        self.assertNotIn("steps", preview)
+        self.assertNotIn(image_choice()["template_png"], json.dumps(self.status(job)))
+        self.assertEqual(self.runtime.mutations, [])
+        self.status(job, cancel=True); self.terminal(job)
+
+    def visual_spawn(self, child, *, nonce_override=None, ready_pid=None, confirmed=True):
+        def spawn(args, **kwargs):
+            self.assertIn(args[1], {"--pick", "--record"})
+            request = json.loads(Path(args[2]).read_text(encoding="utf-8"))
+            response = Path(args[3])
+            atomic_json(Path(str(response) + ".ready.json"), {"nonce": request["nonce"], "status": "ready",
+                "helper_pid": child.pid if ready_pid is None else ready_pid, "helper_window_id": 9998})
+            atomic_json(response, {**image_choice(), "nonce": nonce_override or request["nonce"], "human_confirmed": confirmed})
+            return child
+        return spawn
+
+    def test_visual_wrapper_validates_nonce_ready_and_confirmation_and_cleans_owned_files(self):
+        self.context(); answer = self.start(); job = self.editors.jobs[answer["editor_id"]]
+        for override, expected in (({}, None), ({"nonce_override": "foreign"}, "editor_invalid_response"),
+                ({"ready_pid": 99901}, "visual_helper_not_visible"), ({"confirmed": False}, "visual_invalid_response")):
+            with self.subTest(override=override):
+                child = Child(); child.pid = 888
+                with mock.patch("process_editor.subprocess.Popen", side_effect=self.visual_spawn(child, **override)):
+                    if expected:
+                        with self.assertRaises(OperationError) as caught:
+                            self.editors._visual(job, "pick", TARGET, 30)
+                        self.assertEqual(caught.exception.code, expected)
+                    else:
+                        value = self.editors._visual(job, "pick", TARGET, 30)
+                        self.assertTrue(value["human_confirmed"])
+                self.assertTrue(child.terminated)
+                self.assertEqual(list((self.runtime.run_dir / "visual").iterdir()), [])
+        self.status(answer, cancel=True); self.terminal(answer)
+
+    def test_visual_ready_can_reappear_after_capture_without_accepting_invisible_window(self):
+        self.context(); answer = self.start(); job = self.editors.jobs[answer["editor_id"]]
+        child = Child(); child.pid = 888; exchanged = {}; checks = []
+        def spawn(args, **kwargs):
+            request = json.loads(Path(args[2]).read_text(encoding="utf-8"))
+            exchanged.update(nonce=request["nonce"], response=Path(args[3]))
+            atomic_json(Path(args[3]+".ready.json"), {"nonce": request["nonce"], "status": "ready", "helper_pid": child.pid, "helper_window_id": 9998})
+            return child
+        def visible(pid, hwnd):
+            checks.append((pid, hwnd))
+            if len(checks) == 1: return False
+            atomic_json(exchanged["response"], {**image_choice(), "nonce": exchanged["nonce"]})
+            return True
+        with mock.patch("process_editor.subprocess.Popen", side_effect=spawn), mock.patch("process_editor._helper_visible", side_effect=visible):
+            result = self.editors._visual(job, "pick", TARGET, 30)
+        self.assertGreaterEqual(len(checks), 2)
+        self.assertTrue(result["human_confirmed"]); self.assertTrue(child.terminated)
+        self.status(answer, cancel=True); self.terminal(answer)
 
     def test_cancel_during_accepted_store_write_is_responsive_and_reports_saved_result(self):
         self.context(); job = self.start()

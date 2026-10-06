@@ -38,6 +38,11 @@ class BackgroundShortcutUnavailable(GuardError):
     pass
 
 
+class ProtectedImageInput(GuardError):
+    """A focused native Edit explicitly declares itself a password field."""
+    code = "image_protected_input"
+
+
 KEY_ALIASES = {alias: canonical for canonical, aliases in {
     "ctrl": {"ctrl", "control", "lctrl", "rctrl", "leftctrl", "rightctrl", "leftcontrol", "rightcontrol", "control_l", "control_r"},
     "shift": {"shift", "lshift", "rshift", "leftshift", "rightshift", "shift_l", "shift_r"},
@@ -368,6 +373,75 @@ def windows_checkpoint_ready(window_id):
     return int(user.GetForegroundWindow() or 0) == window_id and bool(user.IsWindowVisible(hwnd)) and not bool(user.IsIconic(hwnd))
 
 
+def windows_image_geometry(window_id):
+    """Physical rect and DPI awareness, for screenshot-to-input consistency."""
+    if os.name != "nt":
+        raise GuardError("Image coordinates require Windows.")
+    user = ctypes.WinDLL("user32", use_last_error=True)
+    user.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    user.GetWindowRect.restype = wintypes.BOOL
+    user.GetWindowDpiAwarenessContext.argtypes = [wintypes.HWND]
+    user.GetWindowDpiAwarenessContext.restype = ctypes.c_void_p
+    user.GetAwarenessFromDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+    user.GetAwarenessFromDpiAwarenessContext.restype = ctypes.c_int
+    user.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+    user.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+    previous = user.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
+    try:
+        rect = wintypes.RECT()
+        if not user.GetWindowRect(window_id, ctypes.byref(rect)):
+            raise GuardError("Image target window no longer exists.")
+        awareness = user.GetAwarenessFromDpiAwarenessContext(user.GetWindowDpiAwarenessContext(window_id))
+        return (rect.left, rect.top, rect.right, rect.bottom, awareness)
+    finally:
+        if previous:
+            user.SetThreadDpiAwarenessContext(previous)
+
+
+def native_edit_password(class_name, style):
+    """Recognize only known native Edit classes; custom fields stay unknown."""
+    name = class_name.lower()
+    return (name == "edit" or name.startswith("windowsforms10.edit.")) and bool(style & 0x0020)  # ES_PASSWORD
+
+
+def windows_image_focus(target):
+    """Read the exact focused native child without input or clipboard access."""
+    if os.name != "nt":
+        raise GuardError("Image keyboard focus requires Windows.")
+    class GUIThreadInfo(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD),
+                    ("hwndActive", wintypes.HWND), ("hwndFocus", wintypes.HWND),
+                    ("hwndCapture", wintypes.HWND), ("hwndMenuOwner", wintypes.HWND),
+                    ("hwndMoveSize", wintypes.HWND), ("hwndCaret", wintypes.HWND),
+                    ("rcCaret", wintypes.RECT)]
+    user = ctypes.WinDLL("user32", use_last_error=True)
+    user.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user.GetGUIThreadInfo.argtypes = [wintypes.DWORD, ctypes.POINTER(GUIThreadInfo)]
+    user.GetGUIThreadInfo.restype = wintypes.BOOL
+    user.GetAncestor.argtypes, user.GetAncestor.restype = [wintypes.HWND, wintypes.UINT], wintypes.HWND
+    owner, info = wintypes.DWORD(), GUIThreadInfo()
+    info.cbSize = ctypes.sizeof(info)
+    thread = user.GetWindowThreadProcessId(target["window_id"], ctypes.byref(owner))
+    if not thread or owner.value != target["pid"] or not user.GetGUIThreadInfo(thread, ctypes.byref(info)):
+        raise GuardError("Cannot confirm image keyboard focus.")
+    focus = int(info.hwndFocus or 0)
+    if not focus or int(user.GetAncestor(focus, 2) or 0) != target["window_id"] or windows_window_pid(focus) != target["pid"]:
+        raise GuardError("Image keyboard focus is outside the approved window.")
+    user.GetClassNameW.argtypes, user.GetClassNameW.restype = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int], ctypes.c_int
+    user.GetWindowLongW.argtypes, user.GetWindowLongW.restype = [wintypes.HWND, ctypes.c_int], wintypes.LONG
+    class_name = ctypes.create_unicode_buffer(256)
+    if not user.GetClassNameW(focus, class_name, len(class_name)):
+        raise GuardError("Cannot inspect the focused image input class.")
+    ctypes.set_last_error(0)
+    style = user.GetWindowLongW(focus, -16)  # GWL_STYLE is always a 32-bit value.
+    if not style and ctypes.get_last_error():
+        raise GuardError("Cannot inspect the focused image input style.")
+    if native_edit_password(class_name.value, style):
+        raise ProtectedImageInput("비밀번호 입력칸이 선택되어 글자와 키 전송을 중지했습니다. 일반 입력칸을 다시 선택하세요.")
+    return focus
+
+
 def _allowed_pid(pid, policy, resolver):
     if type(pid) is not int or pid <= 0:
         raise GuardError("An explicit positive pid is required.")
@@ -505,10 +579,62 @@ def journal_route(name, args, mode):
     return "keyboard"
 
 
+def driver_evidence_text(result):
+    """Exclude our recovery advice when classifying the Driver's actual reply."""
+    texts = []
+    for item in result.get("content", []):
+        if not isinstance(item, dict) or item.get("type") != "text":
+            continue
+        text = str(item.get("text", ""))
+        try:
+            payload = json.loads(text)
+        except (ValueError, TypeError):
+            payload = None
+        if isinstance(payload, dict) and set(payload) == {"computer_use_guidance"}:
+            continue
+        texts.append(text)
+    return "\n".join(texts)
+
+
+def action_delivery_failed(result):
+    """A normal JSON-RPC response may still explicitly refuse an action.
+
+    `unverifiable` alone is the real Driver's normal successful SendInput
+    response: it requires a later checkpoint, not an automatic input retry.
+    Only explicit failure/no-op/partial-delivery evidence stops this pipeline.
+    """
+    if result.get("isError"):
+        return True
+    sources = [result.get("structuredContent", {})]
+    for item in result.get("content", []):
+        if isinstance(item, dict) and item.get("type") == "text":
+            try:
+                sources.append(json.loads(item.get("text", "")))
+            except (ValueError, TypeError):
+                pass
+    for evidence in sources:
+        if not isinstance(evidence, dict):
+            continue
+        if (evidence.get("success") is False or evidence.get("input_sent") is False
+                or evidence.get("refusal") not in (None, False, "")
+                or evidence.get("effect") in ("refused", "partial", "suspected_noop", "not_applied", "no_effect")
+                or evidence.get("status") in ("failed", "error", "refused")
+                or evidence.get("code") in ("background_unavailable", "delivery_failed", "permission_required")
+                or evidence.get("error_code") in ("background_unavailable", "delivery_failed", "permission_required")):
+            return True
+        escalation = evidence.get("escalation")
+        if isinstance(escalation, dict) and escalation.get("reason") in (
+                "route_unavailable", "delivery_failed", "suspected_noop", "permission_required", "background_unavailable"):
+            return True
+        delivery = evidence.get("delivery")
+        if isinstance(delivery, dict) and delivery.get("delivered_count") == 0:
+            return True
+    return False
+
+
 def result_summary(result):
     """Bounded, image-free evidence; driver execution is not task verification."""
-    text = "\n".join(c.get("text", "") for c in result.get("content", [])
-                     if isinstance(c, dict) and c.get("type") == "text")
+    text = driver_evidence_text(result)
     summary = {"text": str(redact_images(text))[:4000], "task_verified": False,
                "image_count": sum(c.get("type") == "image" for c in result.get("content", []) if isinstance(c, dict))}
     structured = result.get("structuredContent", {})
@@ -577,11 +703,14 @@ def metadata_event(kind, fields):
                 value = source.get(key)
                 if isinstance(value, str) and value.lower() in {
                     "confirmed", "unconfirmed", "unverifiable", "unknown", "no_effect", "applied", "not_applied",
-                    "success", "failed", "error", "refused", "delivered", "background", "foreground",
+                    "success", "failed", "error", "refused", "partial", "suspected_noop", "delivered", "background", "foreground",
                     "uia", "win32", "postmessage", "sendinput", "keyboard", "visual", "observation"}:
                     summary[key] = value.lower()
             if fields.get("success") is False or source.get("effect") in {"unverifiable", "unconfirmed", "unknown"}:
                 summary["diagnostic_code"] = diagnostic_code(source)
+                if (fields.get("success") is not False and summary["diagnostic_code"] == "request_failed"
+                        and source.get("effect") in {"unverifiable", "unconfirmed", "unknown"}):
+                    summary["diagnostic_code"] = "effect_unconfirmed"
             if isinstance(source.get("escalation"), dict):
                 escalation = source["escalation"]
                 summary["escalation"] = {key: value for key, value in escalation.items()
@@ -598,10 +727,12 @@ def action_guidance(result, name):
     if name in OBSERVATIONS and not result.get("isError"):
         return result
     result = copy.deepcopy(result)
+    if name not in OBSERVATIONS and action_delivery_failed(result):
+        result["isError"] = True
     structured = result.get("structuredContent")
     if not isinstance(structured, dict):
         structured = {}
-    texts = "\n".join(str(item.get("text", "")) for item in result.get("content", []) if isinstance(item, dict) and item.get("type") == "text")
+    texts = driver_evidence_text(result)
     guidance = {"task_verified": False,
                 "next_step": "같은 창을 get_window_state로 다시 관찰하고 요청한 결과가 실제로 나타났는지 확인하세요. 전달 성공만으로 작업 완료를 판단하지 마세요."}
     if result.get("isError"):
@@ -778,7 +909,11 @@ class DriverTransport:
             env.update(policy.get("driver_env", {}))
             env.update({"CUA_DRIVER_RS_TELEMETRY_ENABLED": "false", "CUA_DRIVER_RS_UPDATE_CHECK": "false",
                         "DO_NOT_TRACK": "1", "CUA_TELEMETRY": "0"})
-            child = process_factory([policy["driver"], "mcp", "--direct"], stdin=subprocess.PIPE,
+            # This direct child owns its runtime. Its full-desktop transparent
+            # cursor overlay otherwise contaminates native picking/recording
+            # occlusion checks. Disable only this child's overlay, keeping all
+            # ordinary window-occlusion checks and tool permissions unchanged.
+            child = process_factory([policy["driver"], "mcp", "--direct", "--no-overlay"], stdin=subprocess.PIPE,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
                                     errors="replace", bufsize=1, env=env,
                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -884,7 +1019,8 @@ class DriverTransport:
 
 class Guard:
     def __init__(self, policy, transport=None, process_resolver=windows_process_exe,
-                 window_resolver=windows_window_pid, discovery_provider=None, checkpoint_ready_resolver=None):
+                 window_resolver=windows_window_pid, discovery_provider=None, checkpoint_ready_resolver=None,
+                 image_geometry_resolver=None, image_focus_resolver=None):
         self.policy = validate_policy(policy)
         self.run_dir = Path(policy["run_dir"])
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -893,6 +1029,8 @@ class Guard:
         self.window_resolver = window_resolver
         self.discovery_provider = discovery_provider or discover_allowed_windows
         self.checkpoint_ready_resolver = checkpoint_ready_resolver or windows_checkpoint_ready
+        self.image_geometry_resolver = image_geometry_resolver or windows_image_geometry
+        self.image_focus_resolver = image_focus_resolver or windows_image_focus
         self.action_count = 0
         self.observed_targets = set()
 
@@ -1054,6 +1192,149 @@ class Guard:
                      success=False, summary=str(error), **metrics)
             return result
         finally:
+            self.observed_targets.clear()
+
+    def image_action(self, step, target, matcher, check_active):
+        """Private saved-image entry; never grants arbitrary coordinates to UIA callers.
+
+        The matcher receives only the current Driver PNG. A match is used once
+        against the identical live window geometry; no old location is retained.
+        """
+        from image_steps import validate_image_step
+        from image_targets import png_dimensions
+        from operations import OperationError
+        step = validate_image_step(step)
+        before = self.action_count
+        visual = None
+        expected_focus = None
+        self.observed_targets.clear()
+        def result(code, message, *, verified=False, deferred=False):
+            return {"operation": step["operation"], "status": "verified" if verified else "needs_review",
+                    "task_verified": verified, "input_dispatched": self.action_count > before,
+                    "verification_deferred": deferred,
+                    "diagnostic": {"code": code, "message": message, "automatic_replay": False}}
+        try:
+            check_active()
+            if (not isinstance(target, dict) or set(target) != {"pid", "window_id"}
+                    or any(type(v) is not int or v < 1 for v in target.values())):
+                raise OperationError("이미지를 찾을 정확한 현재 창이 필요합니다.", "invalid_target")
+            policy = copy.deepcopy(self.policy)
+            policy.update(mode="visual", log_detail="metadata")
+            validate_arguments("get_window_state", target, policy, self.process_resolver, self.window_resolver)
+            executable = _allowed_pid(target["pid"], self.policy, self.process_resolver)
+            geometry = self.image_geometry_resolver(target["window_id"])
+            if not isinstance(geometry, tuple) or len(geometry) != 5 or geometry[4] not in {1, 2}:
+                raise OperationError("이 프로그램의 DPI 비인식 화면은 Driver 캡처와 클릭 좌표가 어긋날 수 있어 이미지 입력을 중지했습니다.", "image_dpi_unsupported")
+            def ready():
+                check_active()
+                self.check_stop()
+                if self.checkpoint_ready_resolver(target["window_id"]) is not True:
+                    raise OperationError("이미지 작업 대상 창을 최소화하지 않은 상태로 맨 앞으로 가져오세요.", "image_requires_foreground")
+                if (self.window_resolver(target["window_id"]) != target["pid"]
+                        or _allowed_pid(target["pid"], self.policy, self.process_resolver) != executable
+                        or self.image_geometry_resolver(target["window_id"]) != geometry):
+                    raise OperationError("이미지를 읽은 뒤 창의 위치·크기·소유 프로그램이 달라졌습니다. 다시 관찰해야 합니다.", "image_target_changed")
+                if expected_focus is not None and self.image_focus_resolver(target) != expected_focus:
+                    raise OperationError("입력 대상의 포커스가 달라졌습니다. 후속 키와 글자는 보내지 않았습니다.", "image_focus_changed")
+            ready()
+            visual = Guard(policy, transport=self.transport, process_resolver=self.process_resolver,
+                           window_resolver=self.window_resolver, discovery_provider=self.discovery_provider,
+                           checkpoint_ready_resolver=self.checkpoint_ready_resolver,
+                           image_geometry_resolver=self.image_geometry_resolver, image_focus_resolver=self.image_focus_resolver)
+            visual.action_count = self.action_count
+            def approve(name, args, call_id):
+                self.approve(name, args, call_id)
+                ready()  # Human approval may have changed the foreground/geometry.
+            visual.approve = approve
+            def observe_image():
+                ready()
+                answer = visual.call("get_window_state", target)
+                ready()
+                images = [c for c in answer.get("content", []) if isinstance(c, dict) and c.get("type") == "image"]
+                if answer.get("isError") or len(images) != 1 or images[0].get("mimeType") != "image/png":
+                    raise OperationError("현재 창의 PNG 화면을 읽지 못했습니다.", "image_capture_failed")
+                png = images[0].get("data")
+                width, height = png_dimensions(png)
+                metadata = answer.get("structuredContent", {})
+                if (any(metadata.get(k) != v for k, v in target.items())
+                        or metadata.get("screenshot_width") != width or metadata.get("screenshot_height") != height):
+                    raise OperationError("Driver 캡처의 대상 또는 실제 이미지 크기가 일치하지 않습니다.", "image_coordinate_mismatch")
+                return png, width, height
+            def locate():
+                png, width, height = observe_image()
+                matched = matcher(step["image_target"], png)
+                ready()
+                if matched.get("status") != "matched":
+                    code = "image_ambiguous" if matched.get("status") == "ambiguous" else "image_not_found"
+                    raise OperationError("같은 이미지가 여러 곳에 있습니다. 주변의 구별되는 내용까지 다시 선택하세요." if code == "image_ambiguous" else "현재 화면에서 저장한 이미지를 찾지 못했습니다.", code)
+                if (matched.get("screenshot") != {"width": width, "height": height}
+                        or any(type(matched.get(k)) is not int for k in ("x", "y"))
+                        or not 0 <= matched["x"] < width or not 0 <= matched["y"] < height):
+                    raise OperationError("이미지 비교 위치가 현재 캡처 범위를 벗어났습니다.", "image_coordinate_mismatch")
+                return {"x": matched["x"], "y": matched["y"]}
+            point = locate()
+            if step["operation"] == "wait_for_image":
+                return result("image_appeared", "현재 창에서 저장한 이미지를 하나로 확인했습니다.", verified=True)
+            operation = step["operation"][6:]
+            def dispatch(name, args, *, require_same_window_after=True):
+                ready()
+                try:
+                    answer = visual.call(name, {**target, "delivery_mode": "foreground", **args})
+                finally:
+                    self.action_count = visual.action_count
+                if answer.get("isError"):
+                    raise OperationError("이미지 대상의 입력 전달을 확인하지 못했습니다. 같은 동작을 반복하지 않습니다.", "image_input_unconfirmed")
+                if require_same_window_after:
+                    ready()
+            if operation in {"type_text", "press_key", "hotkey"}:
+                dispatch("click", point)
+                expected_focus = self.image_focus_resolver(target)
+                if type(expected_focus) is not int or expected_focus < 1:
+                    raise OperationError("입력칸의 포커스를 확인하지 못했습니다.", "image_focus_changed")
+                # Focus can legitimately change the selection highlight/caret
+                # and therefore the template pixels. Refresh the image while
+                # retaining the exact focused child and unchanged target. The
+                # pre-click match already established the input location; no
+                # second match or click is allowed to undo that focus/selection.
+                observe_image()
+            # Driver x/y forms perform their own focus click. Once the explicit
+            # click above established focus, omit x/y for key/text dispatches so
+            # a later Ctrl+A selection is not accidentally cleared by a re-click.
+            args = {} if operation in {"type_text", "press_key", "hotkey"} else dict(point)
+            if operation == "type_text":
+                if step.get("replace_all", False):
+                    dispatch("hotkey", {"keys": ["CTRL", "A"]})
+                    # Refresh the consumed observation, retaining the exact
+                    # focused native child. Selection highlight can legitimately
+                    # change pixels; no re-click or re-match follows Ctrl+A.
+                    observe_image()
+                    if not step["value"]:
+                        operation = "press_key"
+                        args["key"] = "DELETE"
+                    else:
+                        args["text"] = step["value"]
+                else:
+                    args["text"] = step["value"]
+            elif operation == "press_key":
+                args["key"] = step["key"]
+            elif operation == "hotkey":
+                args["keys"] = step["keys"]
+            elif operation == "scroll":
+                args.update(direction=step["direction"], amount=step["amount"])
+            # A successfully delivered final input can legitimately open a new
+            # window, move/close the target, or change the foreground. Those are
+            # possible effects, not a reason to discard the delivery record and
+            # strand this step as an uncertain input. The mandatory following
+            # checkpoint still requires a freshly bound, visible approved window.
+            # The intermediate focus click above retains its post-input ready(),
+            # exact focused-child check and fresh image before text/key dispatch.
+            dispatch(operation, args, require_same_window_after=False)
+            return result("image_input_awaiting_review", "이미지 위치로 입력을 한 번 전달했습니다. 다음 화면 확인 단계에서 실제 결과를 확인해야 합니다.", deferred=True)
+        except (GuardError, OperationError, OSError, ValueError) as error:
+            return result(getattr(error, "code", "image_guard_failed"), str(error))
+        finally:
+            if visual is not None:
+                self.action_count = visual.action_count
             self.observed_targets.clear()
 
     def call(self, name, arguments):

@@ -3,12 +3,21 @@ release/
 __pycache__/
 *.pyc
 
+
 .computer-use/
+
 .env
+
 .env.*
+
 driver/
+
 dist/
+
 *.exe
+
 *.dll
+
 *.node
+
 *.zip

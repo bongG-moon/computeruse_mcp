@@ -13,6 +13,7 @@ import uuid
 
 from vendor.guard import atomic_json, check_app, utc_now
 from process_steps import PROCESS_OPERATIONS, execute_process_step, validate_process_step
+from image_steps import IMAGE_OPERATIONS, IMAGE_MUTATIONS, execute_image_step, validate_image_step
 
 
 class WorkflowError(ValueError):
@@ -37,6 +38,8 @@ def validate_workflow_step(step):
     from operations import validate_step
     operation = operation_step(step)
     kind = operation.get("operation")
+    if isinstance(kind, str) and kind in IMAGE_OPERATIONS:
+        return validate_image_step(operation)
     return validate_process_step(operation) if isinstance(kind, str) and kind in PROCESS_OPERATIONS else validate_step(operation)
 
 
@@ -61,13 +64,17 @@ def validate_recipe(steps, variables, program_ids):
             raise WorkflowError("입력 변수의 설명과 기본값은 4,000자 이하 문자열이어야 합니다.")
     if not isinstance(steps, list) or not 1 <= len(steps) <= MAX_STEPS:
         raise WorkflowError("반복 작업은 1~30단계로 지정하세요.")
-    for step in steps:
+    for index, step in enumerate(steps):
         if not isinstance(step, dict) or step.get("program_id") not in program_ids:
             raise WorkflowError("각 단계에는 작업에 등록된 program_id가 필요합니다.")
         ref = step.get("window_ref", "main")
         if not isinstance(ref, str) or not WINDOW_REF.fullmatch(ref):
             raise WorkflowError("window_ref는 영문자로 시작하는 1~64자 창 이름이어야 합니다.")
         validate_workflow_step(step)
+        if step["operation"] in IMAGE_MUTATIONS:
+            if (index+1 >= len(steps) or not isinstance(steps[index+1], dict) or steps[index+1].get("operation") != "checkpoint"
+                    or target_key(steps[index+1]) != target_key(step)):
+                raise WorkflowError("이미지 입력 바로 다음에는 같은 프로그램/창의 화면 확인 단계가 필요합니다.")
         # Templates may only substitute strings, never keys or the tool/program identity.
         if "${" in step["program_id"] or "${" in step.get("operation", "") or "${" in ref:
             raise WorkflowError("프로그램이나 동작 이름은 입력 변수로 바꿀 수 없습니다.")
@@ -322,6 +329,12 @@ class WorkflowRunner:
                 atomic_json(path, record)
             def check_step(index):
                 item = steps[index]
+                if item["operation"] in IMAGE_MUTATIONS:
+                    return {"task_verified": False, "input_dispatched": False,
+                            "diagnostic": {"code": "image_action_uncertain", "automatic_replay": False,
+                                           "message": "중단된 이미지 입력의 적용 여부를 자동 판단할 수 없습니다. 입력을 재실행하지 않았습니다."}}
+                if item["operation"] == "wait_for_image":
+                    return execute_image_step(runtime, {**operation_step(item), "timeout_ms": 0}, resolve(item))
                 if item["operation"] in {"delay", "checkpoint"}:
                     return {"task_verified": True, "input_dispatched": False}
                 if item["operation"] == "wait_for_element":
@@ -329,6 +342,10 @@ class WorkflowRunner:
                 return engine.execute(verification_step(operation_step(item)), resolve(item), delivery_mode=delivery_mode)
             def check_prior(index):
                 for candidate in range(index-1, -1, -1):
+                    # A successfully delivered image mutation intentionally
+                    # proceeds to its mandatory human screenshot checkpoint.
+                    if steps[candidate]["operation"] in IMAGE_MUTATIONS:
+                        return {"task_verified": True, "input_dispatched": False, "verification_deferred": True}
                     if steps[candidate]["operation"] not in {"delay", "checkpoint"}:
                         return check_step(candidate)
                 runtime.check_active()
@@ -357,7 +374,7 @@ class WorkflowRunner:
                     if pending is not None:
                         if type(pending) is not int or pending != record["completed_steps"] or pending >= len(steps):
                             raise WorkflowError("실행 기록의 진행 지점이 올바르지 않습니다.")
-                        special = steps[pending]["operation"] in PROCESS_OPERATIONS
+                        special = steps[pending]["operation"] in PROCESS_OPERATIONS | {"wait_for_image"}
                         latest = check_prior(pending) if special else check_step(pending)
                         if latest.get("task_verified") is not True:
                             save("needs_review")
@@ -386,12 +403,16 @@ class WorkflowRunner:
                     if item["operation"] == "checkpoint":
                         stage = "screenshot_checkpoint"
                         return capture_checkpoint(index, target)
-                    if item["operation"] in PROCESS_OPERATIONS:
+                    if item["operation"] in IMAGE_OPERATIONS:
+                        latest = execute_image_step(runtime, operation_step(item), target)
+                        engine = Operations(runtime)
+                    elif item["operation"] in PROCESS_OPERATIONS:
                         latest = execute_process_step(runtime, operation_step(item), target)
                         engine = Operations(runtime)  # Never reuse a pre-wait observation for later input.
                     else:
                         latest = engine.execute(operation_step(item), target, delivery_mode=delivery_mode, reuse_verified=True)
-                    if latest.get("task_verified") is not True:
+                    if latest.get("task_verified") is not True and not (item["operation"] in IMAGE_MUTATIONS
+                            and latest.get("verification_deferred") is True and latest.get("input_dispatched") is True):
                         save("needs_review")
                         return {**record, "last_result": latest, "next_step": "현재 화면을 확인하세요. 같은 입력은 자동 반복하지 않습니다. 이어가기는 먼저 미확인 단계의 결과를 다시 검사합니다."}
                     record["completed_steps"] = index + 1

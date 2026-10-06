@@ -123,18 +123,19 @@ internal static class ProcessEditor
         readonly Timer timer = new Timer();
         readonly Color ink = Color.FromArgb(24, 43, 72), blue = Color.FromArgb(37, 99, 235), muted = Color.FromArgb(92, 108, 132);
         readonly ComboBox program = new ComboBox(), action = new ComboBox(), expectProperty = new ComboBox(), expectBoolean = new ComboBox();
-        readonly Label selected = new Label(), expectSelected = new Label(), status = new Label(), valueCaption = new Label(), timeCaption = new Label(), actionHelp = new Label();
+        readonly Label selected = new Label(), expectSelected = new Label(), status = new Label(), valueCaption = new Label(), timeCaption = new Label(), timeUnit = new Label(), actionHelp = new Label();
         readonly TextBox value = new TextBox(), optionOrder = new TextBox(), expected = new TextBox(), processName = new TextBox(), description = new TextBox();
         readonly NumericUpDown seconds = new NumericUpDown();
         readonly ListView steps = new ListView();
         readonly FlowLayoutPanel fields = new FlowLayoutPanel();
         readonly Panel valueSection = new Panel(), optionSection = new Panel(), timeSection = new Panel(), expectSection = new Panel();
-        readonly Button pick = new Button(), pickExpect = new Button(), add = new Button(), save = new Button(), up = new Button(), down = new Button(), remove = new Button();
+        readonly Button pick = new Button(), pickImage = new Button(), record = new Button(), editInput = new Button(), pickExpect = new Button(), add = new Button(), save = new Button(), up = new Button(), down = new Button(), remove = new Button();
+        readonly PictureBox thumbnail = new PictureBox();
         readonly List<Choice> allActions = new List<Choice>();
         Dictionary<string, object> selection, expectation;
         int seq, pendingSeq, stepCount;
         string pendingAction, pendingPurpose;
-        bool busy, done, hiddenForPicker, loadingActions;
+        bool busy, done, hiddenForPicker, loadingActions, pendingInputs;
         float scale;
         int Px(int number) { return (int)Math.Round(number * scale); }
         Rectangle Box(int x, int y, int w, int h) { return new Rectangle(Px(x), Px(y), Px(w), Px(h)); }
@@ -158,7 +159,8 @@ internal static class ProcessEditor
         { panel.Width = Px(398); panel.Height = Px(height); panel.Margin = new Padding(0, 0, 0, Px(10)); fields.Controls.Add(panel); }
         void ConfigureCombo(ComboBox control) { control.DropDownStyle = ComboBoxStyle.DropDownList; control.FlatStyle = FlatStyle.Flat; }
         string ActionCode { get { var choice = action.SelectedItem as Choice; return choice == null ? "" : choice.Code; } }
-        bool NeedsExpect { get { string code = ActionCode; return code == "click" || code == "double_click" || code == "right_click" || code == "press_key" || code == "hotkey"; } }
+        bool IsImage { get { return Str(selection, "recognition", "") == "image"; } }
+        bool NeedsExpect { get { string code = ActionCode; return !IsImage && (code == "click" || code == "double_click" || code == "right_click" || code == "press_key" || code == "hotkey"); } }
         bool NeedsElement { get { return ActionCode != "delay" && ActionCode != "checkpoint"; } }
 
         internal EditorForm(Dictionary<string, object> request, string response)
@@ -188,13 +190,17 @@ internal static class ProcessEditor
             if (Width > screen.Width) { AutoScroll = true; AutoScrollMinSize = new Size(Px(1060), Px(750)); Width = screen.Width; }
             Location = new Point(Math.Max(screen.Left, screen.Left + (screen.Width - Width) / 2), Math.Max(screen.Top, screen.Top + (screen.Height - Height) / 2));
             Controls.Add(new Label { Text = "반복할 업무를 순서대로 알려주세요", Font = new Font(Font.FontFamily, 19, FontStyle.Bold), Bounds = Box(24, 20, 1008, 40) });
-            Controls.Add(new Label { Text = "요소를 고르고 동작을 추가하세요. 만드는 동안 프로그램의 버튼이나 입력은 실행되지 않습니다.", ForeColor = muted, Bounds = Box(26, 66, 1006, 30) });
+            Controls.Add(new Label { Text = "요소·이미지로 단계를 만들거나, 직접 하는 동작을 녹화하세요. 녹화 후 목록을 검토하고 저장합니다.", ForeColor = muted, Bounds = Box(26, 66, 1006, 30) });
             var left = new Panel { BackColor = Color.White, Bounds = Box(24, 110, 444, 562) }; Controls.Add(left);
             fields.Bounds = Box(20, 18, 420, 476); fields.AutoScroll = true; fields.FlowDirection = FlowDirection.TopDown; fields.WrapContents = false; fields.BackColor = Color.White; left.Controls.Add(fields);
-            var targetSection = Section(75); Caption("대상 프로그램과 창", 0, targetSection); ConfigureCombo(program); Input(program, "TargetProgram", Box(0, 29, 394, 34), targetSection);
-            var elementSection = Section(104); Caption("1  동작할 요소", 0, elementSection);
+            var targetSection = Section(148); Caption("대상 프로그램과 창", 0, targetSection); ConfigureCombo(program); Input(program, "TargetProgram", Box(0, 29, 394, 34), targetSection);
+            ButtonStyle(record, "RecordActions", "● 동작 녹화", Box(0, 72, 394, 34), false, targetSection);
+            targetSection.Controls.Add(new Label { Text = "연결한 창에서 직접 하는 클릭·입력만 기록합니다.", ForeColor = muted, Font = new Font(Font.FontFamily, 8), Bounds = Box(0, 111, 394, 32) });
+            var elementSection = Section(184); Caption("1  동작할 요소", 0, elementSection);
             selected.Text = "아직 선택한 요소가 없습니다"; selected.AutoEllipsis = true; selected.Bounds = Box(0, 28, 394, 28); elementSection.Controls.Add(selected); Identify(selected, "SelectedElement", "현재 선택한 요소");
-            ButtonStyle(pick, "PickElement", "요소 직접 선택", Box(0, 63, 394, 34), false, elementSection);
+            ButtonStyle(pick, "PickElement", "요소 직접 선택", Box(0, 63, 190, 34), false, elementSection);
+            ButtonStyle(pickImage, "PickImage", "이미지로 선택", Box(204, 63, 190, 34), false, elementSection);
+            thumbnail.Bounds = Box(0, 104, 394, 70); thumbnail.SizeMode = PictureBoxSizeMode.Zoom; thumbnail.BackColor = Color.FromArgb(245, 247, 251); thumbnail.Visible = false; Identify(thumbnail, "TargetThumbnail", "선택한 대상 이미지"); elementSection.Controls.Add(thumbnail);
             var operationSection = Section(92); Caption("2  어떤 동작을 할까요?", 0, operationSection); ConfigureCombo(action); Input(action, "StepAction", Box(0, 29, 394, 34), operationSection);
             actionHelp.ForeColor = muted; actionHelp.Font = new Font(Font.FontFamily, 8); actionHelp.Bounds = Box(0, 65, 394, 25); operationSection.Controls.Add(actionHelp);
             AddSection(valueSection, 95); valueCaption.Bounds = Box(0, 0, 394, 25); valueCaption.ForeColor = muted; valueCaption.Font = new Font(Font.FontFamily, 9, FontStyle.Bold); valueSection.Controls.Add(valueCaption);
@@ -203,7 +209,7 @@ internal static class ProcessEditor
             optionOrder.Multiline = true; optionOrder.ScrollBars = ScrollBars.Vertical; optionOrder.MaxLength = 30000; Input(optionOrder, "OptionOrder", Box(0, 29, 394, 82), optionSection);
             AddSection(timeSection, 74); timeCaption.Bounds = Box(0, 0, 394, 25); timeCaption.ForeColor = muted; timeCaption.Font = new Font(Font.FontFamily, 9, FontStyle.Bold); timeSection.Controls.Add(timeCaption);
             seconds.DecimalPlaces = 0; seconds.Minimum = 0; seconds.Maximum = 60; seconds.Value = 20; Input(seconds, "StepSeconds", Box(0, 29, 130, 34), timeSection);
-            timeSection.Controls.Add(new Label { Text = "초", Bounds = Box(142, 32, 80, 28), ForeColor = muted });
+            timeUnit.Text = "초"; timeUnit.Bounds = Box(142, 32, 80, 28); timeUnit.ForeColor = muted; timeSection.Controls.Add(timeUnit);
             AddSection(expectSection, 244); Caption("3  동작 뒤 무엇으로 완료를 확인할까요?", 0, expectSection);
             expectSelected.Text = "확인할 요소를 선택하세요"; expectSelected.AutoEllipsis = true; expectSelected.Bounds = Box(0, 29, 394, 28); expectSection.Controls.Add(expectSelected); Identify(expectSelected, "ExpectedElement", "완료 확인 요소");
             ButtonStyle(pickExpect, "PickExpectedElement", "확인할 요소 선택", Box(0, 63, 394, 34), false, expectSection);
@@ -219,29 +225,39 @@ internal static class ProcessEditor
             processName.MaxLength = 100; Input(processName, "ProcessName", Box(20, 46, 508, 34), right);
             right.Controls.Add(new Label { Text = "업무 설명 (선택 사항)", Bounds = Box(20, 93, 508, 25), ForeColor = muted, Font = new Font(Font.FontFamily, 9, FontStyle.Bold) });
             description.Multiline = true; description.MaxLength = 4000; description.ScrollBars = ScrollBars.Vertical; Input(description, "ProcessDescription", Box(20, 122, 508, 56), right);
-            right.Controls.Add(new Label { Text = "실행 순서", Bounds = Box(20, 195, 508, 25), ForeColor = blue, Font = new Font(Font.FontFamily, 11, FontStyle.Bold) });
+            right.Controls.Add(new Label { Text = "실행 순서 · 두 번 클릭 / Enter로 대상 확인", Bounds = Box(20, 195, 508, 25), ForeColor = blue, Font = new Font(Font.FontFamily, 11, FontStyle.Bold) });
             steps.Bounds = Box(20, 229, 508, 260); steps.View = View.Details; steps.FullRowSelect = true; steps.MultiSelect = false; steps.HideSelection = false;
             steps.HeaderStyle = ColumnHeaderStyle.Nonclickable; steps.GridLines = false; steps.BorderStyle = BorderStyle.FixedSingle;
             steps.Columns.Add("순서", Px(44)); steps.Columns.Add("프로그램", Px(104)); steps.Columns.Add("동작 / 대상", Px(166)); steps.Columns.Add("내용", Px(170)); Identify(steps, "ProcessSteps", "프로세스 실행 순서"); right.Controls.Add(steps);
-            ButtonStyle(up, "MoveStepUp", "위로", Box(20, 507, 116, 38), false, right); ButtonStyle(down, "MoveStepDown", "아래로", Box(148, 507, 116, 38), false, right); ButtonStyle(remove, "RemoveStep", "단계 삭제", Box(392, 507, 136, 38), false, right);
+            ButtonStyle(up, "MoveStepUp", "위로", Box(20, 507, 82, 38), false, right); ButtonStyle(down, "MoveStepDown", "아래로", Box(110, 507, 82, 38), false, right);
+            ButtonStyle(editInput, "ResolveInput", "입력 내용 지정", Box(200, 507, 176, 38), false, right); ButtonStyle(remove, "RemoveStep", "단계 삭제", Box(384, 507, 144, 38), false, right);
             status.Text = "요소를 선택하면 가능한 동작을 고를 수 있습니다."; status.ForeColor = muted; status.Bounds = Box(26, 688, 700, 44); Identify(status, "ProcessEditorStatus", "프로세스 작성 상태"); Controls.Add(status);
             ButtonStyle(save, "SaveProcess", "프로세스 저장", Box(748, 692, 176, 38), true, this);
             var cancel = new Button(); ButtonStyle(cancel, "CancelProcess", "닫기", Box(940, 692, 96, 38), false, this);
             allActions.AddRange(new Choice[] {
                 new Choice { Code = "click", Label = "클릭" }, new Choice { Code = "double_click", Label = "두 번 클릭" }, new Choice { Code = "right_click", Label = "오른쪽 클릭" },
                 new Choice { Code = "set_value", Label = "글자 입력" }, new Choice { Code = "select_option", Label = "선택 상자에서 항목 선택" },
-                new Choice { Code = "press_key", Label = "키 누르기 (Enter, Tab 등)" }, new Choice { Code = "hotkey", Label = "단축키 (Ctrl+S 등)" },
+                new Choice { Code = "press_key", Label = "키 누르기 (Enter, Tab 등)" }, new Choice { Code = "hotkey", Label = "단축키 (Ctrl+S 등)" }, new Choice { Code = "scroll", Label = "스크롤 (이미지)" },
                 new Choice { Code = "wait_for_element", Label = "요소가 나타날 때까지 대기" }, new Choice { Code = "delay", Label = "정해진 시간 대기" }, new Choice { Code = "checkpoint", Label = "화면 캡처 후 확인할 때까지 일시정지" }
             });
-            program.SelectedIndexChanged += delegate { if (!busy) { selection = expectation = null; selected.Text = "아직 선택한 요소가 없습니다"; expectSelected.Text = "확인할 요소를 선택하세요"; PopulateActions(); } };
+            program.SelectedIndexChanged += delegate { if (!busy) { selection = expectation = null; ShowThumbnail(null); selected.Text = "아직 선택한 요소가 없습니다"; expectSelected.Text = "확인할 요소를 선택하세요"; PopulateActions(); } };
             action.SelectedIndexChanged += delegate { if (!loadingActions) UpdateActionFields(); };
             expectProperty.SelectedIndexChanged += delegate { UpdateExpectFields(); };
-            pick.Click += delegate { Pick("action"); }; pickExpect.Click += delegate { Pick("expect"); }; add.Click += delegate { AddStep(); };
+            pick.Click += delegate { Pick("action", false); }; pickImage.Click += delegate { Pick("action", true); }; pickExpect.Click += delegate { Pick("expect", false); }; add.Click += delegate { AddStep(); };
+            record.Click += delegate { Send("record", new Dictionary<string, object>(), null); if (busy) { hiddenForPicker = true; Hide(); } };
+            editInput.Click += delegate { ResolveInput(); };
             save.Click += delegate { Send("save", new Dictionary<string, object> { { "name", processName.Text.Trim() }, { "description", description.Text } }, null); };
             cancel.Click += delegate { Finish("cancelled", null); };
             up.Click += delegate { MoveStep(-1); }; down.Click += delegate { MoveStep(1); };
             remove.Click += delegate { if (steps.SelectedIndices.Count == 1) Send("remove_step", new Dictionary<string, object> { { "index", steps.SelectedIndices[0] } }, null); };
             steps.SelectedIndexChanged += delegate { UpdateButtons(); }; processName.TextChanged += delegate { UpdateButtons(); };
+            steps.DoubleClick += delegate { if (!busy && steps.SelectedIndices.Count == 1) Send("preview_step", new Dictionary<string, object> { { "index", steps.SelectedIndices[0] } }, null); };
+            steps.KeyDown += delegate(object sender, KeyEventArgs e) {
+                if (e.KeyCode == Keys.Enter && !busy && steps.SelectedIndices.Count == 1) {
+                    e.Handled = true; e.SuppressKeyPress = true;
+                    Send("preview_step", new Dictionary<string, object> { { "index", steps.SelectedIndices[0] } }, null);
+                }
+            };
             program.SelectedIndex = 0; PopulateActions(); UpdateExpectFields();
             var draft = Map(request, "draft"); processName.Text = Str(draft, "name", ""); description.Text = Str(draft, "description", ""); UpdateSteps(List(draft, "steps")); UpdateButtons();
             FormClosing += delegate(object sender, FormClosingEventArgs args) { if (!done) { args.Cancel = true; Finish("cancelled", null); } };
@@ -261,6 +277,7 @@ internal static class ProcessEditor
             foreach (Choice choice in allActions) {
                 bool independent = choice.Code == "delay" || choice.Code == "checkpoint";
                 bool generic = choice.Code == "wait_for_element" || choice.Code == "press_key" || choice.Code == "hotkey";
+                if (choice.Code == "scroll" && !IsImage) continue;
                 if (selection == null || independent || generic || allowed.Contains(choice.Code)) action.Items.Add(choice);
             }
             if (action.Items.Count > 0) { action.SelectedIndex = 0; foreach (Choice choice in action.Items) if (choice.Code == previous) { action.SelectedItem = choice; break; } }
@@ -269,11 +286,13 @@ internal static class ProcessEditor
         void UpdateActionFields()
         {
             string code = ActionCode;
-            valueSection.Visible = code == "set_value" || code == "select_option" || code == "press_key" || code == "hotkey" || code == "checkpoint";
-            optionSection.Visible = code == "select_option"; timeSection.Visible = code == "delay" || code == "wait_for_element"; expectSection.Visible = NeedsExpect;
-            valueCaption.Text = code == "set_value" ? "입력할 내용" : code == "select_option" ? "선택할 항목의 정확한 이름" : code == "press_key" ? "누를 키 이름 (예: Enter, Tab)" : code == "hotkey" ? "동시에 누를 키 (예: Ctrl+S)" : "확인 지점 설명";
-            timeCaption.Text = code == "delay" ? "기다릴 시간" : "요소가 나타나기를 기다릴 최대 시간";
-            actionHelp.Text = code == "set_value" || code == "select_option" ? "입력·선택한 값이 실제로 반영됐는지 자동 확인합니다." : code == "checkpoint" ? "실행 시 화면을 캡처하고 사람이 확인할 때까지 멈춥니다." : code == "wait_for_element" ? "요소가 나타나는지 읽기만 하며 버튼을 누르지 않습니다." : code == "delay" ? "요소 선택 없이 추가할 수 있습니다." : "선택한 요소에 대해 한 번 실행하고 결과를 확인합니다.";
+            valueSection.Visible = code == "set_value" || code == "select_option" || code == "press_key" || code == "hotkey" || code == "checkpoint" || code == "scroll";
+            optionSection.Visible = code == "select_option"; timeSection.Visible = code == "delay" || code == "wait_for_element" || code == "scroll"; expectSection.Visible = NeedsExpect;
+            valueCaption.Text = code == "set_value" ? (IsImage ? "입력칸 전체를 바꿀 내용 (Ctrl+A 후 입력)" : "입력할 내용") : code == "select_option" ? "선택할 항목의 정확한 이름" : code == "press_key" ? "누를 키 이름 (예: Enter, Tab)" : code == "hotkey" ? "동시에 누를 키 (예: Ctrl+S)" : code == "scroll" ? "스크롤 방향 (up / down / left / right)" : "확인 지점 설명";
+            timeCaption.Text = code == "delay" ? "기다릴 시간 (초)" : code == "scroll" ? "스크롤 양 (1~20)" : "요소가 나타나기를 기다릴 최대 시간 (초)";
+            timeUnit.Text = code == "scroll" ? "칸" : "초"; seconds.Minimum = code == "scroll" ? 1 : 0; seconds.Maximum = code == "scroll" ? 20 : 60;
+            if (code == "scroll" && value.Text != "up" && value.Text != "down" && value.Text != "left" && value.Text != "right") value.Text = "down";
+            actionHelp.Text = IsImage && code != "wait_for_element" && code != "delay" && code != "checkpoint" ? "현재 이미지 위치를 찾고 실행한 뒤 화면 확인에서 멈춥니다." : code == "set_value" || code == "select_option" ? "입력·선택한 값이 실제로 반영됐는지 자동 확인합니다." : code == "checkpoint" ? "실행 시 화면을 캡처하고 사람이 확인할 때까지 멈춥니다." : code == "wait_for_element" ? "대상이 나타나는지 읽기만 하며 버튼을 누르지 않습니다." : code == "delay" ? "요소 선택 없이 추가할 수 있습니다." : "선택한 요소에 대해 한 번 실행하고 결과를 확인합니다.";
             UpdateButtons();
         }
         void UpdateExpectFields()
@@ -287,10 +306,56 @@ internal static class ProcessEditor
             return new Dictionary<string, object> { { "program_id", choice.Code }, { "pid", Num(choice.Data, "pid", 0) },
                 { "window_id", Long(choice.Data, "window_id", 0) }, { "window_ref", Str(choice.Data, "window_ref", "main") } };
         }
-        void Pick(string purpose)
+        void Pick(string purpose, bool image)
         {
-            var payload = Target(); payload["purpose"] = purpose; Send("pick_element", payload, purpose);
+            var payload = Target(); payload["purpose"] = purpose; Send(image ? "pick_image" : "pick_element", payload, purpose);
             if (busy) { hiddenForPicker = true; Hide(); }
+        }
+        void ShowThumbnail(Dictionary<string, object> picked)
+        {
+            Image prior = thumbnail.Image; thumbnail.Image = null; if (prior != null) prior.Dispose(); thumbnail.Visible = false;
+            string encoded = Str(picked, "thumbnail_png", ""); if (encoded.Length == 0 || encoded.Length > 1500000) return;
+            try { using (var stream = new MemoryStream(Convert.FromBase64String(encoded))) using (Image image = Image.FromStream(stream)) thumbnail.Image = new Bitmap(image); thumbnail.Visible = true; }
+            catch (ArgumentException) { ShowError("선택한 이미지의 미리보기를 표시하지 못했습니다."); }
+            catch (FormatException) { ShowError("선택한 이미지 형식을 확인하지 못했습니다."); }
+        }
+        void ResolveInput()
+        {
+            if (steps.SelectedIndices.Count != 1) return;
+            int index = steps.SelectedIndices[0]; var row = steps.Items[index].Tag as Dictionary<string, object>;
+            if (row == null || !Object.Equals(row.ContainsKey("editable_input") ? row["editable_input"] : null, true)) return;
+            using (Form dialog = new Form()) {
+                dialog.Text = "녹화한 입력 내용 지정"; dialog.Font = Font; dialog.BackColor = Color.FromArgb(245, 247, 251);
+                dialog.StartPosition = FormStartPosition.CenterParent; dialog.FormBorderStyle = FormBorderStyle.FixedDialog; dialog.MaximizeBox = dialog.MinimizeBox = false;
+                dialog.ClientSize = new Size(Px(500), Px(280));
+                dialog.Controls.Add(new Label { Text = "다시 실행할 때 입력칸 전체를 바꿀 내용을 지정하세요.\n대상을 클릭하고 Ctrl+A 후 이 내용을 입력합니다.", Bounds = Box(24, 20, 452, 55), ForeColor = ink });
+                var input = new TextBox { Multiline = true, MaxLength = 16000, ScrollBars = ScrollBars.Vertical, Bounds = Box(24, 88, 452, 118) }; dialog.Controls.Add(input);
+                var confirm = new Button(); ButtonStyle(confirm, "ConfirmRecordedInput", "내용 반영", Box(264, 225, 112, 34), true, dialog); confirm.DialogResult = DialogResult.OK;
+                var cancel = new Button(); ButtonStyle(cancel, "CancelRecordedInput", "취소", Box(384, 225, 92, 34), false, dialog); cancel.DialogResult = DialogResult.Cancel; dialog.CancelButton = cancel;
+                if (dialog.ShowDialog(this) == DialogResult.OK) Send("resolve_input", new Dictionary<string, object> { { "index", index }, { "value", input.Text } }, null);
+            }
+        }
+        void ShowStepPreview(Dictionary<string, object> item)
+        {
+            bool replace = false;
+            using (Form dialog = new Form()) {
+                dialog.Text = "기록한 동작과 대상 확인"; dialog.Font = Font; dialog.BackColor = Color.FromArgb(245, 247, 251);
+                dialog.StartPosition = FormStartPosition.CenterParent; dialog.FormBorderStyle = FormBorderStyle.FixedDialog; dialog.MaximizeBox = dialog.MinimizeBox = false; dialog.ClientSize = new Size(Px(540), Px(360));
+                dialog.Controls.Add(new Label { Text = Str(item, "program", "") + " · " + Str(item, "action_label", "") + "\n" + Str(item, "detail", ""), Bounds = Box(24, 18, 492, 80), ForeColor = ink });
+                using (var picture = new PictureBox { Bounds = Box(24, 106, 492, 182), SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.White }) {
+                    dialog.Controls.Add(picture); string encoded = Str(item, "thumbnail_png", "");
+                    try { if (encoded.Length > 0 && encoded.Length <= 1500000) using (var stream = new MemoryStream(Convert.FromBase64String(encoded))) using (Image source = Image.FromStream(stream)) picture.Image = new Bitmap(source); }
+                    catch (ArgumentException) { } catch (FormatException) { }
+                    if (picture.Image == null) dialog.Controls.Add(new Label { Text = Str(item, "label", "현재 창") + "\n인식 방식: " + Str(item, "recognition", "uia"), Bounds = Box(40, 142, 460, 100), ForeColor = muted, BackColor = Color.White });
+                    var close = new Button(); ButtonStyle(close, "CloseStepPreview", "확인", Box(404, 307, 112, 34), true, dialog); close.DialogResult = DialogResult.OK; dialog.AcceptButton = close; dialog.CancelButton = close;
+                    if (encoded.Length > 0) {
+                        var choose = new Button(); ButtonStyle(choose, "RetargetStep", "이미지 대상 다시 선택", Box(24, 307, 244, 34), false, dialog);
+                        choose.Click += delegate { replace = true; dialog.DialogResult = DialogResult.OK; dialog.Close(); };
+                    }
+                    dialog.ShowDialog(this); if (picture.Image != null) picture.Image.Dispose();
+                }
+            }
+            if (replace) { Send("retarget_step", new Dictionary<string, object> { { "index", Num(item, "index", -1) } }, null); if (busy) { hiddenForPicker = true; Hide(); } }
         }
         void AddStep()
         {
@@ -303,6 +368,7 @@ internal static class ProcessEditor
             if (code == "hotkey") { var keys = new List<string>(); foreach (string item in value.Text.Split('+')) if (item.Trim().Length > 0) keys.Add(item.Trim()); payload["keys"] = keys; }
             if (code == "delay") payload["seconds"] = (int)seconds.Value;
             if (code == "wait_for_element") payload["timeout_seconds"] = (int)seconds.Value;
+            if (code == "scroll") { payload["direction"] = value.Text.Trim().ToLowerInvariant(); payload["amount"] = (int)seconds.Value; }
             if (code == "select_option" && optionOrder.Text.Trim().Length > 0) { var order = new List<string>(); foreach (string line in optionOrder.Lines) if (line.Trim().Length > 0) order.Add(line.Trim()); payload["option_order"] = order; }
             if (NeedsExpect) {
                 string property = ((Choice)expectProperty.SelectedItem).Code;
@@ -318,7 +384,7 @@ internal static class ProcessEditor
             if (done || busy) return; pendingSeq = ++seq; pendingAction = command; pendingPurpose = purpose; busy = true;
             try { Write(response + ".command.json", new Dictionary<string, object> { { "nonce", nonce }, { "seq", pendingSeq }, { "action", command }, { "payload", payload } }); }
             catch { busy = false; Finish("runtime_failed", new Dictionary<string, object> { { "code", "command_write_failed" } }); return; }
-            if (busy) { status.Text = command == "pick_element" ? "선택 창에서 요소를 고르고 확인해 주세요." : "요청한 내용을 확인하고 있습니다…"; status.ForeColor = muted; }
+            if (busy) { status.Text = command == "pick_element" || command == "pick_image" ? "선택 창에서 대상을 고르고 확인해 주세요." : command == "record" ? "녹화 창에서 시작한 뒤 연결한 프로그램을 직접 조작하세요." : "요청한 내용을 확인하고 있습니다…"; status.ForeColor = muted; }
             UpdateButtons();
         }
         void Tick(object sender, EventArgs args)
@@ -337,13 +403,14 @@ internal static class ProcessEditor
             if (acknowledged != pendingSeq) { Finish("runtime_failed", new Dictionary<string, object> { { "code", "event_sequence_mismatch" } }); return; }
             busy = false; if (hiddenForPicker) { hiddenForPicker = false; Show(); Activate(); }
             if (Str(result, "status", "") != "ok") { ShowError(Str(result, "message", "요청을 처리하지 못했습니다. 입력 내용을 확인해 주세요.")); UpdateButtons(); return; }
-            if (pendingAction == "pick_element") {
+            if (pendingAction == "pick_element" || pendingAction == "pick_image") {
                 var picked = Map(result, "selection");
                 if (picked == null || Str(picked, "selection_id", "").Length == 0) { ShowError("선택 결과를 받지 못했습니다. 요소를 다시 선택해 주세요."); UpdateButtons(); return; }
-                string purpose = Str(result, "purpose", pendingPurpose ?? "action"); string caption = Str(picked, "label", "이름 없는 요소") + "  ·  " + Str(picked, "role", "");
-                if (purpose == "expect") { expectation = picked; expectSelected.Text = caption; } else { selection = picked; selected.Text = caption; PopulateActions(); }
+                string purpose = Str(result, "purpose", pendingPurpose ?? "action"); string caption = Str(picked, "label", "이름 없는 요소") + "  ·  " + (Str(picked, "recognition", "") == "image" ? "이미지 인식" : Str(picked, "role", "") + " / 요소 인식");
+                if (purpose == "expect") { expectation = picked; expectSelected.Text = caption; } else { selection = picked; selected.Text = caption; ShowThumbnail(picked); PopulateActions(); }
             }
             if (result.ContainsKey("steps")) UpdateSteps(List(result, "steps"));
+            if (pendingAction == "preview_step") { var preview = Map(result, "preview"); if (preview != null) ShowStepPreview(preview); }
             if (pendingAction == "save") {
                 var saved = Map(result, "saved_task");
                 if (saved == null || Str(saved, "id", "").Length == 0) { ShowError("저장 완료를 확인하지 못했습니다. 다시 저장하기 전에 연결 상태를 확인해 주세요."); UpdateButtons(); return; }
@@ -353,23 +420,27 @@ internal static class ProcessEditor
         }
         void UpdateSteps(IEnumerable entries)
         {
-            steps.BeginUpdate(); steps.Items.Clear(); stepCount = 0;
+            steps.BeginUpdate(); steps.Items.Clear(); stepCount = 0; pendingInputs = false;
             if (entries != null) foreach (object raw in entries) {
                 var entry = raw as Dictionary<string, object>; if (entry == null) continue;
-                string code = Str(entry, "action", ""), label = code; foreach (Choice choice in allActions) if (choice.Code == code) { label = choice.Label; break; }
+                string code = Str(entry, "action", ""), label = Str(entry, "action_label", code); foreach (Choice choice in allActions) if (choice.Code == code) { label = choice.Label; break; }
                 string target = Str(entry, "label", Str(entry, "program", ""));
                 var row = new ListViewItem((++stepCount).ToString()); row.SubItems.Add(Str(entry, "program", "")); row.SubItems.Add(label + (target.Length == 0 ? "" : " · " + target));
-                row.SubItems.Add(Str(entry, "detail", Str(entry, "summary", ""))); row.ToolTipText = Str(entry, "program", "") + " · " + label + " · " + target + "\n" + Str(entry, "detail", ""); steps.Items.Add(row);
+                row.SubItems.Add(Str(entry, "detail", Str(entry, "summary", ""))); row.ToolTipText = Str(entry, "program", "") + " · " + label + " · " + target + "\n" + Str(entry, "detail", ""); row.Tag = entry;
+                if (Object.Equals(entry.ContainsKey("requires_input") ? entry["requires_input"] : null, true)) { pendingInputs = true; row.ForeColor = Color.FromArgb(173, 48, 38); }
+                steps.Items.Add(row);
             }
             steps.ShowItemToolTips = true; steps.EndUpdate();
         }
         void UpdateButtons()
         {
             program.Enabled = action.Enabled = value.Enabled = optionOrder.Enabled = seconds.Enabled = expectProperty.Enabled = expected.Enabled = expectBoolean.Enabled = processName.Enabled = description.Enabled = !busy;
-            pick.Enabled = pickExpect.Enabled = !busy;
+            pick.Enabled = pickImage.Enabled = pickExpect.Enabled = record.Enabled = !busy;
             add.Enabled = !busy && stepCount < 30 && ActionCode.Length > 0 && (!NeedsElement || selection != null) && (!NeedsExpect || expectation != null);
-            save.Enabled = !busy && stepCount > 0 && processName.Text.Trim().Length > 0;
+            save.Enabled = !busy && !pendingInputs && stepCount > 0 && processName.Text.Trim().Length > 0;
             int index = steps.SelectedIndices.Count == 1 ? steps.SelectedIndices[0] : -1;
+            var entry = index >= 0 ? steps.Items[index].Tag as Dictionary<string, object> : null;
+            editInput.Enabled = !busy && entry != null && Object.Equals(entry.ContainsKey("editable_input") ? entry["editable_input"] : null, true);
             up.Enabled = !busy && index > 0; down.Enabled = !busy && index >= 0 && index < stepCount - 1; remove.Enabled = !busy && index >= 0;
         }
         void ShowError(string message) { status.ForeColor = Color.FromArgb(173, 48, 38); status.Text = message; }

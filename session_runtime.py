@@ -249,6 +249,18 @@ class SessionRuntime:
             self.check_active()
             return answer
 
+    def image_action(self, step, target):
+        """Only saved, validated image recipe steps can reach the private guard."""
+        from image_targets import match_image
+        with self.execution_lock:
+            self.check_active()
+            answer = self.guard.image_action(step, target,
+                lambda image_target, png: match_image(self, image_target, png), self.check_active)
+            if self._driver_ended():
+                self.stop("Cua Driver 연결이 종료되어 이미지 작업을 중지했습니다. 미확인 입력을 반복하지 마세요.")
+            self.check_active()
+            return answer
+
     def launch(self, program_id):
         with self.execution_lock:
             self.check_active()

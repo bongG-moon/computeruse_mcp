@@ -1,7 +1,7 @@
 {
   "format": 1,
-  "mcp_version": "0.10.0",
-  "mcp_base_zip_sha256": "be9131a57e4cd961d326ae5ddff373ec62d2c86d1961e73713bfee1795a418f2",
+  "mcp_version": "0.11.0",
+  "mcp_base_zip_sha256": "73e9ac8587d099d2935be993b4e439aaf7f010dad2cf842f0d8359da2af5e547",
   "mcp_base_files_unchanged": true,
   "driver": {
     "version": "0.28.2",

@@ -155,7 +155,7 @@ def run_process(manifest, bundle=None):
             answer = call("computer_process_status", {"editor_id": editor_id, "wait_ms": 200}, allow_error=True)
             if answer.get("status") in {"failed", "cancelled"}:
                 raise AssertionError("Process editor failed: " + json.dumps(answer, ensure_ascii=False))
-            if terminal and answer.get("status") == "saved" and not answer.get("cleanup_pending"):
+            if terminal and answer.get("status") == "saved" and not answer.get("cleanup_pending") and answer.get("pending") is False:
                 return answer
             if expected_count is not None and len(answer.get("steps", [])) == expected_count:
                 return answer

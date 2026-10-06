@@ -11,7 +11,7 @@ import uuid
 from vendor.guard import check_app, normalize_exe, GuardError
 from vendor.windows import discover
 
-VERSION = "0.10.0"
+VERSION = "0.11.0"
 PROGRAM_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 
 

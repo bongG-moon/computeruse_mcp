@@ -1,4 +1,4 @@
-# Computer Use MCP 0.10.0
+# Computer Use MCP 0.11.0
 
 Claude Code 등 MCP를 지원하는 클라이언트에서 **이 PC의 프로그램 화면을 읽고 조작하는 Windows용 도구**입니다. Chrome, 메모장, 설치된 Excel뿐 아니라 사용자가 실행파일을 지정한 다른 프로그램도 등록할 수 있습니다. 실제 화면을 확인해 클릭·입력하고, 요청한 결과까지 확인하는 것을 목표로 합니다.
 
@@ -8,12 +8,12 @@ Claude Code 등 MCP를 지원하는 클라이언트에서 **이 PC의 프로그�
 
 | 파일 | 용도 |
 | --- | --- |
-| [Computer-Use-MCP-0.10.0-with-driver.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.10.0/Computer-Use-MCP-0.10.0-with-driver.zip) | MCP와 Cua Driver 0.28.2를 함께 준비하는 권장 묶음 |
-| [Computer-Use-MCP-0.10.0.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.10.0/Computer-Use-MCP-0.10.0.zip) | Driver를 직접 준비하는 기존 배포본 |
-| [Computer-Use-MCP-0.10.0-source.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.10.0/Computer-Use-MCP-0.10.0-source.zip) | 개발·코드 확인용 원본 소스 |
-| [cua-driver.exe](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.10.0/cua-driver.exe) | 실행파일만 받기. 전체 구성은 Driver 포함 ZIP 사용 |
+| [Computer-Use-MCP-0.11.0-with-driver.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.11.0/Computer-Use-MCP-0.11.0-with-driver.zip) | MCP와 Cua Driver 0.28.2를 함께 준비하는 권장 묶음 |
+| [Computer-Use-MCP-0.11.0.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.11.0/Computer-Use-MCP-0.11.0.zip) | Driver를 직접 준비하는 기존 배포본 |
+| [Computer-Use-MCP-0.11.0-source.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.11.0/Computer-Use-MCP-0.11.0-source.zip) | 개발·코드 확인용 원본 소스 |
+| [cua-driver.exe](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.11.0/cua-driver.exe) | 실행파일만 받기. 전체 구성은 Driver 포함 ZIP 사용 |
 
-[전체 릴리스와 파일 해시](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.10.0) · [SHA256SUMS.txt](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.10.0/SHA256SUMS.txt)
+[전체 릴리스와 파일 해시](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.11.0) · [SHA256SUMS.txt](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.11.0/SHA256SUMS.txt)
 
 GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실행파일과 동봉 Python이 필요한 일반 사용자는 위의 배포 ZIP을 받으세요. 지원 대상은 Windows x86_64이며, 사용할 프로그램과 Claude Code 등 MCP 클라이언트는 이 PC에 설치되어 있어야 합니다.
 
@@ -57,7 +57,24 @@ GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실�
 
 저장 또는 버리기 방침이 불명확하면 임의로 선택하지 않습니다. 저장 내용 확인은 종료 확인과 별도이며, 저장이 목적이면 파일을 다시 열어 내용까지 확인해야 합니다. `computer_end`는 화면 작업 세션을 끝내는 기능이고 앱 종료 확인을 대신하지 않습니다.
 
-## 0.10.0: 프로세스 편집 창
+## 0.11.0: 이미지 선택과 동작 녹화
+
+프로세스 편집 창에서 **이미지로 선택** 또는 **동작 녹화**를 사용할 수 있습니다. Windows가 버튼 정보를 제공하지 않거나 선택한 요소와 Driver 결과를 연결하지 못하면 이미지 선택으로 이어집니다. 프로그램 연결·권한 확인 실패 또는 취소를 이미지 방식으로 건너뛰지는 않습니다.
+
+- 이미지로 쓸 영역을 드래그하고, 미리보기에서 실제 클릭 위치를 지정한 뒤 확인합니다. 같은 모양의 버튼이 여러 개면 주변 이름도 포함하세요.
+- 실행할 때마다 현재 창의 캡처에서 저장한 이미지를 다시 찾습니다. 같은 후보가 여러 개이거나 충분히 일치하지 않으면 클릭하지 않습니다.
+- **동작 녹화**를 누르고 녹화 창에서 시작한 다음, 연결한 프로그램을 직접 조작합니다. 완료 후 초안의 단계·입력 내용을 확인하고 저장합니다.
+- 확인할 수 없는 문자 입력은 직접 지정하거나 삭제해야 저장할 수 있습니다. 비밀번호와 다른 프로그램의 동작을 전역 키 입력 기록으로 수집하지 않습니다.
+- 자동으로 잡힌 입력칸 이미지에 바뀌는 글자가 들어 있다면, 단계 미리보기의 **이미지 대상 다시 선택**에서 변하지 않는 고유한 주변 이름과 빈 영역을 선택하세요.
+- 이미지 동작 뒤에는 화면 확인 단계를 함께 넣습니다. 실행 결과를 사용자가 확인한 뒤 계속하며, 이미지 위치를 찾았다는 것만으로 업무 완료라고 판단하지 않습니다.
+
+이미지 검색과 녹화 처리는 이 PC에서 수행하며 외부 API나 모델을 호출하지 않습니다. 프로세스 파일에는 직접 선택한 이미지와 지정한 입력 내용이 저장됩니다. 실행 중 확인 이미지는 연결한 MCP 클라이언트에 전달됩니다. 전체 동영상을 저장하는 녹화나 모든 앱·드래그·보호된 입력을 완벽하게 재현하는 기능은 아닙니다.
+
+`computer_teach_element`는 UIA 요소 학습용입니다. 이미지 선택과 녹화는 `computer_process_editor`의 프로세스 단계로 저장합니다. 실행 중 알려진 Win32 Edit 비밀번호 입력칸은 문자·키 입력을 차단하지만, 모든 앱의 자체 비밀번호 칸까지 판별하지는 않습니다.
+
+사용 순서는 [프로세스 작성 안내](PROCESS_GUIDE.html)를 참고하세요. 최종 검증 결과와 한계는 [검증 보고서](VALIDATION.html)에 있습니다.
+
+## 0.10.0 당시: 프로세스 편집 창
 
 채팅에서 **“지금 열린 프로그램으로 반복 작업을 만들고 싶어. 프로세스 편집 창을 열어줘. 요소는 내가 직접 선택할게.”**라고 요청하세요.
 
@@ -73,9 +90,9 @@ GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실�
 
 요소 저장 전 대조에서 Driver의 `frame{x,y,w,h}` 형식을 처리하도록 수정했습니다. 자동화 ID가 누락된 경우에도 정확한 이름·종류·위치가 모두 맞는 요소만 교차 확인합니다. 명시적으로 다른 ID나 여러 후보를 임의로 받아들이지는 않습니다.
 
-**자체 그림 화면의 버튼이 Windows 접근성 정보에 아예 없는 경우에는 UIA 학습을 할 수 없습니다.** 실제 로컬 프로그램에서 네이티브 UIA와 Driver에 버튼 정보가 없는 경우를 확인했습니다. 이때 `picker_controls_not_exposed`로 이유를 알리고 F8 반복이나 상위 영역을 버튼으로 잘못 저장하는 일을 막습니다. 이미지 확인 단계는 그림 버튼 학습 기능과 다르며, 그림 버튼의 이미지 학습·자동 재탐색은 이번 버전에 포함되지 않았습니다.
+**자체 그림 화면의 버튼이 Windows 접근성 정보에 아예 없는 경우에는 UIA 학습을 할 수 없습니다.** 실제 로컬 프로그램에서 네이티브 UIA와 Driver에 버튼 정보가 없는 경우를 확인했습니다. 이때 `picker_controls_not_exposed`로 이유를 알리고 F8 반복이나 상위 영역을 버튼으로 잘못 저장하는 일을 막습니다. 0.10.0에는 그림 버튼의 이미지 학습·자동 재탐색이 없었습니다. 현재 0.11.0에서는 위의 **이미지로 선택** 기능을 사용할 수 있습니다.
 
-새 ZIP 전체를 압축 풀고 기존 설정을 유지한 채 연결을 갱신한 뒤 **0.10.0** 및 `computer_process_editor`가 표시되는지 확인하세요. 편집 실행파일은 MCP가 자동 실행합니다.
+새 ZIP 전체를 압축 풀고 기존 설정을 유지한 채 연결을 갱신한 뒤 **0.11.0** 및 `computer_process_editor`가 표시되는지 확인하세요. 편집 실행파일은 MCP가 자동 실행합니다.
 
 ## 0.9.0: 직접 선택 → 확인 → 학습 완료
 
@@ -91,7 +108,7 @@ GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실�
 
 이름·화면 분류·설명·찾는 기준을 이 PC에 저장합니다. LLM 자체 훈련이나 전체 작업 녹화는 아닙니다. 입력 값·이미지·좌표·임시 창 번호는 학습 파일에 저장하지 않습니다. “배운 요소 목록을 보여줘”, “조회 버튼을 다시 가르칠게”, “저장한 조회 버튼을 지워줘”로 관리합니다. 같은 이름의 대상은 고유한 상위 영역으로 구분하며 화면이 바뀌면 다시 확인합니다.
 
-새 배포 ZIP을 모두 압축 풀고 `INSTALL.md`를 첨부하여 **“기존 Driver·프로그램·저장한 작업·학습 요소를 유지하고 이 버전으로 연결을 갱신해줘”**라고 요청하세요. 연결을 다시 연 뒤 **0.10.0**과 `computer_teach_status`가 표시돼야 새 방식이 적용됩니다. 기존 연결 파일을 그대로 실행하면 이전 버전이 계속 사용됩니다.
+새 배포 ZIP을 모두 압축 풀고 `INSTALL.md`를 첨부하여 **“기존 Driver·프로그램·저장한 작업·학습 요소를 유지하고 이 버전으로 연결을 갱신해줘”**라고 요청하세요. 연결을 다시 연 뒤 **0.11.0**과 `computer_teach_status`가 표시돼야 새 방식이 적용됩니다. 기존 연결 파일을 그대로 실행하면 이전 버전이 계속 사용됩니다.
 
 ## 0.8.0: 프로그램 시작 방식 수정
 
