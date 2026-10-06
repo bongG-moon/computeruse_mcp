@@ -1,4 +1,8 @@
-# Claude에게 화면 작업 기능 연결 부탁하기 — 0.6.0
+# Claude에게 화면 작업 기능 연결 부탁하기 — 0.7.0
+
+0.7.0 배포본은 **MCP와 Cua Driver를 관리자 권한으로 실행하는 연결 프로그램**을 사용합니다. Claude Code 전체를 관리자 권한으로 열 필요는 없습니다. 연결 시작 때 Windows UAC 창이 나타나면 같은 로그인 사용자의 관리자 권한으로 허용합니다. 승인 취소·회사 정책 차단·다른 관리자 계정 사용 시에는 일반 권한으로 대신 실행하지 않습니다. Windows 보안 설정·UAC 정책은 변경하지 않습니다.
+
+기존 0.6.0 연결을 갱신할 때는 실제 등록 범위와 설정 경로를 먼저 확인합니다. 새 배포 폴더의 `runtime/python.exe`로 `register.py upgrade --config <기존 설정 경로> --scope user` 또는 `--scope local --project <기존 프로젝트 전체 경로>`를 실행합니다. 검증한 이전 배포본만 갱신하며 다른 MCP·모델·로그인은 유지합니다. 갱신한 연결의 command는 새 폴더의 `Computer Use MCP 관리자 연결.exe`, args는 `--config`와 기존 설정 경로입니다. 연결을 다시 연 뒤 `computer_status.execution.administrator: true`, `integrity: high`를 확인해야 합니다. 관리자 프로그램을 조작할 수 있다는 결론은 실제 작은 작업을 확인한 뒤 내립니다.
 
 배포 ZIP을 모두 압축 풀고 이 파일을 Claude Code에 첨부한 뒤 다음처럼 요청하세요. 아래의 Chrome은 처음 연결하는 예제이며, Chrome 전용 기능이라는 뜻은 아닙니다.
 

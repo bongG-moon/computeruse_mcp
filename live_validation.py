@@ -29,16 +29,25 @@ def safe(value):
 
 
 class Client:
-    def __init__(self, config, server=HERE / "server.py", python=sys.executable, env=None):
-        self.child = subprocess.Popen([str(python), "-B", "-s", str(server), "--config", str(config)],
+    def __init__(self, config, server=HERE / "server.py", python=sys.executable, env=None, *, command=None, initialize_timeout=35):
+        self.child = subprocess.Popen(command or [str(python), "-B", "-s", str(server), "--config", str(config)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", env=env, creationflags=subprocess.CREATE_NO_WINDOW)
         self.messages = queue.Queue()
         self.index = 0
         threading.Thread(target=self._read, daemon=True).start()
-        self.request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
-                                     "clientInfo": {"name": "local-acceptance-test", "version": "1"}})
-        self.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        try:
+            self.request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                         "clientInfo": {"name": "local-acceptance-test", "version": "1"}}, timeout=initialize_timeout)
+            self.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        except Exception:
+            self.child.stdin.close()
+            try:
+                self.child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.child.kill()  # Only our exact synthetic-test MCP/bridge process.
+                self.child.wait(timeout=5)
+            raise
 
     def _read(self):
         for line in self.child.stdout:

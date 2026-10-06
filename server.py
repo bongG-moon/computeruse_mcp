@@ -350,6 +350,7 @@ class ComputerManager:
 
     def status(self):
         from configuration_state import configuration_status
+        from privileges import execution_privileges
         driver = Path(self.config["driver"])
         return {"server": "company-computer-use", "version": VERSION, "driver": str(driver),
                 "driver_exists": driver.is_file(), "driver_schema_error": self.schema_error,
@@ -359,6 +360,7 @@ class ComputerManager:
                 "observation_timeout_seconds": self.config.get("observation_timeout_seconds", 20),
                 "session": self.session.status() if self.session else None,
                 "configuration": configuration_status(self.config, self.config_path),
+                "execution": execution_privileges(),
                 "limits": "실행파일 제한은 OS 격리가 아닙니다. 화면 결과는 연결한 MCP 클라이언트로 전달됩니다."}
 
     def _schema_key(self):

@@ -57,7 +57,7 @@ def create_bundle(base_zip: Path, driver_zip: Path, license_file: Path, output: 
     if any(not name.startswith(BASE_PREFIX) for name in original):
         raise ValueError("Unexpected MCP ZIP layout")
     build = json.loads(original[BASE_PREFIX + "BUILD-MANIFEST.json"])
-    if build.get("product") != "Computer-Use-MCP" or build.get("version") != "0.6.0":
+    if build.get("product") != "Computer-Use-MCP" or build.get("version") not in {"0.6.0", "0.7.0"}:
         raise ValueError("Unexpected MCP build identity")
     base_manifest = original[BASE_PREFIX + "SHA256SUMS.txt"].decode("utf-8")
     listed = {}
@@ -87,9 +87,15 @@ def create_bundle(base_zip: Path, driver_zip: Path, license_file: Path, output: 
     additions = {BASE_PREFIX + "driver/" + name.removeprefix(DRIVER_PREFIX): data
                  for name, data in driver.items()}
     additions[BASE_PREFIX + "driver/LICENSE.md"] = license_bytes
-    additions[BASE_PREFIX + "CUA-DRIVER-LICENSE.md"] = license_bytes
+    documents = {BASE_PREFIX + "CUA-DRIVER-LICENSE.md": license_bytes}
     for name in ("README.md", "DRIVER-BUNDLE.md"):
-        additions[BASE_PREFIX + name] = Path(__file__).with_name(name).read_bytes()
+        documents[BASE_PREFIX + name] = Path(__file__).with_name(name).read_bytes()
+    for name, data in documents.items():
+        if name in original:
+            if original[name] != data:
+                raise ValueError("Driver documentation differs from the original MCP package")
+        else:
+            additions[name] = data
     manifest = {
         "format": 1, "mcp_version": build["version"],
         "mcp_base_zip_sha256": digest(base_zip.read_bytes()),

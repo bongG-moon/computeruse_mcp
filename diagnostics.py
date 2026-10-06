@@ -132,7 +132,7 @@ class ReadOnlyMCP:
         finally:
             self.events.put(RuntimeError("MCP 진단 프로세스가 종료되었습니다."))
 
-    def request(self, method: str, params=None, timeout=25) -> dict:
+    def request(self, method: str, params=None, timeout=120) -> dict:
         params = params or {}
         if method not in self.ALLOWED or (method == "tools/call" and params != {"name": "computer_status", "arguments": {}}):
             raise ValueError("연결 확인에서는 상태 조회만 허용합니다.")

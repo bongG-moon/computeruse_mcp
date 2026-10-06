@@ -518,6 +518,7 @@ class Setup(tk.Tk):
         body.rowconfigure(2, weight=1)
         connection, programs, options, tasks, records = (ttk.Frame(tabs, padding=18) for _ in range(5))
         tabs.add(connection, text="1 연결 준비")
+        ttk.Label(connection, text="0.7.0 배포본은 MCP와 Cua Driver를 관리자 권한으로 연결합니다.\n연결 시작 때 Windows UAC 창이 나오면 같은 로그인 사용자의 권한으로 허용하세요.\n취소되면 연결을 시작하지 않습니다. Claude Code 전체를 관리자 권한으로 실행할 필요는 없습니다.", wraplength=850).grid(row=10, column=0, columnspan=2, sticky="w", pady=(10, 4))
         tabs.add(programs, text="2 사용할 프로그램")
         tabs.add(options, text="3 실행 범위")
         tabs.add(tasks, text="4 저장한 작업")

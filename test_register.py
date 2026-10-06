@@ -495,8 +495,8 @@ class RegistrationTests(unittest.TestCase):
             self.assertTrue(register.unregister_claude(self.config)["changed"])
             self.assertEqual(os.environ["GIT_DIR"], str(self.root / ".git"))
 
-    def test_local_upgrade_is_explicitly_unsupported(self):
-        with self.assertRaisesRegex(register.RegistrationError, "user 범위에서만"):
+    def test_local_upgrade_requires_verified_previous_selected_entry(self):
+        with self.assertRaisesRegex(register.RegistrationError, "선택한 범위 이전 연결"):
             register.upgrade_claude(self.config, scope="local", project_dir=self.project)
         self.assertFalse(self.calls)
 
@@ -634,7 +634,7 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(self.read_profile(), self.original)
 
     def test_cli_local_options_pass_exact_scope_and_project(self):
-        for action, method in (("status", "registration_status"), ("register", "register_claude"), ("unregister", "unregister_claude")):
+        for action, method in (("status", "registration_status"), ("register", "register_claude"), ("unregister", "unregister_claude"), ("upgrade", "upgrade_claude")):
             arguments = ["register.py", action, "--config", str(self.config), "--scope", "local", "--project", str(self.project)]
             with self.subTest(action=action), patch.object(sys, "argv", arguments), patch.object(register, method, return_value={"ok": True}) as call, patch("sys.stdout", new_callable=io.StringIO):
                 self.assertEqual(register.main(), 0)
@@ -687,6 +687,40 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(after["mcpServers"].pop(register.SERVER_NAME), register.make_server_entry(self.config))
         self.assertEqual(after, self.original)
         self.assertEqual([command[2] for command, _ in self.calls], ["remove", "add-json", "remove", "add-json"])
+
+    def test_local_administrator_upgrade_preserves_other_connections_and_config(self):
+        _, previous = self.previous_distribution()
+        initial = copy.deepcopy(self.original)
+        initial["projects"][self.project.as_posix()] = {"mcpServers": {
+            register.SERVER_NAME: previous, "local-other": {"command": "other.exe"}}, "keep": "project metadata"}
+        self.write_profile(initial)
+        (self.app / "Computer Use MCP 관리자 연결.exe").write_bytes(b"synthetic admin bridge")
+        config_before = self.config.read_bytes()
+        result = register.upgrade_claude(self.config, scope="local", project_dir=self.project)
+        self.assertTrue(result["changed"])
+        self.assertEqual(result["scope"], "local")
+        after = self.read_profile()
+        self.assertEqual(after["projects"][self.project.as_posix()]["mcpServers"][register.SERVER_NAME],
+                         register.make_server_entry(self.config))
+        after["projects"][self.project.as_posix()]["mcpServers"][register.SERVER_NAME] = previous
+        self.assertEqual(after, initial)
+        self.assertEqual(self.config.read_bytes(), config_before)
+        self.assertTrue(all(kwargs["cwd"] == self.project for command, kwargs in self.calls if command[-1] != "--help"))
+
+    def test_local_failed_upgrade_restores_only_previous_selected_entry(self):
+        _, previous = self.previous_distribution()
+        initial = copy.deepcopy(self.original)
+        initial["projects"][self.project.as_posix()] = {"mcpServers": {register.SERVER_NAME: previous}}
+        self.write_profile(initial)
+        def fail_new(command, **kwargs):
+            if command[2] == "add-json" and command[-1] != "--help" and json.loads(command[4]) != previous:
+                self.calls.append((command, kwargs))
+                return subprocess.CompletedProcess(command, 1, "", "synthetic failure")
+            return self.fake_cli(command, **kwargs)
+        with patch.object(register.subprocess, "run", side_effect=fail_new):
+            with self.assertRaisesRegex(register.RegistrationError, "복원"):
+                register.upgrade_claude(self.config, scope="local", project_dir=self.project)
+        self.assertEqual(self.read_profile(), initial)
 
     def test_failed_upgrade_restores_previous_entry_without_touching_other_settings(self):
         _, previous = self.previous_distribution()

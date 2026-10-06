@@ -22,6 +22,7 @@ SERVER_NAME = "local-computer-use"
 # Version labels alone are never trusted; a foreign same-name MCP is preserved.
 # This proves these exact distributions, not signed-code security.
 PREVIOUS_MANIFESTS = {
+    "1778b37b2ed5fc839dcf0de1a7a11c145f96693269981eb70935f2968dff58a8": "0.6.0",
     "17e2c4cb787c6b54f001b0bbed58c88adb949d1c14f4b4e2b22cd43b82bb8ba9": "0.5.0",
     "fd408ef370fe7cd779e1dd985b35db955549c2888c6fa493d8038a2c9758b4ef": "0.1.0",
     "8e294e82ad446935a05d664b728fcbc994c2430e5c6836b5e6620bce5b44ee44": "0.2.0",
@@ -78,7 +79,19 @@ def make_server_entry(config_path: str | Path) -> dict:
     python = bundled if bundled.is_file() else console
     if not python.is_file() or not server.is_file():
         raise RegistrationError("MCP 실행파일이 없습니다. 배포 ZIP 전체를 압축 해제해 주세요.")
-    return _entry_for_paths(python, server, config)
+    entry = _entry_for_paths(python, server, config)
+    bridge = APP_DIR / "Computer Use MCP 관리자 연결.exe"
+    if bridge.is_file():
+        from consent import _plain_chain
+        if not _plain_chain(bridge):
+            raise RegistrationError("관리자 연결 실행파일의 실제 위치를 확인하지 못했습니다.")
+        entry["command"] = str(bridge.resolve())
+        entry["args"] = ["--config", str(config)]
+    elif bundled.is_file() and (APP_DIR / "BUILD-MANIFEST.json").is_file():
+        manifest = _read_object(APP_DIR / "BUILD-MANIFEST.json")
+        if manifest.get("product") == "Computer-Use-MCP" and manifest.get("version") == "0.7.0":
+            raise RegistrationError("관리자 연결 실행파일이 없습니다. 0.7.0 ZIP 전체를 다시 압축 해제해 주세요. 일반 권한 연결로 대체하지 않았습니다.")
+    return entry
 
 
 def _entry_for_paths(python: Path, server: Path, config: Path) -> dict:
@@ -282,7 +295,7 @@ def registration_status(config_path: str | Path, scope: str = "user",
         if others:
             message += " 다른 범위에도 같은 이름의 등록이 있어, 해당 작업 폴더에서는 그 등록이 우선할 수 있습니다."
     elif SERVER_NAME in servers:
-        upgrade = _previous_entry(existing) if project is None and not others else None
+        upgrade = _previous_entry(existing) if not others else None
         if upgrade:
             status, message = "upgrade_available", "이 도구의 이전 배포본 연결을 확인했습니다. '이전 연결을 새 버전으로 바꾸기'에서 경로를 확인한 뒤 갱신할 수 있습니다."
         else:
@@ -423,60 +436,58 @@ def unregister_claude(config_path: str | Path, scope: str = "user",
 def upgrade_claude(config_path: str | Path, scope: str = "user",
                    project_dir: str | Path | None = None) -> dict:
     """Explicit UI action; replace only a proven, intact previous distribution."""
-    if scope == "local":
-        raise RegistrationError("이전 연결 갱신은 user 범위에서만 지원합니다. local 등록은 자동 교체하지 않습니다.")
-    _scope_project(scope, project_dir)
+    project = _scope_project(scope, project_dir)
     config = Path(config_path).expanduser().resolve()
     if not config.is_file():
         raise RegistrationError("먼저 새 설정을 저장해 주세요.")
     entry = make_server_entry(config)
     path = user_config_file()
     before = _read_object(path)
-    existing = _servers(before, path).get(SERVER_NAME)
+    existing = _scoped_servers(before, path, project).get(SERVER_NAME)
     if existing == entry:
-        return {**registration_status(config), "changed": False}
+        return {**registration_status(config, scope, project), "changed": False}
     proof = _previous_entry(existing)
-    if not proof or _other_scopes(before, path):
-        raise RegistrationError("이 도구의 이전 사용자 범위 연결을 확인하지 못해 변경하지 않았습니다.")
+    if not proof or _other_scopes(before, path, project):
+        raise RegistrationError("이 도구의 선택한 범위 이전 연결을 확인하지 못해 변경하지 않았습니다.")
     executable = _native_claude()
     _check_cli_support(executable, "remove")
     _check_cli_support(executable, "add-json")
     if _read_object(path) != before:
         raise RegistrationError("확인 중 Claude 설정이 변경되었습니다. 연결 상태를 다시 확인해 주세요.")
     try:
-        _run_cli(executable, ["remove", SERVER_NAME, "--scope", "user"])
+        _run_cli(executable, ["remove", SERVER_NAME, "--scope", scope], project)
         removed = _read_object(path)
-        _verify_unrelated(before, removed, path)
-        if SERVER_NAME in _servers(removed, path):
+        _verify_unrelated(before, removed, path, project)
+        if SERVER_NAME in _scoped_servers(removed, path, project):
             raise RegistrationError("이전 연결 해제를 확인하지 못했습니다.")
         # Recheck immediately before adding; never overwrite a concurrent entry.
         if _read_object(path) != removed:
             raise RegistrationError("갱신 중 설정이 바뀌어 새 연결을 추가하지 않았습니다.")
-        _run_cli(executable, ["add-json", SERVER_NAME, json.dumps(entry, ensure_ascii=False), "--scope", "user"])
+        _run_cli(executable, ["add-json", SERVER_NAME, json.dumps(entry, ensure_ascii=False), "--scope", scope], project)
         after = _read_object(path)
-        _verify_unrelated(before, after, path)
-        if _servers(after, path).get(SERVER_NAME) != entry:
+        _verify_unrelated(before, after, path, project)
+        if _scoped_servers(after, path, project).get(SERVER_NAME) != entry:
             raise RegistrationError("새 연결을 확인하지 못했습니다.")
     except RegistrationError as error:
         # A CLI failure may occur after writing. Inspect before any recovery.
         current = _read_object(path)
-        _verify_unrelated(before, current, path)
-        current_servers = _servers(current, path)
+        _verify_unrelated(before, current, path, project)
+        current_servers = _scoped_servers(current, path, project)
         if current_servers.get(SERVER_NAME) == entry:
-            return {**registration_status(config), "changed": True, "previous_version": proof["version"]}
+            return {**registration_status(config, scope, project), "changed": True, "previous_version": proof["version"]}
         if SERVER_NAME not in current_servers and _read_object(path) == current:
             try:
-                _run_cli(executable, ["add-json", SERVER_NAME, json.dumps(existing, ensure_ascii=False), "--scope", "user"])
+                _run_cli(executable, ["add-json", SERVER_NAME, json.dumps(existing, ensure_ascii=False), "--scope", scope], project)
                 restored = _read_object(path)
-                _verify_unrelated(before, restored, path)
-                if _servers(restored, path).get(SERVER_NAME) == existing:
+                _verify_unrelated(before, restored, path, project)
+                if _scoped_servers(restored, path, project).get(SERVER_NAME) == existing:
                     raise RegistrationError("새 연결 갱신에 실패하여 이전 연결을 복원했습니다. 기존 Claude 연결은 유지됩니다.") from error
             except RegistrationError as restore_error:
-                if _servers(_read_object(path), path).get(SERVER_NAME) == existing:
+                if _scoped_servers(_read_object(path), path, project).get(SERVER_NAME) == existing:
                     raise RegistrationError("새 연결 갱신에 실패하여 이전 연결을 복원했습니다.") from error
                 raise RegistrationError("연결 갱신과 이전 연결 복원을 확인하지 못했습니다. 현재 연결 상태를 확인한 뒤 다시 연결해 주세요.") from restore_error
         raise RegistrationError("연결 갱신을 완료하지 못했습니다. 다른 등록은 덮어쓰지 않았습니다.") from error
-    return {**registration_status(config), "changed": True, "previous_version": proof["version"],
+    return {**registration_status(config, scope, project), "changed": True, "previous_version": proof["version"],
             "message": "이 도구의 이전 연결만 새 배포본으로 바꿨습니다. Claude Code를 다시 열어 주세요."}
 
 

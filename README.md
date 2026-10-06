@@ -1,4 +1,4 @@
-# Computer Use MCP 0.6.0
+# Computer Use MCP 0.7.0
 
 Claude Code 등 MCP를 지원하는 클라이언트에서 **이 PC의 프로그램 화면을 읽고 조작하는 Windows용 도구**입니다. Chrome, 메모장, 설치된 Excel뿐 아니라 사용자가 실행파일을 지정한 다른 프로그램도 등록할 수 있습니다. 실제 화면을 확인해 클릭·입력하고, 요청한 결과까지 확인하는 것을 목표로 합니다.
 
@@ -8,16 +8,18 @@ Claude Code 등 MCP를 지원하는 클라이언트에서 **이 PC의 프로그�
 
 | 파일 | 용도 |
 | --- | --- |
-| [Computer-Use-MCP-0.6.0-with-driver.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.6.0/Computer-Use-MCP-0.6.0-with-driver.zip) | MCP와 Cua Driver 0.28.2를 함께 준비하는 권장 묶음 |
-| [Computer-Use-MCP-0.6.0.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.6.0/Computer-Use-MCP-0.6.0.zip) | Driver를 직접 준비하는 기존 배포본 |
-| [Computer-Use-MCP-0.6.0-source.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.6.0/Computer-Use-MCP-0.6.0-source.zip) | 개발·코드 확인용 원본 소스 |
-| [cua-driver.exe](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.6.0/cua-driver.exe) | 실행파일만 받기. 전체 구성은 Driver 포함 ZIP 사용 |
+| [Computer-Use-MCP-0.7.0-with-driver.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.7.0/Computer-Use-MCP-0.7.0-with-driver.zip) | MCP와 Cua Driver 0.28.2를 함께 준비하는 권장 묶음 |
+| [Computer-Use-MCP-0.7.0.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.7.0/Computer-Use-MCP-0.7.0.zip) | Driver를 직접 준비하는 기존 배포본 |
+| [Computer-Use-MCP-0.7.0-source.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.7.0/Computer-Use-MCP-0.7.0-source.zip) | 개발·코드 확인용 원본 소스 |
+| [cua-driver.exe](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.7.0/cua-driver.exe) | 실행파일만 받기. 전체 구성은 Driver 포함 ZIP 사용 |
 
-[전체 릴리스와 파일 해시](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.6.0) · [SHA256SUMS.txt](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.6.0/SHA256SUMS.txt)
+[전체 릴리스와 파일 해시](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.7.0) · [SHA256SUMS.txt](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.7.0/SHA256SUMS.txt)
 
 GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실행파일과 동봉 Python이 필요한 일반 사용자는 위의 배포 ZIP을 받으세요. 지원 대상은 Windows x86_64이며, 사용할 프로그램과 Claude Code 등 MCP 클라이언트는 이 PC에 설치되어 있어야 합니다.
 
 ## 처음 연결하기
+
+연결 시작 때 Windows UAC 창이 나타나면 같은 로그인 계정의 관리자 권한으로 허용하세요. Claude Code 전체를 관리자 권한으로 실행할 필요는 없습니다. 기존 연결은 새 배포본의 **이전 버전 연결 확인·갱신** 또는 `INSTALL.md`의 범위별 갱신 방법을 이용합니다.
 
 1. 권장 ZIP을 내려받아 **유지할 폴더에 모두 압축 풉니다.** ZIP 안에서 바로 실행하지 마세요. 연결 후에는 이 폴더를 옮기거나 삭제하지 않습니다.
 2. 압축 푼 `Computer-Use-MCP` 폴더에서 **Computer Use MCP 설정.exe**를 두 번 누릅니다.
@@ -49,7 +51,7 @@ GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실�
 
 ## 작업 후 종료까지 확인하기
 
-0.6.0은 종료 요청 전에 원래 창·프로세스를 확인하고, 종료 후 상태를 다시 읽습니다. 저장·종료 확인창이 남으면 완료로 처리하지 않습니다. 숨김·최소화와 실제 종료를 구분하고, **특정 창이 닫혔는지**와 **원래 프로세스가 종료됐는지**도 구분합니다.
+0.7.0은 종료 요청 전에 원래 창·프로세스를 확인하고, 종료 후 상태를 다시 읽습니다. 저장·종료 확인창이 남으면 완료로 처리하지 않습니다. 숨김·최소화와 실제 종료를 구분하고, **특정 창이 닫혔는지**와 **원래 프로세스가 종료됐는지**도 구분합니다.
 
 > 작업이 끝나면 지정한 시험 파일에 저장하고 프로그램을 종료해줘. 저장·종료 확인창도 처리하고 실제 종료됐는지 확인해줘.
 
@@ -57,9 +59,11 @@ GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실�
 
 ## 검증 범위와 안내
 
-0.6.0 자동 테스트는 **471개 중 469개 통과, 2개 제외**입니다. 시험용 Windows 앱에서 저장·버리기·취소·직접 종료·숨김·최소화·여러 창을 다룬 6가지 종료 시나리오를 소스 실행과 배포본 실행에서 모두 통과했습니다. 개별 업무 프로그램의 성공이나 무인 운영까지 검증한 결과는 아닙니다.
+0.7.0은 MCP와 Cua Driver가 관리자 권한으로 실행되도록 전용 연결 프로그램을 추가합니다. 일반 Claude Code에서도 연결할 수 있으며 Windows UAC 승인이 필요할 수 있습니다. 같은 로그인 사용자·세션만 허용하며 취소·차단·다른 계정 사용 시 일반 실행으로 대신 연결하지 않습니다. `computer_status.execution`에서 실제 관리자·승격·무결성 수준을 확인합니다.
 
-공개용 소스를 별도 폴더에서 다시 검사한 결과는 **471개 중 467개 통과, 4개 제외**입니다. 공개 소스에는 개발 PC의 실측 자료와 이전 배포 ZIP을 넣지 않아, 해당 자료를 요구하는 검사도 제외됩니다. MCP 본체 코드는 검증된 원본과 일치합니다.
+관리자 권한을 확보해도 다른 계정의 프로그램, Windows 보안 확인 화면, 회사 정책으로 차단된 프로그램, UIA를 제공하지 않는 화면까지 자동 지원되는 것은 아닙니다. 기존 허용 프로그램과 작업 제한은 유지합니다.
+
+일반 권한의 전용 연결 경로에서는 합성 시험 앱의 한글 입력·버튼 결과·실제 프로세스 종료를 확인했습니다. 이 PC의 관리자 실행 시험은 승인 응답을 받지 못해 연결 시간이 초과됐으며, 관리자 상태의 실제 화면 조작은 아직 확인하지 못했습니다. 원래 0.6.0의 종료 시험 기록은 `VALIDATION.html`에 보존했습니다.
 
 최근 실제 Excel 시험에서는 요청한 전체 값 중 일부만 입력되는 문제가 남아 있습니다. 업무에 쓰기 전에 전체 셀 값과 저장 파일을 직접 대조해야 합니다. 자세한 결과와 이전 시험 기록은 아래 보고서에 있습니다.
 
@@ -70,4 +74,4 @@ GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실�
 
 GitHub에서는 HTML이 소스로 보일 수 있습니다. **배포 ZIP을 압축 푼 뒤 README.html 또는 VALIDATION.html을 두 번 누르면 브라우저에서 안내와 보고서를 읽을 수 있습니다.**
 
-Driver는 Git 소스에 넣지 않고 릴리스 파일로 제공합니다. 포함판과 별도 준비판을 함께 유지하며, 실제 환경 시험 후 Driver 포함 배포를 제외할 수 있습니다. 기존 0.6.0 MCP 본체는 그대로 제공됩니다.
+Driver는 Git 소스에 넣지 않고 릴리스 파일로 제공합니다. 포함판과 별도 준비판을 함께 유지하며, 실제 환경 시험 후 Driver 포함 배포를 제외할 수 있습니다. 기존 0.7.0 MCP 본체는 그대로 제공됩니다.
