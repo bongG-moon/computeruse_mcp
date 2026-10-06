@@ -15,12 +15,14 @@ using System.Windows.Forms;
 internal static class ElementPicker
 {
     [StructLayout(LayoutKind.Sequential)] internal struct POINT { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)] internal struct RECT { public int Left, Top, Right, Bottom; }
     [DllImport("user32.dll")] internal static extern bool GetCursorPos(out POINT point);
     [DllImport("user32.dll")] internal static extern IntPtr WindowFromPoint(POINT point);
     [DllImport("user32.dll")] internal static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
     [DllImport("user32.dll")] internal static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
     [DllImport("user32.dll")] internal static extern bool IsWindow(IntPtr hwnd);
     [DllImport("user32.dll")] internal static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")] internal static extern bool GetWindowRect(IntPtr hwnd, out RECT bounds);
     [DllImport("user32.dll")] internal static extern bool RegisterHotKey(IntPtr hwnd, int id, uint modifiers, uint key);
     [DllImport("user32.dll")] internal static extern bool UnregisterHotKey(IntPtr hwnd, int id);
     [DllImport("user32.dll")] internal static extern short GetAsyncKeyState(int key);
@@ -116,7 +118,14 @@ internal static class ElementPicker
         string role = element.Current.ControlType.ProgrammaticName.Replace("ControlType.", "");
         string id = element.Current.AutomationId ?? "", name = element.Current.Name ?? "";
         if (id.Length > 1000 || name.Length > 1000) throw new InvalidOperationException("unavailable");
-        return new Dictionary<string, object> { { "role", role }, { "automation_id", id }, { "name", name }, { "is_password", false } };
+        // Pattern availability is metadata only; do not read values or invoke
+        // a pattern. Retain even legacy/custom patterns conservatively rather
+        // than declaring a usable container unsupported from its role alone.
+        bool controlPatterns = false;
+        foreach (AutomationPattern pattern in element.GetSupportedPatterns())
+            if (pattern != WindowPattern.Pattern && pattern != TransformPattern.Pattern) controlPatterns = true;
+        return new Dictionary<string, object> { { "role", role }, { "automation_id", id }, { "name", name },
+            { "is_password", false }, { "has_control_patterns", controlPatterns } };
     }
 
     internal sealed class Candidate
@@ -132,11 +141,14 @@ internal static class ElementPicker
     {
         if (!TargetAt(point, pid, hwnd)) throw new InvalidOperationException("outside_target");
         var found = new List<Candidate>();
+        bool patternlessRoot = false;
         AutomationElement element = AutomationElement.FromPoint(new System.Windows.Point(point.X, point.Y));
         for (int level = 0; level < 17 && element != null; level++)
         {
             if (element.Current.ProcessId != pid) break;
             var identity = Identity(element, pid);
+            if (Convert.ToString(identity["role"]) == "Window" && element.Current.NativeWindowHandle == hwnd.ToInt64()
+                && !Convert.ToBoolean(identity["has_control_patterns"])) patternlessRoot = true;
             System.Windows.Rect bounds = element.Current.BoundingRectangle;
             foreach (Candidate child in found) child.Ancestors.Add(identity);
             // The root window can disambiguate a candidate but is never offered
@@ -155,7 +167,16 @@ internal static class ElementPicker
             if (element.Current.NativeWindowHandle == hwnd.ToInt64()) break;
             element = TreeWalker.ControlViewWalker.GetParent(element);
         }
-        if (found.Count == 0) throw new InvalidOperationException("unavailable");
+        if (found.Count == 0) throw new InvalidOperationException(patternlessRoot ? "controls_not_exposed" : "unavailable");
+        bool containersOnly = true;
+        foreach (Candidate candidate in found) {
+            string role = Convert.ToString(candidate.Identity["role"]);
+            if ((role != "Pane" && role != "Group" && role != "Custom") ||
+                Convert.ToBoolean(candidate.Identity["has_control_patterns"])) containersOnly = false;
+        }
+        // Rendered canvases/emulators may expose only unnamed or named panes.
+        // Showing one as if it were the visible button leads to repeat F8 loops.
+        if (containersOnly) throw new InvalidOperationException("controls_not_exposed");
         if (!TargetAt(point, pid, hwnd)) throw new InvalidOperationException("outside_target");
         return found;
     }
@@ -195,6 +216,7 @@ internal static class ElementPicker
         DateTime readingDeadline, releaseDeadline, pickAt;
         Dictionary<string, object> pending;
         POINT pickedPoint;
+        RECT pickedWindowBounds;
         float layoutScale;
         int Px(int value) { return (int)Math.Round(value * layoutScale); }
         Rectangle Box(int x, int y, int width, int height) { return new Rectangle(Px(x), Px(y), Px(width), Px(height)); }
@@ -344,12 +366,13 @@ internal static class ElementPicker
             POINT point;
             if (!GetCursorPos(out point)) { Finish("unavailable"); return; }
             if (!TargetAt(point, pid, target)) { InvalidPoint(point); return; }
+            if (!GetWindowRect(target, out pickedWindowBounds)) { Finish("target_unavailable"); return; }
             pickedPoint = point; reading = true; readingDeadline = DateTime.UtcNow.AddSeconds(6); selectLater.Enabled = false;
             message.Text = "가리킨 요소와 상위 요소를 확인하고 있습니다.\n완료되면 원하는 요소를 직접 골라 주세요.";
             var worker = new Thread(delegate() {
                 List<Candidate> candidates = null; string failure = null;
                 try { candidates = Observe(point, pid, target); }
-                catch (InvalidOperationException error) { failure = error.Message == "protected" || error.Message == "outside_target" ? error.Message : "unavailable"; }
+                catch (InvalidOperationException error) { failure = error.Message == "protected" || error.Message == "outside_target" || error.Message == "controls_not_exposed" ? error.Message : "unavailable"; }
                 catch { failure = "unavailable"; }
                 try { BeginInvoke(new Action(delegate {
                     if (done || finishing) return;
@@ -377,6 +400,8 @@ internal static class ElementPicker
                 { "element", candidate.Identity }, { "ancestors", candidate.Ancestors },
                 { "point", new Dictionary<string, object> { { "x", pickedPoint.X }, { "y", pickedPoint.Y } } },
                 { "bounds", new Dictionary<string, object> { { "x", bounds.X }, { "y", bounds.Y }, { "width", bounds.Width }, { "height", bounds.Height } } },
+                { "window_bounds", new Dictionary<string, object> { { "x", pickedWindowBounds.Left }, { "y", pickedWindowBounds.Top },
+                    { "width", pickedWindowBounds.Right - pickedWindowBounds.Left }, { "height", pickedWindowBounds.Bottom - pickedWindowBounds.Top } } },
                 { "human_confirmed", true }, { "candidate_level", choices.SelectedIndex }
             });
         }

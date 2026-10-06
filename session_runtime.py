@@ -237,6 +237,18 @@ class SessionRuntime:
                 answer.setdefault("content", []).append({"type": "text", "text": self.reason})
             return answer
 
+    def capture_checkpoint(self, target):
+        """Explicit saved screenshot step; never enables visual session inputs."""
+        with self.execution_lock:
+            self.check_active()
+            answer = self.guard.capture_checkpoint(target)
+            if self._driver_ended():
+                self.stop("Cua Driver 연결이 종료되어 화면 확인을 중지했습니다. computer_begin으로 다시 시작하세요.")
+            # Cancellation/deadline while the image was read must suppress the
+            # image and cannot become a checkpoint that the caller can approve.
+            self.check_active()
+            return answer
+
     def launch(self, program_id):
         with self.execution_lock:
             self.check_active()

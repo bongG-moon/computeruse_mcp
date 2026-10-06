@@ -54,7 +54,11 @@ class Native:
             ("GetDlgCtrlID", [wintypes.HWND], ctypes.c_int),
             ("GetForegroundWindow", [], wintypes.HWND),
             ("SetForegroundWindow", [wintypes.HWND], wintypes.BOOL),
+            ("AttachThreadInput", [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL], wintypes.BOOL),
             ("SetCursorPos", [ctypes.c_int, ctypes.c_int], wintypes.BOOL),
+            ("WindowFromPoint", [wintypes.POINT], wintypes.HWND),
+            ("GetCursorPos", [ctypes.POINTER(wintypes.POINT)], wintypes.BOOL),
+            ("SetWindowPos", [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT], wintypes.BOOL),
             ("PostMessageW", [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM], wintypes.BOOL),
             ("SendMessageW", [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM], ctypes.c_ssize_t),
             ("keybd_event", [wintypes.BYTE, wintypes.BYTE, wintypes.DWORD, ctypes.c_size_t], None),
@@ -69,6 +73,7 @@ class Native:
         self.kernel.WaitForSingleObject.restype = wintypes.DWORD
         self.kernel.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
         self.kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        self.kernel.GetCurrentThreadId.restype = wintypes.DWORD
 
     def pid(self, hwnd):
         pid = wintypes.DWORD()
@@ -109,7 +114,9 @@ class Native:
         if self.kernel.WaitForSingleObject(handle, 0) != 258:
             self.kernel.CloseHandle(handle)
             raise AssertionError("Helper exited before its visible-ready response")
-        return {"pid": pid, "hwnd": hwnd, "handle": handle, "closed": False}
+        return {"pid": pid, "hwnd": hwnd, "handle": handle, "closed": False,
+                "f8_available": answer.get("f8_available") is True,
+                "escape_available": answer.get("escape_available") is True}
 
     def wait_exited(self, helper, timeout=10):
         ended = self.kernel.WaitForSingleObject(helper["handle"], int(timeout * 1000)) == 0
@@ -133,17 +140,44 @@ class Native:
             time.sleep(.05)
         raise AssertionError("Enabled native review button missing: " + label)
 
-    def point_at(self, target, helper, caption, role="Button"):
+    def point_at(self, target, helper, caption, role="Button", *, require_foreground=False):
         assert self.pid(target["window_id"]) == target["pid"]
         assert self.pid(helper["hwnd"]) == helper["pid"] and not self.wait_exited(helper, 0)
         candidates = [row for row in self.windows(target["pid"], target["window_id"])
                       if row["visible"] and ((role == "Button" and row["text"] == caption and "BUTTON" in row["class"].upper())
                                              or (role == "ComboBox" and "COMBOBOX" in row["class"].upper()))]
         assert len(candidates) == 1, candidates
+        if not require_foreground:
+            # Raise only our owned synthetic fixture, without stealing focus.
+            # Pointer observation/countdown needs visibility, not keyboard focus.
+            assert self.user.SetWindowPos(target["window_id"], -1, 0, 0, 0, 0, 0x0053)
+            x1, y1, x2, y2 = candidates[0]["bounds"]
+            point = wintypes.POINT(x2-8 if role == "ComboBox" else (x1+x2)//2, (y1+y2)//2)
+            assert self.user.SetCursorPos(point.x, point.y)
+            hit_root = self.user.GetAncestor(self.user.WindowFromPoint(point), 2)
+            assert hit_root == target["window_id"] and self.pid(hit_root) == target["pid"], "Owned fixture point is covered"
+            return
         self.user.SetForegroundWindow(target["window_id"])
         deadline = time.monotonic()+2
         while self.user.GetForegroundWindow() != target["window_id"] and time.monotonic() < deadline:
             time.sleep(.03)
+        if self.user.GetForegroundWindow() != target["window_id"]:
+            # Harness-only focus recovery. Attach temporarily to the foreground
+            # input queue, and only activate the PID-checked synthetic fixture.
+            foreground = self.user.GetForegroundWindow()
+            current_thread = self.kernel.GetCurrentThreadId()
+            foreground_thread = self.user.GetWindowThreadProcessId(foreground, None)
+            attached = bool(foreground_thread and foreground_thread != current_thread and
+                            self.user.AttachThreadInput(current_thread, foreground_thread, True))
+            try:
+                assert self.pid(target["window_id"]) == target["pid"]
+                self.user.SetForegroundWindow(target["window_id"])
+            finally:
+                if attached:
+                    self.user.AttachThreadInput(current_thread, foreground_thread, False)
+            deadline = time.monotonic()+2
+            while self.user.GetForegroundWindow() != target["window_id"] and time.monotonic() < deadline:
+                time.sleep(.03)
         assert self.user.GetForegroundWindow() == target["window_id"], "Fixture focus not confirmed; no hotkey was sent"
         x1, y1, x2, y2 = candidates[0]["bounds"]
         # On a combo arrow UIA commonly identifies a child button; explicitly
@@ -152,14 +186,24 @@ class Native:
 
     def key(self, target, helper, vk):
         assert self.pid(target["window_id"]) == target["pid"] and not self.wait_exited(helper, 0)
-        assert self.user.GetForegroundWindow() == target["window_id"], "Fixture focus not confirmed"
+        foreground = self.user.GetForegroundWindow()
+        assert foreground in {target["window_id"], helper["hwnd"]}, "Owned fixture/picker focus not confirmed"
+        assert self.pid(helper["hwnd"]) == helper["pid"]
+        assert helper["f8_available" if vk == 0x77 else "escape_available"], "Requested hotkey is not registered"
+        point = wintypes.POINT()
+        assert self.user.GetCursorPos(ctypes.byref(point))
+        assert self.user.GetAncestor(self.user.WindowFromPoint(point), 2) == target["window_id"]
         self.user.keybd_event(vk, 0, 0, 0)  # Consumed by the visible teaching helper.
         time.sleep(.06)
         self.user.keybd_event(vk, 0, 2, 0)
 
     def choose_by_f8(self, target, helper, caption):
         self.point_at(target, helper, caption)
-        self.key(target, helper, 0x77)
+        if helper["f8_available"] and self.user.GetForegroundWindow() in {target["window_id"], helper["hwnd"]}:
+            self.key(target, helper, 0x77)
+            return "f8"
+        self.click_helper(helper, "3초 후 위치 선택")
+        return "countdown"
 
     def wait_review(self, helper):
         deadline = time.monotonic()+15
@@ -252,7 +296,7 @@ def run_picker(manifest, bundle=None):
     client = None
     current_run = None
     report = {"passed": False, "developer_only": True, "synthetic_fixture": True,
-              "human_training_tested": False, "automated_f8": True, "external_llm_used": False,
+              "human_training_tested": False, "automated_f8": False, "external_llm_used": False,
               "private_application_used": False, "administrator_gui_tested": False,
               "packaged": bundle is not None, "scenarios": {}}
     def digest(path):
@@ -342,6 +386,12 @@ def run_picker(manifest, bundle=None):
         answer = call("computer_teach_element", args)
         assert answer["status"] == "awaiting_selection" and answer["picker_visible"] is True, answer
         helper = native.ready_helper(answer, helper_executable)
+        for path in (current_run / "learning").glob("*.ready.json"):
+            info = json.loads(path.read_text(encoding="utf-8"))
+            if info.get("helper_pid") == helper["pid"] and info.get("helper_window_id") == helper["hwnd"]:
+                helper["f8_available"] = info.get("f8_available") is True
+                helper["escape_available"] = info.get("escape_available") is True
+                break
         helpers.append(helper)
         helper["teaching_id"] = answer["teaching_id"]
         helper["ready_response_seconds"] = round(time.monotonic()-started, 3)
@@ -392,7 +442,8 @@ def run_picker(manifest, bundle=None):
             "helper_pid": helper["pid"], "helper_window_id": helper["hwnd"], "reused_same_helper": True,
             "visible_ready_response_seconds": helper["ready_response_seconds"], "performance_guarantee": False,
             "driver_tree_reads_before_visible_ready": helper["driver_tree_reads_before_visible_ready"]}
-        native.choose_by_f8(target, helper, "적용")
+        trigger = native.choose_by_f8(target, helper, "적용")
+        report["automated_f8"] = trigger == "f8"
         native.wait_review(helper)
         native.capture_helper(helper, folder / "picker-review.png")
         assert call("computer_elements", {"program_id": app["id"]})["total"] == 0, "Selection must require review confirmation"
@@ -405,16 +456,16 @@ def run_picker(manifest, bundle=None):
         listed = call("computer_elements", {"program_id": app["id"], "query": "적용 버튼"})
         assert listed["total"] == 1 and listed["elements"][0]["id"] == learned["id"], listed
         stored_before = (folder / "state/elements.json").read_bytes()
-        report["scenarios"]["f8_review_confirm_and_automatic_save"] = {"passed": True, "element_id": learned["id"],
+        report["scenarios"]["selection_review_confirm_and_automatic_save"] = {"passed": True, "element_id": learned["id"],
             "selector": learned["selector"], "fixture_unchanged": True, "key_count": before["key_count"],
-            "confirmed_helper_exited": True, "human_input_used": False}
+            "confirmed_helper_exited": True, "human_input_used": False, "selection_trigger": trigger}
         first_use = use_button(target, learned["id"])
         report["scenarios"]["learned_button_verified_use"] = {"passed": True, "result": first_use, "receipt": receipt()}
 
         combo_before = receipt()
         combo_waiting, combo_helper = start_teaching(teach_args(target, "처리 상태 선택"))
-        native.click_helper(combo_helper, "3초 후 위치 선택")
         native.point_at(target, combo_helper, "처리 상태", "ComboBox")
+        native.click_helper(combo_helper, "3초 후 위치 선택")
         parent_choice = native.choose_review_role(combo_helper, "ComboBox")
         native.capture_helper(combo_helper, folder / "picker-combobox-review.png")
         assert receipt() == combo_before, "Countdown/parent selection leaked fixture input"
@@ -430,11 +481,16 @@ def run_picker(manifest, bundle=None):
         esc_before = receipt()
         esc_waiting, esc_helper = start_teaching(teach_args(target, "Esc로 취소할 요소"))
         native.point_at(target, esc_helper, "적용")
-        native.key(target, esc_helper, 0x1B)
+        if esc_helper["escape_available"] and native.user.GetForegroundWindow() in {target["window_id"], esc_helper["hwnd"]}:
+            native.key(target, esc_helper, 0x1B)
+            cancel_trigger = "escape"
+        else:
+            native.click_helper(esc_helper, "취소")
+            cancel_trigger = "cancel_button"
         esc_answer = terminal(esc_waiting["teaching_id"], {"cancelled"})
         assert native.wait_exited(esc_helper) and receipt() == esc_before
         assert (folder / "state/elements.json").read_bytes() == stored_before
-        report["scenarios"]["escape_cancellation"] = {"passed": True, "status": esc_answer["status"],
+        report["scenarios"]["native_cancellation"] = {"passed": True, "status": esc_answer["status"], "cancel_trigger": cancel_trigger,
             "fixture_unchanged": True, "stored_elements_unchanged": True, "cancelled_helper_exited": True}
 
         cancel_before = receipt()

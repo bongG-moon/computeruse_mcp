@@ -12,6 +12,7 @@ import time
 import uuid
 
 from vendor.guard import atomic_json, check_app, utc_now
+from process_steps import PROCESS_OPERATIONS, execute_process_step, validate_process_step
 
 
 class WorkflowError(ValueError):
@@ -30,6 +31,13 @@ class BindingError(WorkflowError):
 
 def operation_step(step):
     return {k: v for k, v in step.items() if k not in {"program_id", "window_ref"}}
+
+
+def validate_workflow_step(step):
+    from operations import validate_step
+    operation = operation_step(step)
+    kind = operation.get("operation")
+    return validate_process_step(operation) if isinstance(kind, str) and kind in PROCESS_OPERATIONS else validate_step(operation)
 
 
 def target_key(step):
@@ -59,7 +67,7 @@ def validate_recipe(steps, variables, program_ids):
         ref = step.get("window_ref", "main")
         if not isinstance(ref, str) or not WINDOW_REF.fullmatch(ref):
             raise WorkflowError("window_ref는 영문자로 시작하는 1~64자 창 이름이어야 합니다.")
-        validate_step(operation_step(step))
+        validate_workflow_step(step)
         # Templates may only substitute strings, never keys or the tool/program identity.
         if "${" in step["program_id"] or "${" in step.get("operation", "") or "${" in ref:
             raise WorkflowError("프로그램이나 동작 이름은 입력 변수로 바꿀 수 없습니다.")
@@ -91,13 +99,14 @@ def render_steps(task, inputs):
     # Validate expanded sizes and fields without evaluating substituted text again.
     from operations import validate_step
     for step in rendered:
-        validate_step(operation_step(step))
+        validate_workflow_step(step)
     return rendered, values
 
 
 class WorkflowRunner:
     FIELDS = {"format", "run_id", "task_id", "revision", "recipe_hash", "inputs_hash", "created_at", "updated_at",
               "completed_steps", "total_steps", "pending_step", "status", "task_verified", "session_id", "duration_ms"}
+    OPTIONAL_FIELDS = {"checkpoint"}
     def __init__(self, state_dir):
         self.root = Path(state_dir) / "workflows"
 
@@ -116,7 +125,7 @@ class WorkflowRunner:
             if path.stat().st_size > 64000:
                 raise ValueError("size")
             value = json.loads(path.read_text(encoding="utf-8"))
-            if (not isinstance(value, dict) or set(value) != self.FIELDS
+            if (not isinstance(value, dict) or not self.FIELDS <= set(value) or set(value)-self.FIELDS-self.OPTIONAL_FIELDS
                     or value.get("format") != "computer-workflow/v1" or value.get("run_id") != run_id
                     or type(value.get("completed_steps")) is not int
                     or type(value.get("total_steps")) is not int
@@ -132,6 +141,14 @@ class WorkflowRunner:
                     or value["task_verified"] != (value["status"] == "verified")
                     or (value["task_verified"] and (value["completed_steps"] != value["total_steps"] or value["pending_step"] is not None))):
                 raise ValueError("metadata")
+            if "checkpoint" in value:
+                checkpoint = value["checkpoint"]
+                if (not isinstance(checkpoint, dict) or set(checkpoint) != {"id", "step_index", "capture_available", "target_hash"}
+                        or not isinstance(checkpoint["id"], str) or not re.fullmatch(r"[a-f0-9]{32}", checkpoint["id"])
+                        or type(checkpoint["step_index"]) is not int or checkpoint["step_index"] != value["pending_step"]
+                        or type(checkpoint["capture_available"]) is not bool
+                        or not isinstance(checkpoint["target_hash"], str) or not re.fullmatch(r"[a-f0-9]{64}", checkpoint["target_hash"])):
+                    raise ValueError("checkpoint")
             return value
         except (OSError, ValueError, AttributeError, TypeError):
             raise WorkflowError("실행 기록을 읽지 못했습니다. 원본은 유지됩니다.") from None
@@ -167,9 +184,6 @@ class WorkflowRunner:
     @contextmanager
     def _lock(self, path):
         with path.with_suffix(".lock").open("a+b") as stream:
-            if stream.seek(0, os.SEEK_END) == 0:
-                stream.write(b"0")
-                stream.flush()
             stream.seek(0)
             try:
                 if os.name == "nt":
@@ -181,6 +195,11 @@ class WorkflowRunner:
             except OSError:
                 raise WorkflowError("이 반복 작업이 다른 요청에서 실행 중입니다.") from None
             try:
+                # Empty files still support a Windows byte-range lock. Never
+                # write the initialization byte before owning that range.
+                if stream.seek(0, os.SEEK_END) == 0:
+                    stream.write(b"0")
+                    stream.flush()
                 yield
             finally:
                 stream.seek(0)
@@ -189,19 +208,23 @@ class WorkflowRunner:
                 else:
                     fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
-    def run(self, runtime, task, inputs, targets, *, resume_run_id=None, delivery_mode="background"):
+    def run(self, runtime, task, inputs, targets, *, resume_run_id=None, delivery_mode="background", acknowledge_checkpoint=None):
         # Nested low-level calls use the same reentrant runtime lock. Emergency
         # stop never acquires this lock, so a composite operation stays cancellable.
         with getattr(runtime, "execution_lock", nullcontext()):
-            return self._run(runtime, task, inputs, targets, resume_run_id=resume_run_id, delivery_mode=delivery_mode)
+            return self._run(runtime, task, inputs, targets, resume_run_id=resume_run_id, delivery_mode=delivery_mode,
+                             acknowledge_checkpoint=acknowledge_checkpoint)
 
-    def _run(self, runtime, task, inputs, targets, *, resume_run_id=None, delivery_mode="background"):
+    def _run(self, runtime, task, inputs, targets, *, resume_run_id=None, delivery_mode="background", acknowledge_checkpoint=None):
         from operations import Operations, verification_step
         if runtime.mode != "uia":
             raise WorkflowError("검증형 반복 작업은 현재 UIA 방식에서만 지원합니다.")
         runtime.check_active()
         if delivery_mode not in {"background", "foreground"}:
             raise WorkflowError("입력 전달 방식을 확인하세요.")
+        if acknowledge_checkpoint is not None and (not resume_run_id or not isinstance(acknowledge_checkpoint, str)
+                                                   or not re.fullmatch(r"[a-f0-9]{32}", acknowledge_checkpoint)):
+            raise WorkflowError("화면 확인을 승인하려면 resume_run_id와 해당 checkpoint.id를 함께 지정하세요.")
         steps, values = render_steps(task, inputs)
         apps = {app["id"]: app for app in runtime.programs}
         if not set(task["program_ids"]) <= set(apps):
@@ -236,10 +259,22 @@ class WorkflowRunner:
             binding = bindings[target_key(item)]
             app = apps[item["program_id"]]
             allowed = {check_app(p) for p in [app["exe"], *app.get("control_exes", [])]}
-            if check_app(runtime.guard.process_resolver(binding["pid"])) not in allowed:
+            try:
+                current_executable = check_app(runtime.guard.process_resolver(binding["pid"]))
+            except (OSError, ValueError, RuntimeError) as error:
+                raise BindingError("연결한 프로그램의 실행 상태를 확인하지 못했습니다. 현재 창을 다시 지정하세요.") from error
+            if current_executable not in allowed:
                 raise BindingError("연결한 프로그램의 실행 상태가 달라졌습니다. 현재 창을 다시 지정하세요.")
+            def checked(target):
+                resolver = getattr(runtime.guard, "window_resolver", None)
+                try:
+                    if not callable(resolver) or resolver(target["window_id"]) != target["pid"]:
+                        raise BindingError("연결한 창이 없어졌거나 다른 프로그램의 창으로 바뀌었습니다. 현재 창을 다시 지정하세요.")
+                except (OSError, RuntimeError) as error:
+                    raise BindingError("현재 창의 소유 프로그램을 확인하지 못했습니다. 현재 창을 다시 지정하세요.") from error
+                return target
             if "window_id" in binding:
-                return dict(binding)
+                return checked(dict(binding))
             answer = runtime.call("list_windows", {"pid": binding["pid"], "on_screen_only": True})
             from operations import _payload
             data = _payload(answer)
@@ -251,7 +286,7 @@ class WorkflowRunner:
             matches = [w for w in windows if isinstance(w, dict) and w.get("pid") == binding["pid"] and w.get("title") == binding["window_title"]]
             if len(matches) != 1 or type(matches[0].get("window_id")) is not int or matches[0]["window_id"] < 1:
                 raise BindingError("지정한 제목의 창이 없거나 여러 개입니다. 현재 창을 다시 관찰해 연결하세요.")
-            return {"pid": binding["pid"], "window_id": matches[0]["window_id"]}
+            return checked({"pid": binding["pid"], "window_id": matches[0]["window_id"]})
         run_id = resume_run_id or uuid.uuid4().hex
         path = self._path(run_id)
         with self._lock(path):
@@ -261,6 +296,17 @@ class WorkflowRunner:
                 record = self.progress(run_id)
                 if record.get("recipe_hash") != recipe_hash or record.get("inputs_hash") != input_hash:
                     raise WorkflowError("작업 내용이나 입력값이 바뀌었습니다. 이전 실행을 이어갈 수 없습니다.")
+                if acknowledge_checkpoint is not None:
+                    checkpoint = record.get("checkpoint", {})
+                    if (checkpoint.get("id") != acknowledge_checkpoint or checkpoint.get("capture_available") is not True
+                            or record["pending_step"] is None or steps[record["pending_step"]]["operation"] != "checkpoint"):
+                        raise WorkflowError("현재 대기 중인 화면 확인 ID와 일치하지 않습니다. 최신 체크포인트를 확인하세요.")
+                    current_target = resolve(steps[record["pending_step"]])
+                    expected_target = digest({"session_id": runtime.id, **current_target})
+                    window_resolver = getattr(runtime.guard, "window_resolver", None)
+                    if (checkpoint["target_hash"] != expected_target or not callable(window_resolver)
+                            or window_resolver(current_target["window_id"]) != current_target["pid"]):
+                        raise WorkflowError("캡처 이후 세션이나 대상 창이 달라졌습니다. 승인 ID 없이 이어가기로 화면을 다시 확인하세요.")
             else:
                 record = {"format": "computer-workflow/v1", "run_id": run_id, "task_id": task["id"],
                     "revision": task.get("revision", 1), "recipe_hash": recipe_hash, "inputs_hash": input_hash,
@@ -276,7 +322,34 @@ class WorkflowRunner:
                 atomic_json(path, record)
             def check_step(index):
                 item = steps[index]
+                if item["operation"] in {"delay", "checkpoint"}:
+                    return {"task_verified": True, "input_dispatched": False}
+                if item["operation"] == "wait_for_element":
+                    return execute_process_step(runtime, {**operation_step(item), "timeout_ms": 0}, resolve(item))
                 return engine.execute(verification_step(operation_step(item)), resolve(item), delivery_mode=delivery_mode)
+            def check_prior(index):
+                for candidate in range(index-1, -1, -1):
+                    if steps[candidate]["operation"] not in {"delay", "checkpoint"}:
+                        return check_step(candidate)
+                runtime.check_active()
+                return {"task_verified": True, "input_dispatched": False}
+            def capture_checkpoint(index, target):
+                item = steps[index]
+                checkpoint = {"id": uuid.uuid4().hex, "step_index": index, "capture_available": False,
+                              "target_hash": digest({"session_id": runtime.id, **target})}
+                record["checkpoint"] = checkpoint
+                save("running")
+                captured = execute_process_step(runtime, operation_step(item), target)
+                checkpoint["capture_available"] = captured.pop("checkpoint_ready", False) is True
+                images = captured.pop("checkpoint_content", [])
+                save("needs_review")
+                return {**record, "last_result": captured,
+                        "checkpoint": {**checkpoint, "message": item["message"], "human_review_required": True,
+                                       "image_verified": False},
+                        "checkpoint_content": images,
+                        "next_step": ("이미지를 확인한 뒤 같은 run_id와 checkpoint.id를 acknowledge_checkpoint로 지정해 이어가세요. 승인 없이 다음 단계는 실행하지 않습니다."
+                                      if checkpoint["capture_available"] else
+                                      "화면 캡처를 완료하지 못했습니다. 진단 안내를 해결한 뒤 같은 run_id로 다시 이어가세요. 승인 ID를 보내지 마세요.")}
             try:
                 if resume_run_id:
                     # An in-flight write may already be applied. Only inspect it, never replay it.
@@ -284,14 +357,17 @@ class WorkflowRunner:
                     if pending is not None:
                         if type(pending) is not int or pending != record["completed_steps"] or pending >= len(steps):
                             raise WorkflowError("실행 기록의 진행 지점이 올바르지 않습니다.")
-                        latest = check_step(pending)
+                        special = steps[pending]["operation"] in PROCESS_OPERATIONS
+                        latest = check_prior(pending) if special else check_step(pending)
                         if latest.get("task_verified") is not True:
                             save("needs_review")
-                            return {**record, "last_result": latest, "next_step": "미확인 단계가 적용됐는지 확인하지 못했습니다. 중복 입력을 피하기 위해 재실행하지 않았습니다."}
-                        record["completed_steps"] += 1
-                        record["pending_step"] = None
+                            return {**record, "last_result": latest, "next_step": "미확인 단계 또는 이전 확인 지점의 현재 결과를 확인하지 못했습니다. 입력을 재실행하지 않았습니다."}
+                        if not special or steps[pending]["operation"] == "checkpoint" and acknowledge_checkpoint is not None:
+                            record["completed_steps"] += 1
+                            record["pending_step"] = None
+                            record.pop("checkpoint", None)
                     elif record["completed_steps"]:
-                        latest = check_step(record["completed_steps"] - 1)
+                        latest = check_prior(record["completed_steps"])
                         if latest.get("task_verified") is not True:
                             record["task_verified"] = False
                             save("needs_review")
@@ -307,7 +383,14 @@ class WorkflowRunner:
                     stage = "checkpoint_before_input"
                     save("running")
                     stage = "operation"
-                    latest = engine.execute(operation_step(item), target, delivery_mode=delivery_mode, reuse_verified=True)
+                    if item["operation"] == "checkpoint":
+                        stage = "screenshot_checkpoint"
+                        return capture_checkpoint(index, target)
+                    if item["operation"] in PROCESS_OPERATIONS:
+                        latest = execute_process_step(runtime, operation_step(item), target)
+                        engine = Operations(runtime)  # Never reuse a pre-wait observation for later input.
+                    else:
+                        latest = engine.execute(operation_step(item), target, delivery_mode=delivery_mode, reuse_verified=True)
                     if latest.get("task_verified") is not True:
                         save("needs_review")
                         return {**record, "last_result": latest, "next_step": "현재 화면을 확인하세요. 같은 입력은 자동 반복하지 않습니다. 이어가기는 먼저 미확인 단계의 결과를 다시 검사합니다."}
@@ -318,7 +401,9 @@ class WorkflowRunner:
                 record["task_verified"] = True
                 stage = "checkpoint_completion"
                 save("verified")
-                return {**record, "last_result": latest, "verification_scope": "saved_step_postconditions"}
+                return {**record, "last_result": latest,
+                        "verification_scope": "saved_step_postconditions_and_explicit_checkpoint_acknowledgements" if any(s["operation"] == "checkpoint" for s in steps) else "saved_step_postconditions",
+                        **({"checkpoint_images_verified": False} if any(s["operation"] == "checkpoint" for s in steps) else {})}
             except BindingError:
                 record["task_verified"] = False
                 save("needs_binding")
@@ -330,6 +415,7 @@ class WorkflowRunner:
                     # The operation was never called. A checkpoint write failure
                     # must not mislabel this unattempted step as an uncertain write.
                     record["pending_step"] = None
+                    record.pop("checkpoint", None)
                 save("interrupted")
                 return {**record, "diagnostic": {"code": "interrupted", "automatic_replay": False,
                                                 "stage": stage, "error_type": type(error).__name__},

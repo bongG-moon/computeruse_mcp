@@ -72,6 +72,99 @@ class FakeChild:
 
 
 class PickerMatchingTests(unittest.TestCase):
+    def test_driver_frame_is_used_as_desktop_geometry(self):
+        data = snapshot(row(frame={"x": 10, "y": 50, "w": 100, "h": 60}))
+        self.assertEqual(picker.match_picked_element(data, selected(), TARGET)["element_index"], 1)
+        data["elements"][0]["frame"]["x"] = 800
+        with self.assertRaises(OperationError) as failure:
+            picker.match_picked_element(data, selected(), TARGET)
+        self.assertEqual(failure.exception.picker_diagnostic["reason"], "geometry_mismatch")
+
+    def test_missing_projected_id_matches_exact_name_role_and_same_native_rectangle(self):
+        data = snapshot(row(frame={"x": 10, "y": 50, "w": 100, "h": 60}),
+                        accessibility_normalization={"status": "rejected", "reason": "invalid_id_atom"})
+        evidence = {}
+        found = picker.match_picked_element(data, selected(element=identity(automation_id="status [1]")), TARGET, diagnostics=evidence)
+        self.assertEqual(found["expected_selector"], {"name": "신청 상태", "role": "ComboBox"})
+        self.assertEqual(evidence["matching_method"], "exact_name_role_and_native_rectangle_missing_driver_id")
+        self.assertEqual(evidence["normalization_reason"], "invalid_id_atom")
+        self.assertNotIn("status [1]", json.dumps(evidence))
+        self.assertNotIn("신청 상태", json.dumps(evidence, ensure_ascii=False))
+
+    def test_real_driver_rendered_id_rejection_does_not_drop_confirmed_element(self):
+        data = snapshot(row(depth=1, frame={"x": 10, "y": 50, "w": 100, "h": 60}),
+            tree_markdown='- Window "Fixture"\n  - [1] ComboBox "신청 상태" [id=status/1 actions=[select]]\n')
+        observed = picker._payload({"structuredContent": data})
+        self.assertEqual(observed["accessibility_normalization"]["status"], "rejected")
+        evidence = {}
+        found = picker.match_picked_element(observed, selected(element=identity(automation_id="status/1")), TARGET, diagnostics=evidence)
+        self.assertEqual(found["element_index"], 1)
+        self.assertEqual(evidence["normalization_reason"], "invalid_id_atom")
+
+    def test_missing_projected_id_needs_geometry_and_never_overrides_conflicting_id(self):
+        for extra in ({}, {"automation_id": "wrong", "frame": {"x": 10, "y": 50, "w": 100, "h": 60}},
+                      {"frame": {"x": 0, "y": 0, "w": 1000, "h": 1000}}):
+            with self.subTest(extra=extra), self.assertRaises(OperationError):
+                picker.match_picked_element(snapshot(row(**extra)), selected(element=identity(automation_id="expected")), TARGET)
+
+    def test_existing_exact_id_geometry_failure_cannot_fall_back_to_different_row(self):
+        data = snapshot(row(automation_id="status", frame={"x": 600, "y": 50, "w": 100, "h": 60}),
+                        row(2, frame={"x": 10, "y": 50, "w": 100, "h": 60}))
+        with self.assertRaises(OperationError) as failure:
+            picker.match_picked_element(data, selected(element=identity(automation_id="status")), TARGET)
+        self.assertEqual(failure.exception.picker_diagnostic["reason"], "geometry_mismatch")
+
+    def test_window_move_uses_two_equal_size_observed_window_rectangles(self):
+        before = {"x": 0, "y": 0, "width": 800, "height": 600}
+        after = {"x": -1200, "y": 100, "width": 800, "height": 600}
+        data = snapshot(row(frame={"x": -1190, "y": 150, "w": 100, "h": 60}), window_bounds=after)
+        evidence = {}
+        found = picker.match_picked_element(data, selected(window_bounds=before), TARGET, diagnostics=evidence)
+        self.assertEqual(found["element_index"], 1)
+        self.assertTrue(evidence["window_translation_applied"])
+        data["window_bounds"]["width"] = 1600
+        with self.assertRaises(OperationError):
+            picker.match_picked_element(data, selected(window_bounds=before), TARGET)
+
+    def test_native_custom_child_is_not_silently_substituted_with_parent_button(self):
+        data = snapshot(row(label="실행", role="Button", frame={"x": 10, "y": 50, "w": 100, "h": 60}))
+        choice = selected(element=identity("Custom", "실행", "painted-start"), ancestors=[identity("Button", "실행")])
+        with self.assertRaises(OperationError) as failure:
+            picker.match_picked_element(data, choice, TARGET)
+        evidence = failure.exception.picker_diagnostic
+        self.assertEqual(evidence["selected_role"], "Custom")
+        self.assertEqual(evidence["role_candidates"], 0)
+        self.assertEqual(evidence["reason"], "role_not_projected")
+        self.assertNotIn("painted-start", json.dumps(evidence))
+
+    def test_rendered_canvas_with_no_projected_controls_has_explicit_unsupported_diagnosis(self):
+        data = snapshot(accessibility_normalization={"status": "rejected", "reason": "element_size_or_type"})
+        choice = selected(element={**identity("Pane", "rendered canvas"), "has_control_patterns": False})
+        with self.assertRaises(OperationError) as failure:
+            picker.match_picked_element(data, choice, TARGET)
+        self.assertEqual(failure.exception.code, "picker_controls_not_exposed")
+        self.assertEqual(failure.exception.picker_diagnostic["projected_element_count"], 0)
+        self.assertEqual(failure.exception.picker_diagnostic["reason"], "no_controls_projected")
+        self.assertIn("이미지 기반 선택", str(failure.exception))
+
+    def test_native_container_only_failure_does_not_advise_repeat_selection(self):
+        with self.assertRaises(OperationError) as failure:
+            picker._selection_result({"status": "controls_not_exposed", "stage": "element_observation"})
+        self.assertEqual(failure.exception.code, "picker_controls_not_exposed")
+        self.assertIn("UIA 정보를 제공하지 않고 화면 영역만", str(failure.exception))
+
+    def test_geometry_without_stable_identity_never_teaches(self):
+        data = snapshot(row(label="", role="Custom", frame={"x": 10, "y": 50, "w": 100, "h": 60}))
+        with self.assertRaises(OperationError):
+            picker.match_picked_element(data, selected(element=identity("Custom", "", "")), TARGET)
+
+    def test_geometry_disambiguation_still_requires_reusable_selector(self):
+        data = snapshot(row(frame={"x": 10, "y": 50, "w": 100, "h": 60}),
+                        row(2, frame={"x": 500, "y": 50, "w": 100, "h": 60}))
+        with self.assertRaises(OperationError) as failure:
+            picker.match_picked_element(data, selected(), TARGET)
+        self.assertEqual(failure.exception.picker_diagnostic["reason"], "no_unique_reusable_selector")
+
     def test_identity_returns_only_index_and_stable_selector(self):
         found = picker.match_picked_element(snapshot(row(value="SECRET", help_text="PRIVATE")), selected(), TARGET)
         self.assertEqual(found, {"element_index": 1, "expected_selector": {"name": "신청 상태", "role": "ComboBox"}})
@@ -150,6 +243,21 @@ class PickerLifecycleTests(unittest.TestCase):
 
     def test_cancel_terminates_only_owned_helper_and_removes_exchange(self):
         child, spawn = self.spawn_reply("cancelled")
+        with patch.object(Path, "is_file", return_value=True), patch.object(picker.subprocess, "Popen", side_effect=spawn), self.assertRaises(OperationError) as failure:
+            picker._run_helper(self.runtime, TARGET, "상태", 10)
+        self.assertEqual(failure.exception.code, "picker_cancelled")
+        self.assertTrue(child.terminated)
+        self.assertEqual(list((self.runtime.run_dir / "learning").iterdir()), [])
+
+    def test_long_install_directory_keeps_native_exchange_below_max_path_with_full_nonce(self):
+        suffix = "d" * (195-len(str(self.runtime.run_dir))-1)
+        self.runtime.run_dir = self.runtime.run_dir / suffix
+        child, original_spawn = self.spawn_reply("cancelled")
+        def spawn(args, **kwargs):
+            request = json.loads(Path(args[2]).read_text(encoding="utf-8"))
+            self.assertEqual(len(request["nonce"]), 64)
+            self.assertLess(len(args[3] + ".ready.json.tmp"), 260)
+            return original_spawn(args, **kwargs)
         with patch.object(Path, "is_file", return_value=True), patch.object(picker.subprocess, "Popen", side_effect=spawn), self.assertRaises(OperationError) as failure:
             picker._run_helper(self.runtime, TARGET, "상태", 10)
         self.assertEqual(failure.exception.code, "picker_cancelled")

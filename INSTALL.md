@@ -1,4 +1,14 @@
-# Claude에게 화면 작업 기능 연결 부탁하기 — 0.9.0
+# Claude에게 화면 작업 기능 연결 부탁하기 — 0.10.0
+
+## 연속 작업을 만들 때
+
+- 반복 프로세스 요청은 승인된 현재 창들을 `computer_process_editor(targets=[{program_id,pid,window_id,window_ref?}])`에 연결합니다. 작은 편집 창을 열고 `editor_id`를 보관합니다. 같은 요청을 반복하지 말고 `computer_process_status`로 확인합니다.
+- 사용자는 요소 선택, 동작, 입력값, 완료 조건, 요소 대기, 고정 대기, 이미지 확인을 단계별로 지정합니다. 작성 중에는 업무 앱에 입력하지 않습니다. 다음 화면의 요소는 사람이 화면을 이동한 뒤 지정합니다.
+- `saved`와 `saved_task.id`가 반환되어야 저장 완료입니다. 저장은 실행이 아니며, 이후 `computer_run_task`를 사용합니다. `task_id`로 편집 창을 열면 새 복사본으로 저장합니다.
+- `checkpoint`는 현재 연결 창의 이미지를 반환하고 멈춥니다. 사용자의 확인 없이 승인하지 않습니다. 확인 후 같은 `resume_run_id`와 `acknowledge_checkpoint=checkpoint.id`로 이어갑니다. 세션/창이 바뀌었으면 승인 없이 다시 관찰합니다. 화면 캡처 자체를 완료 검증으로 보고하지 않습니다.
+- `picker_controls_not_exposed`는 앱이 버튼 정보를 UIA에 제공하지 않는 경우입니다. F8 반복, 부모 컨테이너를 버튼으로 저장, 성공했다고 보고하는 일을 하지 않습니다. 그림 버튼 학습은 현재 지원하지 않으며 이미지 체크포인트와 구분합니다.
+- 자세한 사용자 안내는 `PROCESS_GUIDE.html`입니다. 연결 갱신 후 `computer_status.version: 0.10.0`과 `computer_process_editor` 제공 여부를 확인합니다.
+
 
 ## 직접 요소 학습: 클라이언트 진행 규칙
 
@@ -21,7 +31,7 @@
 
 0.7.0 배포본은 **MCP와 Cua Driver를 관리자 권한으로 실행하는 연결 프로그램**을 사용합니다. Claude Code 전체를 관리자 권한으로 열 필요는 없습니다. 연결 시작 때 Windows UAC 창이 나타나면 같은 로그인 사용자의 관리자 권한으로 허용합니다. 승인 취소·회사 정책 차단·다른 관리자 계정 사용 시에는 일반 권한으로 대신 실행하지 않습니다. Windows 보안 설정·UAC 정책은 변경하지 않습니다.
 
-갱신 후 연결을 다시 열고 `computer_status.version: 0.9.0`과 `computer_teach_status` 제공 여부를 확인합니다. 기존 0.6.0·0.7.0·0.7.1·0.8.0 연결을 갱신할 때는 실제 등록 범위와 설정 경로를 먼저 확인합니다. 새 배포 폴더의 `runtime/python.exe`로 `register.py upgrade --config <기존 설정 경로> --scope user` 또는 `--scope local --project <기존 프로젝트 전체 경로>`를 실행합니다. 검증한 이전 배포본만 갱신하며 다른 MCP·모델·로그인은 유지합니다. 갱신한 연결의 command는 새 폴더의 `Computer Use MCP 관리자 연결.exe`, args는 `--config`와 기존 설정 경로입니다. 연결을 다시 연 뒤 `computer_status.execution.administrator: true`, `integrity: high`를 확인해야 합니다. 관리자 프로그램을 조작할 수 있다는 결론은 실제 작은 작업을 확인한 뒤 내립니다.
+갱신 후 연결을 다시 열고 `computer_status.version: 0.10.0`과 `computer_teach_status` 제공 여부를 확인합니다. 기존 0.6.0·0.7.0·0.7.1·0.8.0·0.9.0 연결을 갱신할 때는 실제 등록 범위와 설정 경로를 먼저 확인합니다. 새 배포 폴더의 `runtime/python.exe`로 `register.py upgrade --config <기존 설정 경로> --scope user` 또는 `--scope local --project <기존 프로젝트 전체 경로>`를 실행합니다. 검증한 이전 배포본만 갱신하며 다른 MCP·모델·로그인은 유지합니다. 갱신한 연결의 command는 새 폴더의 `Computer Use MCP 관리자 연결.exe`, args는 `--config`와 기존 설정 경로입니다. 연결을 다시 연 뒤 `computer_status.execution.administrator: true`, `integrity: high`를 확인해야 합니다. 관리자 프로그램을 조작할 수 있다는 결론은 실제 작은 작업을 확인한 뒤 내립니다.
 
 배포 ZIP을 모두 압축 풀고 이 파일을 Claude Code에 첨부한 뒤 다음처럼 요청하세요. 아래의 Chrome은 처음 연결하는 예제이며, Chrome 전용 기능이라는 뜻은 아닙니다.
 

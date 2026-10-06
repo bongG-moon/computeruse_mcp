@@ -1,4 +1,4 @@
-# Computer Use MCP 0.9.0
+# Computer Use MCP 0.10.0
 
 Claude Code 등 MCP를 지원하는 클라이언트에서 **이 PC의 프로그램 화면을 읽고 조작하는 Windows용 도구**입니다. Chrome, 메모장, 설치된 Excel뿐 아니라 사용자가 실행파일을 지정한 다른 프로그램도 등록할 수 있습니다. 실제 화면을 확인해 클릭·입력하고, 요청한 결과까지 확인하는 것을 목표로 합니다.
 
@@ -8,12 +8,12 @@ Claude Code 등 MCP를 지원하는 클라이언트에서 **이 PC의 프로그�
 
 | 파일 | 용도 |
 | --- | --- |
-| [Computer-Use-MCP-0.9.0-with-driver.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.9.0/Computer-Use-MCP-0.9.0-with-driver.zip) | MCP와 Cua Driver 0.28.2를 함께 준비하는 권장 묶음 |
-| [Computer-Use-MCP-0.9.0.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.9.0/Computer-Use-MCP-0.9.0.zip) | Driver를 직접 준비하는 기존 배포본 |
-| [Computer-Use-MCP-0.9.0-source.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.9.0/Computer-Use-MCP-0.9.0-source.zip) | 개발·코드 확인용 원본 소스 |
-| [cua-driver.exe](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.9.0/cua-driver.exe) | 실행파일만 받기. 전체 구성은 Driver 포함 ZIP 사용 |
+| [Computer-Use-MCP-0.10.0-with-driver.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.10.0/Computer-Use-MCP-0.10.0-with-driver.zip) | MCP와 Cua Driver 0.28.2를 함께 준비하는 권장 묶음 |
+| [Computer-Use-MCP-0.10.0.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.10.0/Computer-Use-MCP-0.10.0.zip) | Driver를 직접 준비하는 기존 배포본 |
+| [Computer-Use-MCP-0.10.0-source.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.10.0/Computer-Use-MCP-0.10.0-source.zip) | 개발·코드 확인용 원본 소스 |
+| [cua-driver.exe](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.10.0/cua-driver.exe) | 실행파일만 받기. 전체 구성은 Driver 포함 ZIP 사용 |
 
-[전체 릴리스와 파일 해시](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.9.0) · [SHA256SUMS.txt](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.9.0/SHA256SUMS.txt)
+[전체 릴리스와 파일 해시](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.10.0) · [SHA256SUMS.txt](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.10.0/SHA256SUMS.txt)
 
 GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실행파일과 동봉 Python이 필요한 일반 사용자는 위의 배포 ZIP을 받으세요. 지원 대상은 Windows x86_64이며, 사용할 프로그램과 Claude Code 등 MCP 클라이언트는 이 PC에 설치되어 있어야 합니다.
 
@@ -57,6 +57,26 @@ GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실�
 
 저장 또는 버리기 방침이 불명확하면 임의로 선택하지 않습니다. 저장 내용 확인은 종료 확인과 별도이며, 저장이 목적이면 파일을 다시 열어 내용까지 확인해야 합니다. `computer_end`는 화면 작업 세션을 끝내는 기능이고 앱 종료 확인을 대신하지 않습니다.
 
+## 0.10.0: 프로세스 편집 창
+
+채팅에서 **“지금 열린 프로그램으로 반복 작업을 만들고 싶어. 프로세스 편집 창을 열어줘. 요소는 내가 직접 선택할게.”**라고 요청하세요.
+
+1. 프로그램을 고르고 **요소 직접 선택**으로 원하는 요소를 확인합니다.
+2. 클릭·입력·키보드·선택 동작을 고릅니다. 클릭·키보드는 결과를 확인할 요소와 예상값도 지정합니다.
+3. 요소가 나타날 때까지 대기, 고정 시간 대기, 화면 이미지 확인을 필요한 위치에 추가합니다.
+4. 목록에서 프로그램·요소·동작·입력값·확인 조건을 보고, 순서를 바꾸거나 잘못된 단계를 삭제합니다.
+5. 이름을 붙여 저장한 뒤 **“저장한 ○○ 프로세스를 실행해줘”**라고 요청합니다. 화면 확인 단계는 이미지를 보여주고 잠시 멈추며, 사용자가 확인한 뒤 이어갑니다.
+
+작성 중에는 업무 프로그램을 조작하지 않습니다. 다음 화면은 사용자가 직접 이동한 뒤 선택합니다. 모든 마우스 움직임을 자동 녹화하는 방식은 아닙니다. 저장한 프로세스를 다시 열면 새 복사본으로 저장하며 원본을 보존합니다. 직접 작성한 입력값은 작업 파일에 저장되고, 이미지는 저장하지 않습니다. 1~30단계, 대기는 단계마다 최대 60초입니다.
+
+**[초보자용 프로세스 만들기 안내](PROCESS_GUIDE.html)** · `computer_process_editor` / `computer_process_status` / `computer_run_task`
+
+요소 저장 전 대조에서 Driver의 `frame{x,y,w,h}` 형식을 처리하도록 수정했습니다. 자동화 ID가 누락된 경우에도 정확한 이름·종류·위치가 모두 맞는 요소만 교차 확인합니다. 명시적으로 다른 ID나 여러 후보를 임의로 받아들이지는 않습니다.
+
+**자체 그림 화면의 버튼이 Windows 접근성 정보에 아예 없는 경우에는 UIA 학습을 할 수 없습니다.** 실제 로컬 프로그램에서 네이티브 UIA와 Driver에 버튼 정보가 없는 경우를 확인했습니다. 이때 `picker_controls_not_exposed`로 이유를 알리고 F8 반복이나 상위 영역을 버튼으로 잘못 저장하는 일을 막습니다. 이미지 확인 단계는 그림 버튼 학습 기능과 다르며, 그림 버튼의 이미지 학습·자동 재탐색은 이번 버전에 포함되지 않았습니다.
+
+새 ZIP 전체를 압축 풀고 기존 설정을 유지한 채 연결을 갱신한 뒤 **0.10.0** 및 `computer_process_editor`가 표시되는지 확인하세요. 편집 실행파일은 MCP가 자동 실행합니다.
+
 ## 0.9.0: 직접 선택 → 확인 → 학습 완료
 
 1. 채팅에서 **“이 화면의 신청 상태를 직접 가르쳐줄게. 요소 학습을 시작해줘.”**라고 요청합니다.
@@ -71,7 +91,7 @@ GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실�
 
 이름·화면 분류·설명·찾는 기준을 이 PC에 저장합니다. LLM 자체 훈련이나 전체 작업 녹화는 아닙니다. 입력 값·이미지·좌표·임시 창 번호는 학습 파일에 저장하지 않습니다. “배운 요소 목록을 보여줘”, “조회 버튼을 다시 가르칠게”, “저장한 조회 버튼을 지워줘”로 관리합니다. 같은 이름의 대상은 고유한 상위 영역으로 구분하며 화면이 바뀌면 다시 확인합니다.
 
-새 배포 ZIP을 모두 압축 풀고 `INSTALL.md`를 첨부하여 **“기존 Driver·프로그램·저장한 작업·학습 요소를 유지하고 이 버전으로 연결을 갱신해줘”**라고 요청하세요. 연결을 다시 연 뒤 **0.9.0**과 `computer_teach_status`가 표시돼야 새 방식이 적용됩니다. 기존 연결 파일을 그대로 실행하면 이전 버전이 계속 사용됩니다.
+새 배포 ZIP을 모두 압축 풀고 `INSTALL.md`를 첨부하여 **“기존 Driver·프로그램·저장한 작업·학습 요소를 유지하고 이 버전으로 연결을 갱신해줘”**라고 요청하세요. 연결을 다시 연 뒤 **0.10.0**과 `computer_teach_status`가 표시돼야 새 방식이 적용됩니다. 기존 연결 파일을 그대로 실행하면 이전 버전이 계속 사용됩니다.
 
 ## 0.8.0: 프로그램 시작 방식 수정
 
@@ -81,7 +101,9 @@ GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실�
 
 ## 검증 범위와 안내
 
-자동 검사 582개 실행: 580개 통과, 2개 조건부 제외. 소스 및 내장 Python 배포본에서 기본 computer_teach_element 공개 MCP 경로로 각각 9개·9개 합성 시나리오를 통과했습니다. 선택 창의 실제 표시와 중복 요청, F8 버튼 선택·확인·자동 저장, 3초 선택 방식으로 콤보박스 상위 요소를 직접 고르기, Esc·MCP 취소, 프로그램·MCP 재시작 후 저장 요소 재사용, 실제 프로세스 종료를 확인했습니다. 선택 전에는 Driver의 전체 화면 읽기가 0회였습니다. 학습·취소 과정에서 대상 앱의 값·클릭·키 기록이 변하지 않았고 소유한 선택 도우미가 모두 종료됐습니다. 별도 네이티브 시험 6개도 통과했으며 F8 충돌 시 버튼 방식과 200% 화면 배율의 초기·확인 창을 검수했습니다. 사용자 선택을 자동화한 합성 시험입니다. 실제 사람의 사용성, 사내 프로그램·사내 LLM·관리자 권한 연결의 실제 화면 작업은 검증하지 않았습니다.
+자동 검사 669개 실행: 667개 통과, 2개 조건부 제외. 소스와 내장 Python 배포본에서 공개 MCP의 요소 선택·저장·재사용 시험을 각각 9개 통과했습니다. 프로세스 작성·실행 시험도 소스와 배포본에서 각각 7개 통과했습니다. 새 프로세스 편집 창의 직접 요소 선택, 입력·요소 대기·고정 대기·화면 확인·후속 확인 5단계 저장, 실제 Driver 실행, 이미지 반환과 일시정지, 명시적 확인 후 재개, 앱·MCP 재시작 후 같은 작업 재실행을 소스와 배포본에서 확인했습니다. 작성 중 업무 시험 창의 입력·클릭·키 기록이 바뀌지 않았고, 프로세스 파일에 좌표·이미지·임시 창 번호가 없음을 확인했습니다. 같은 편집 요청·중첩 요소 선택 중 취소·도우미 종료와 긴 폴더 경로도 검사했습니다. Windows 파일 교체 경합과 동시 저장 문제를 재현해 수정하고 기존 명령·작업의 보존을 확인했습니다. 200% 화면 배율에서 편집 창을 검수했습니다. 이는 사용자 선택과 확인을 자동화한 합성 시험이며 실제 사람의 사용성이나 이미지 해석 정확도를 검증한 결과는 아닙니다. 실제 자체 렌더링 앱은 읽기 전용으로 버튼 정보 부재를 확인했으며, 해당 버튼의 학습·클릭 성공은 검증하지 않았습니다. 사내 프로그램·사내 LLM·관리자 권한 연결의 실제 화면 작업은 검증하지 않았습니다.
+
+0.9.0 당시 기록: 자동 검사 582개 실행: 580개 통과, 2개 조건부 제외. 소스 및 내장 Python 배포본에서 기본 computer_teach_element 공개 MCP 경로로 각각 9개·9개 합성 시나리오를 통과했습니다. 선택 창의 실제 표시와 중복 요청, F8 버튼 선택·확인·자동 저장, 3초 선택 방식으로 콤보박스 상위 요소를 직접 고르기, Esc·MCP 취소, 프로그램·MCP 재시작 후 저장 요소 재사용, 실제 프로세스 종료를 확인했습니다. 선택 전에는 Driver의 전체 화면 읽기가 0회였습니다. 학습·취소 과정에서 대상 앱의 값·클릭·키 기록이 변하지 않았고 소유한 선택 도우미가 모두 종료됐습니다. 별도 네이티브 시험 6개도 통과했으며 F8 충돌 시 버튼 방식과 200% 화면 배율의 초기·확인 창을 검수했습니다. 사용자 선택을 자동화한 합성 시험입니다. 실제 사람의 사용성, 사내 프로그램·사내 LLM·관리자 권한 연결의 실제 화면 작업은 검증하지 않았습니다.
 
 0.8.0 자동 검사 562개 중 560개 통과, 2개 조건부 제외. 실제 MCP·Driver로 소스와 내장 Python 배포본에서 각각 학습 5개 시나리오를 확인했습니다. 별도의 합성 시험에서 F8 선택·Esc 취소와 업무 입력이 전달되지 않는 점을 확인했고, 선택 도우미를 200% 배율에서 검수했습니다. 아래에는 이전 버전의 검증 범위도 보존했습니다.
 

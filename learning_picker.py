@@ -9,12 +9,12 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 from pathlib import Path
 import subprocess
 import time
 import uuid
 
-from consent import _atomic_json
 from learning import stable_selector
 from operations import OperationError, _elements, _find, _name, _payload
 
@@ -84,8 +84,55 @@ def _ancestry(element, elements):
         parent = row.get("parent_index")
 
 
-def match_picked_element(snapshot, selected, target):
-    """Match safe native identity to a fresh Driver snapshot, never by coordinates alone."""
+def _rectangle(value, *, frame=False):
+    keys = ("x", "y", "w", "h") if frame else ("x", "y", "width", "height")
+    if not isinstance(value, dict) or any(key not in value for key in keys):
+        return None
+    numbers = [value[key] for key in keys]
+    if any(type(number) not in (int, float) or not math.isfinite(number) for number in numbers):
+        return None
+    if numbers[2] <= 0 or numbers[3] <= 0:
+        return None
+    return dict(zip(("x", "y", "width", "height"), numbers))
+
+
+def _driver_rectangle(element):
+    # Driver 0.28.2 uses desktop-physical frame{x,y,w,h}. Earlier wrappers
+    # exposed bounds{x,y,width,height}. Do not guess between coordinate spaces.
+    if "frame" in element:
+        return _rectangle(element["frame"], frame=True), "frame"
+    if "bounds" in element:
+        return _rectangle(element["bounds"]), "bounds"
+    return None, None
+
+
+def _selection_geometry(snapshot, selected):
+    point = dict(selected["point"])
+    bounds = dict(selected["bounds"])
+    before, after = _rectangle(selected.get("window_bounds")), _rectangle(snapshot.get("window_bounds"))
+    translated = False
+    # A user may move the same window while reviewing the candidate. Only
+    # translate when two observed, equally sized physical window rectangles
+    # prove the offset. Never invent a scale factor or a relative coordinate.
+    if before is not None and after is not None and all(abs(before[key] - after[key]) <= 2 for key in ("width", "height")):
+        dx, dy = after["x"] - before["x"], after["y"] - before["y"]
+        point["x"] += dx; point["y"] += dy
+        bounds["x"] += dx; bounds["y"] += dy
+        translated = bool(dx or dy)
+    return point, bounds, translated
+
+
+def _same_rectangle(left, right):
+    return all(abs(left[key] - right[key]) <= 2 for key in ("x", "y", "width", "height"))
+
+
+def match_picked_element(snapshot, selected, target, *, diagnostics=None):
+    """Resolve confirmed identity, corroborating known provider projection gaps.
+
+    Exact AutomationId/role remain preferred. When Driver drops AutomationId,
+    accept only exact name+role AND the same physical rectangle. Never use
+    location alone, silently substitute a parent, or ignore a conflicting ID.
+    """
     target = _target(target)
     if (not isinstance(selected, dict) or selected.get("status") != "selected"
             or any(selected.get(key) != value for key, value in target.items())
@@ -93,21 +140,68 @@ def match_picked_element(snapshot, selected, target):
         raise OperationError("선택한 위치 또는 관찰한 창이 학습 대상 창과 다릅니다.", "target_mismatch")
     identity = _descriptor(selected.get("element"))
     if not _contains(selected.get("bounds"), selected.get("point")):
-        raise OperationError("선택한 요소의 위치가 바뀌었습니다. 다시 가리켜 주세요.", "picker_geometry_changed")
+        raise OperationError("선택한 요소의 위치 정보가 올바르지 않아 저장하지 않았습니다.", "picker_geometry_changed")
     ancestors = selected.get("ancestors", [])
     if not isinstance(ancestors, list) or len(ancestors) > 16:
         raise OperationError("선택한 요소의 부모 영역을 확인하지 못했습니다.", "picker_invalid_response")
     ancestors = [_descriptor(value) for value in ancestors]
     elements = _elements(snapshot)
-    matches = [e for e in elements if type(e.get("element_index")) is int
-               and e["element_index"] >= 0 and not e.get("synthetic_ancestor")
-               and _identity_match(e, identity)]
-    # A Driver may omit geometry. When it provides geometry it must still agree.
-    matches = [e for e in matches if not isinstance(e.get("bounds"), dict)
-               or _contains(e["bounds"], selected["point"])]
+    projected = [e for e in elements if type(e.get("element_index")) is int
+                 and e["element_index"] >= 0 and not e.get("synthetic_ancestor")]
+    same_role = [e for e in projected if e.get("role") == identity["role"]]
+    same_name = [e for e in same_role if identity.get("name") and _name(e) == identity["name"]]
+    matches = [e for e in same_role if _identity_match(e, identity)]
+    point, native_bounds, translated = _selection_geometry(snapshot, selected)
+    normal = snapshot.get("accessibility_normalization", {})
+    if not isinstance(normal, dict):
+        normal = {}
+    info = {"stage": "matching_driver_projection", "selected_role": identity["role"],
+            "native_has_automation_id": bool(identity.get("automation_id")), "native_has_name": bool(identity.get("name")),
+            "projected_element_count": len(projected), "role_candidates": len(same_role),
+            "name_role_candidates": len(same_name), "exact_identity_candidates": len(matches),
+            "geometry_rejected": 0, "window_translation_applied": translated,
+            "matching_method": "automation_id_role" if identity.get("automation_id") else "name_role",
+            "normalization_status": normal.get("status", "not_reported"),
+            "normalization_reason": normal.get("reason")}
+    def fail(reason, message, code="picker_not_found"):
+        info["reason"] = reason
+        info["matched_candidates"] = len(matches)
+        if diagnostics is not None:
+            diagnostics.update(info)
+        error = OperationError(message, code)
+        error.picker_diagnostic = dict(info)
+        raise error
+    if not projected:
+        tree = snapshot.get("tree_markdown")
+        lines = [line.strip() for line in tree.splitlines() if line.strip()] if isinstance(tree, str) else []
+        root_only = len(lines) == 1 and bool(re.fullmatch(r"-\s*(?:\[\d+\]\s*)?Window(?:\s+.*)?", lines[0]))
+        native_container = (identity["role"] in {"Pane", "Group", "Custom"}
+                            and selected["element"].get("has_control_patterns") is False)
+        rejected_empty = normal.get("status") == "rejected" and normal.get("reason") == "element_size_or_type"
+        if root_only or (native_container and rejected_empty):
+            fail("no_controls_projected", "현재 화면에서 창 또는 화면 영역 정보만 관찰되었고, 선택한 버튼·입력란의 UIA 정보는 받지 못했습니다. F8 반복 대신 이미지 기반 선택이 필요하며, 현재의 저장 UIA 요소 기능으로는 이 영역을 지원하지 않습니다.", "picker_controls_not_exposed")
+        fail("empty_projection_unconfirmed", "현재 관찰에 조작할 요소 정보가 없습니다. 읽기 결과가 비어 있어 이 화면의 UIA 지원 여부를 확정할 수 없으며 저장하지 않았습니다.")
+    checked = []
+    for element in matches:
+        rectangle, field = _driver_rectangle(element)
+        if field is None or (rectangle is not None and _contains(rectangle, point)):
+            checked.append(element)
+        else:
+            info["geometry_rejected"] += 1
+    matches = checked
+    # Projection may omit IDs even though native UIA exposes them. This occurs
+    # when the rendered tree cannot be safely normalized. Missing is not the
+    # same as conflicting: an explicit different Driver ID is never accepted.
+    if not matches and identity.get("automation_id") and not info["exact_identity_candidates"]:
+        fallback = [e for e in same_name if not e.get("automation_id")]
+        info["missing_id_name_candidates"] = len(fallback)
+        for element in fallback:
+            rectangle, field = _driver_rectangle(element)
+            if rectangle is not None and _contains(rectangle, point) and _same_rectangle(rectangle, native_bounds):
+                matches.append(element)
+        if matches:
+            info["matching_method"] = "exact_name_role_and_native_rectangle_missing_driver_id"
     if len(matches) > 1:
-        # Use only a native ancestor whose own stable identity is unique in the
-        # Driver tree, so duplicated unnamed panes cannot silently pick a row.
         for ancestor in ancestors:
             if not (ancestor.get("automation_id") or ancestor.get("name")):
                 continue
@@ -120,15 +214,28 @@ def match_picked_element(snapshot, selected, target):
             if len(matches) == 1:
                 break
     if len(matches) != 1:
-        raise OperationError("이 요소를 화면에서 다시 확인하지 못했습니다. 요소 가까이 가리킨 뒤 다시 시도해 주세요." if not matches
-                             else "같은 요소가 여러 개여서 안전하게 구분하지 못했습니다. 이름이 있는 부모 영역과 함께 학습해 주세요.",
-                             "picker_not_found" if not matches else "ambiguous_selector")
+        if len(matches) > 1:
+            fail("ambiguous_identity", "사용자 선택은 확인했지만 같은 식별 정보를 가진 요소가 여러 개입니다. 서로 구분되는 부모 영역을 포함해 지정해야 합니다.", "ambiguous_selector")
+        reason = ("role_not_projected" if not same_role else
+                  "geometry_mismatch" if info["geometry_rejected"] else
+                  "missing_driver_id_without_matching_geometry" if info.get("missing_id_name_candidates") else
+                  "identity_not_projected")
+        fail(reason, "사용자 선택은 확인했지만 Driver가 같은 요소를 조작 대상으로 제공하는지 확인하지 못했습니다. 선택을 반복하지 말고 진단의 역할·후보 수·식별 정보 누락 원인을 확인하세요. 다른 부모 요소로 자동 대체하지 않았습니다.")
     element = matches[0]
     if any(element.get(key) is True for key in ("is_password", "password", "is_protected", "protected")):
         raise OperationError("비밀번호 또는 보호 요소는 학습하지 않습니다.", "protected_element")
-    selector = stable_selector(snapshot, element)
-    if len(_find(snapshot, selector)) != 1:
-        raise OperationError("선택한 요소를 하나로 구분하지 못했습니다.", "ambiguous_selector")
+    try:
+        selector = stable_selector(snapshot, element)
+        if len(_find(snapshot, selector)) != 1:
+            fail("no_unique_reusable_selector", "선택한 요소를 재사용할 고유한 기준으로 구분하지 못했습니다.", "ambiguous_selector")
+    except OperationError as error:
+        if not hasattr(error, "picker_diagnostic"):
+            info.update(reason="no_unique_reusable_selector", matched_candidates=1)
+            error.picker_diagnostic = dict(info)
+        raise
+    info.update(matched_candidates=1, reason="matched")
+    if diagnostics is not None:
+        diagnostics.update(info)
     return {"element_index": element["element_index"], "expected_selector": selector}
 
 
@@ -185,6 +292,7 @@ def _selection_result(value):
                 "target_unavailable": ("학습 대상 창이 닫혔거나 현재 사용할 수 없습니다. 대상 프로그램의 현재 창을 다시 연결하세요.", "target_unavailable"),
                 "ready_failed": ("선택 도우미 실행 후 창 표시 확인에 실패했습니다. F8을 누를 단계가 아닙니다.", "picker_not_visible"),
                 "runtime_failed": ("요소 선택 창에서 오류가 발생해 학습을 중단했습니다. 선택 도우미 진단을 확인하세요.", "picker_runtime_failed"),
+                "controls_not_exposed": ("현재 앱이 선택한 버튼의 UIA 정보를 제공하지 않고 화면 영역만 노출합니다. F8을 반복해도 해결되지 않습니다. 이미지 기반 선택이 필요한 화면이며, 현재의 저장 UIA 요소 기능으로는 지원하지 않습니다.", "picker_controls_not_exposed"),
                 "startup_failed": ("요소 선택 창을 표시하지 못했습니다. 도우미 시작 진단을 확인하세요.", "picker_startup_failed")}
     if status != "selected":
         message, code = messages.get(status, ("요소 선택 응답을 확인하지 못했습니다.", "picker_invalid_response"))
@@ -201,12 +309,23 @@ def _run_helper(runtime, target, label, timeout_seconds, *, on_ready=None, cance
         raise OperationError("요소 선택 도구가 없습니다. 새 배포 ZIP을 모두 압축 해제해 주세요.", "picker_missing")
     nonce = uuid.uuid4().hex + uuid.uuid4().hex
     folder = Path(runtime.run_dir) / "learning"
-    request, response = folder / (nonce + ".request.json"), folder / (nonce + ".response.json")
+    # The native .NET Framework helper observes Windows MAX_PATH. Keep the
+    # exchange filename short while retaining the full 256-bit nonce in IPC.
+    request, response = folder / (nonce[:16] + ".request.json"), folder / (nonce[:16] + ".response.json")
     ready_path = response.with_name(response.name + ".ready.json")
     child = None
     result = None
     try:
-        _atomic_json(request, {"nonce": nonce, **target, "label": label, "timeout_seconds": timeout_seconds})
+        folder.mkdir(parents=True, exist_ok=True)
+        temporary = request.with_name(request.name + ".tmp")
+        try:
+            # One writer owns this random request. A second 32-character nonce
+            # in the temporary filename would defeat the short-path protocol.
+            temporary.write_text(json.dumps({"nonce": nonce, **target, "label": label,
+                                             "timeout_seconds": timeout_seconds}, ensure_ascii=False), encoding="utf-8")
+            os.replace(temporary, request)
+        finally:
+            temporary.unlink(missing_ok=True)
         runtime.check_active()
         child = subprocess.Popen([str(helper), "--pick", str(request), str(response)],
                                  cwd=str(helper.parent), stdin=subprocess.DEVNULL,

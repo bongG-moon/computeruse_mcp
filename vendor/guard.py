@@ -28,6 +28,11 @@ class GuardError(RuntimeError):
     pass
 
 
+class CheckpointRequiresForeground(GuardError):
+    """A screenshot may expose another app unless the exact window is visible."""
+    pass
+
+
 class BackgroundShortcutUnavailable(GuardError):
     """Known unsafe delivery mode; no request reached the driver."""
     pass
@@ -330,6 +335,37 @@ def windows_window_pid(window_id):
     if not user.GetWindowThreadProcessId(wintypes.HWND(window_id), ctypes.byref(owner)):
         raise GuardError("Window no longer exists.")
     return owner.value
+
+
+def windows_checkpoint_ready(window_id):
+    """Fail closed unless the exact target is visible, restored and foreground."""
+    if os.name != "nt" or type(window_id) is not int or window_id <= 0:
+        return False
+    user = ctypes.WinDLL("user32", use_last_error=True)
+    for name in ("IsWindow", "IsWindowVisible", "IsIconic"):
+        function = getattr(user, name)
+        function.argtypes, function.restype = [wintypes.HWND], wintypes.BOOL
+    user.GetForegroundWindow.argtypes, user.GetForegroundWindow.restype = [], wintypes.HWND
+    user.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    user.GetWindowRect.restype = wintypes.BOOL
+    user.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+    user.MonitorFromWindow.restype = wintypes.HANDLE
+    hwnd = wintypes.HWND(window_id)
+    rect = wintypes.RECT()
+    if (not user.IsWindow(hwnd) or not user.IsWindowVisible(hwnd) or user.IsIconic(hwnd)
+            or int(user.GetForegroundWindow() or 0) != window_id
+            or not user.GetWindowRect(hwnd, ctypes.byref(rect))
+            or rect.right <= rect.left or rect.bottom <= rect.top
+            or not user.MonitorFromWindow(hwnd, 0)):
+        return False
+    # IsWindowVisible can also be true for a cloaked window on another desktop.
+    dwm = ctypes.WinDLL("dwmapi", use_last_error=True)
+    dwm.DwmGetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+    dwm.DwmGetWindowAttribute.restype = ctypes.c_long
+    cloaked = wintypes.DWORD()
+    if dwm.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked)) != 0 or cloaked.value:
+        return False
+    return int(user.GetForegroundWindow() or 0) == window_id and bool(user.IsWindowVisible(hwnd)) and not bool(user.IsIconic(hwnd))
 
 
 def _allowed_pid(pid, policy, resolver):
@@ -848,7 +884,7 @@ class DriverTransport:
 
 class Guard:
     def __init__(self, policy, transport=None, process_resolver=windows_process_exe,
-                 window_resolver=windows_window_pid, discovery_provider=None):
+                 window_resolver=windows_window_pid, discovery_provider=None, checkpoint_ready_resolver=None):
         self.policy = validate_policy(policy)
         self.run_dir = Path(policy["run_dir"])
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -856,6 +892,7 @@ class Guard:
         self.process_resolver = process_resolver
         self.window_resolver = window_resolver
         self.discovery_provider = discovery_provider or discover_allowed_windows
+        self.checkpoint_ready_resolver = checkpoint_ready_resolver or windows_checkpoint_ready
         self.action_count = 0
         self.observed_targets = set()
 
@@ -945,6 +982,79 @@ class Guard:
                  if name in {"list_apps", "list_windows"} else tool.get("description", "")))
             exposed.append(tool)
         return {"tools": exposed}
+
+    def capture_checkpoint(self, target):
+        """One explicit, read-only window image without changing session modality.
+
+        The private visual guard is never exposed to callers. Its sole request
+        is get_window_state; it shares this session's transport and live target
+        resolvers, but grants no visual inputs or reusable UIA observation.
+        """
+        started, call_id = time.monotonic(), uuid.uuid4().hex
+        self.observed_targets.clear()
+        self.log("checkpoint_request", request_id=call_id, tool="get_window_state",
+                 route="checkpoint", mode=self.policy["mode"], arguments=target)
+        try:
+            self.check_stop()
+            if (not isinstance(target, dict) or set(target) != {"pid", "window_id"}
+                    or any(type(value) is not int or value <= 0 for value in target.values())):
+                raise GuardError("Checkpoint needs exactly one approved pid and window_id.")
+            target = copy.deepcopy(target)
+            policy = copy.deepcopy(self.policy)
+            policy["mode"] = "visual"
+            # Checkpoints never persist pixels or screen text, including when
+            # the ordinary session opted into verbose action diagnostics.
+            policy["log_detail"] = "metadata"
+            validate_arguments("get_window_state", target, policy, self.process_resolver, self.window_resolver)
+            executable = _allowed_pid(target["pid"], self.policy, self.process_resolver)
+            def require_ready():
+                if self.checkpoint_ready_resolver(target["window_id"]) is not True:
+                    raise CheckpointRequiresForeground("화면 확인 대상 창을 최소화하지 않은 상태로 맨 앞으로 가져오세요. "
+                        "다른 창의 화면 노출을 막기 위해 캡처를 중지했습니다. 창을 표시한 뒤 승인 ID 없이 이어가기로 다시 확인하세요.")
+            require_ready()
+            visual = Guard(policy, transport=self.transport, process_resolver=self.process_resolver,
+                           window_resolver=self.window_resolver, discovery_provider=self.discovery_provider,
+                           checkpoint_ready_resolver=self.checkpoint_ready_resolver)
+            answer = visual.call("get_window_state", target)
+            self.check_stop()
+            require_ready()
+            # A reused HWND/PID, even for another allowed program, invalidates
+            # the image. Do not forward pixels until ownership is rechecked.
+            if (self.window_resolver(target["window_id"]) != target["pid"]
+                    or _allowed_pid(target["pid"], self.policy, self.process_resolver) != executable
+                    or self.window_resolver(target["window_id"]) != target["pid"]):
+                raise GuardError("Checkpoint window changed or is no longer the approved target.")
+            if not isinstance(answer, dict) or answer.get("isError"):
+                raise GuardError("Checkpoint screenshot failed; no image or input was forwarded.")
+            payload = answer.get("structuredContent", {})
+            if not isinstance(payload, dict) or any(key in payload and payload[key] != value for key, value in target.items()):
+                raise GuardError("Checkpoint screenshot returned a different window target.")
+            images = [item for item in answer.get("content", []) if isinstance(item, dict) and item.get("type") == "image"]
+            if (not 1 <= len(images) <= 2 or any(not isinstance(item.get("data"), str) or not item["data"]
+                    or len(item["data"]) > 16*1024*1024 or item.get("mimeType") not in {"image/png", "image/jpeg", "image/webp"}
+                    for item in images)):
+                raise GuardError("Checkpoint did not return a supported window image.")
+            result = {"structuredContent": {**target, "capture_scope": "window", "read_only": True,
+                        "image_verified": False, "task_verified": False, "input_dispatched": False},
+                      "content": [{key: copy.deepcopy(item[key]) for key in ("type", "data", "mimeType")} for item in images]}
+            self.check_stop()
+            require_ready()
+            metrics = add_metrics(result, started)
+            self.log("checkpoint_result", request_id=call_id, tool="get_window_state", route="checkpoint",
+                     success=True, action_count=self.action_count, arguments=target,
+                     summary={"image_count": len(images), "task_verified": False}, **metrics)
+            return result
+        except (GuardError, OSError, ValueError) as error:
+            result = {"isError": True, "structuredContent": {"task_verified": False, "input_dispatched": False},
+                      "content": [{"type": "text", "text": str(error)}]}
+            if isinstance(error, CheckpointRequiresForeground):
+                result["structuredContent"]["error_code"] = "checkpoint_requires_foreground"
+            metrics = add_metrics(result, started)
+            self.log("checkpoint_denied", request_id=call_id, tool="get_window_state", route="checkpoint",
+                     success=False, summary=str(error), **metrics)
+            return result
+        finally:
+            self.observed_targets.clear()
 
     def call(self, name, arguments):
         started = time.monotonic()

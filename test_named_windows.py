@@ -86,6 +86,7 @@ class NamedWindowTests(WorkflowTests):
         task["steps"][1]["program_id"] = "other"
         self.runtime.programs.append({"id": "other", "exe": self.runtime.programs[0]["exe"] + ".other.exe", "control_exes": []})
         self.runtime.guard.process_resolver = lambda pid: self.runtime.programs[0 if pid == 100 else 1]["exe"]
+        self.runtime.guard.window_resolver = lambda hwnd: 101 if hwnd == 202 else 100
         targets = self.named_targets()
         targets[1].update(program_id="other", pid=101)
         engine = ScriptedOperations()

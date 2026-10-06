@@ -86,6 +86,43 @@ class LearningTests(unittest.TestCase):
         self.assertEqual(self.runtime.calls[0][0], "get_window_state")
         self.assertFalse(self.runtime.calls[0][1]["include_screenshot"])
 
+    def test_native_confirmed_empty_root_projection_is_diagnosed_after_guarded_read(self):
+        from test_teaching_sessions import native_choice
+        self.runtime.answer["structuredContent"] = {**TARGET, "elements": [], "elements_complete": False,
+            "tree_markdown": '- Window "Synthetic rendered screen"\n'}
+        with self.assertRaises(OperationError) as failure:
+            self.library.teach_picked(self.runtime, TARGET, "forms", native_choice(), "선택 버튼")
+        self.assertEqual(failure.exception.code, "picker_controls_not_exposed")
+        self.assertEqual(failure.exception.picker_diagnostic["projected_element_count"], 0)
+        self.assertEqual(self.library.all(), [])
+        self.assertEqual([name for name, _ in self.runtime.calls], ["get_window_state"])
+
+    def test_empty_projection_without_provider_evidence_is_not_claimed_unsupported(self):
+        from test_teaching_sessions import native_choice
+        self.runtime.answer["structuredContent"] = {**TARGET, "elements": []}
+        with self.assertRaises(OperationError) as failure:
+            self.library.teach_picked(self.runtime, TARGET, "forms", native_choice(), "선택 버튼")
+        self.assertEqual(failure.exception.code, "picker_not_found")
+        self.assertEqual(failure.exception.picker_diagnostic["reason"], "empty_projection_unconfirmed")
+        self.assertEqual(self.library.all(), [])
+
+    def test_native_empty_partial_or_failed_read_never_claims_unsupported(self):
+        from test_teaching_sessions import native_choice
+        for marker in ({"truncated": True}, {"max_depth_reached": True}, {"max_elements_reached": True},
+                       {"total_element_count": 20}):
+            with self.subTest(marker=marker):
+                self.runtime.answer = {"structuredContent": {**TARGET, "elements": [], "elements_complete": False,
+                    "tree_markdown": '- Window "Synthetic rendered screen"\n', **marker}}
+                with self.assertRaises(LearningError) as failure:
+                    self.library.teach_picked(self.runtime, TARGET, "forms", native_choice(), "선택 버튼")
+                self.assertEqual(failure.exception.code, "incomplete_observation")
+        self.runtime.answer = {"isError": True, "content": [{"type": "text", "text": "provider timeout"}]}
+        self.runtime.guard.window_resolver = lambda _window: TARGET["pid"]
+        with self.assertRaises(LearningError) as failure:
+            self.library.teach_picked(self.runtime, TARGET, "forms", native_choice(), "선택 버튼")
+        self.assertEqual(failure.exception.code, "observation_failed")
+        self.assertEqual(self.library.all(), [])
+
     def test_current_values_handles_images_and_tokens_are_never_persisted(self):
         self.runtime.answer["structuredContent"].update(snapshot_id="root-snapshot", window_title="private-document")
         self.runtime.answer["content"] = [{"type": "image", "data": "private-screen", "mimeType": "image/png"}]

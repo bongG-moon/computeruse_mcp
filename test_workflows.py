@@ -21,7 +21,8 @@ class FakeRuntime:
         self.id = "synthetic-session"
         self.active = True
         self.programs = [{"id": "editor", "exe": str(Path(folder) / "Editor.exe"), "control_exes": []}]
-        self.guard = SimpleNamespace(process_resolver=lambda pid: self.programs[0]["exe"])
+        self.guard = SimpleNamespace(process_resolver=lambda pid: self.programs[0]["exe"],
+                                     window_resolver=lambda hwnd: 100)
 
     def check_active(self):
         if not self.active:
@@ -211,6 +212,7 @@ class WorkflowTests(unittest.TestCase):
         task["steps"][1]["program_id"] = "viewer"
         self.runtime.programs.append({"id": "viewer", "exe": str(Path(self.tmp.name) / "Viewer.exe")})
         self.runtime.guard.process_resolver = lambda pid: self.runtime.programs[0 if pid == 100 else 1]["exe"]
+        self.runtime.guard.window_resolver = lambda hwnd: 300 if hwnd == 400 else 100
         targets = self.target + [{"program_id": "viewer", "pid": 300, "window_id": 400}]
         answer = self.runner.run(self.runtime, task, {}, targets)
         self.assertTrue(answer["task_verified"])
@@ -266,6 +268,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(engine.calls)
         self.runtime.programs.append({"id": "viewer", "exe": str(Path(self.tmp.name) / "Viewer.exe")})
         self.runtime.guard.process_resolver = lambda pid: self.runtime.programs[0 if pid == 100 else 1]["exe"]
+        self.runtime.guard.window_resolver = lambda hwnd: 300 if hwnd == 400 else 100
         answer = self.run_recipe(engine, task=task, targets=targets)
         self.assertTrue(answer["task_verified"])
         self.assertEqual([target for _, target, _ in engine.calls],

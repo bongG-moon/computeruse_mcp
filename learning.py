@@ -159,9 +159,6 @@ class ElementLibrary:
                 self._check_paths()
                 lock_path = self.path.with_suffix(".lock")
                 with lock_path.open("a+b") as stream:
-                    if stream.seek(0, os.SEEK_END) == 0:
-                        stream.write(b"0")
-                        stream.flush()
                     deadline = time.monotonic() + self.LOCK_TIMEOUT
                     while True:
                         stream.seek(0)
@@ -178,6 +175,12 @@ class ElementLibrary:
                                 raise LearningError("다른 연결에서 요소를 저장 중입니다. 잠시 후 다시 시도하세요.", "store_busy") from None
                             time.sleep(0.025)
                     try:
+                        # Lock byte 0 even past EOF before initializing it, so
+                        # simultaneous first writers cannot flush into another
+                        # process's Windows mandatory byte-range lock.
+                        if stream.seek(0, os.SEEK_END) == 0:
+                            stream.write(b"0")
+                            stream.flush()
                         self._check_paths()
                         yield
                     finally:
@@ -359,10 +362,14 @@ class ElementLibrary:
             raise LearningError("수정할 요소의 현재 revision을 지정하세요.")
         self._check_teaching_active(runtime, cancel_event)
         snapshot, binding = self._observe(runtime, target, program_id)
-        matched = match_picked_element(snapshot, selected, target)
+        evidence = {}
+        matched = match_picked_element(snapshot, selected, target, diagnostics=evidence)
         element = _unique(snapshot, matched["expected_selector"])
-        return self._save_observed(runtime, snapshot, binding, element, program_id, label, screen,
-                                   instructions, element_id, expected_revision, cancel_event)
+        entry = self._save_observed(runtime, snapshot, binding, element, program_id, label, screen,
+                                    instructions, element_id, expected_revision, cancel_event)
+        # Matching diagnostics contain counts and enum-like statuses only, not
+        # application names/values, native handles, or saved screen coordinates.
+        return {**entry, "teaching_evidence": evidence}
 
     @staticmethod
     def _check_teaching_active(runtime, cancel_event):
