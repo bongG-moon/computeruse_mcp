@@ -162,6 +162,7 @@ class OwnedProcess:
     def __init__(self, process: subprocess.Popen):
         self.process = process
         self.job = None
+        self.job_error = None
         if os.name != "nt":
             return
         kernel = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -186,11 +187,19 @@ class OwnedProcess:
         job = kernel.CreateJobObjectW(None, None)
         info = EXTENDED()
         info.BasicLimitInformation.LimitFlags = 0x2000
-        if job and kernel.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)) and kernel.AssignProcessToJobObject(job, wintypes.HANDLE(int(process._handle))):
-            self.job = job
-            self.kernel = kernel
-        elif job:
+        if not job:
+            self.job_error = {"stage": "create_job", "winerror": ctypes.get_last_error()}
+            return
+        if not kernel.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+            self.job_error = {"stage": "set_job_limits", "winerror": ctypes.get_last_error()}
             kernel.CloseHandle(job)
+            return
+        if not kernel.AssignProcessToJobObject(job, wintypes.HANDLE(int(process._handle))):
+            self.job_error = {"stage": "assign_process", "winerror": ctypes.get_last_error()}
+            kernel.CloseHandle(job)
+            return
+        self.job = job
+        self.kernel = kernel
 
     def close(self):
         if self.job:

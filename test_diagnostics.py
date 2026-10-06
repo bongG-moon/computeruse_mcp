@@ -4,6 +4,9 @@ from pathlib import Path
 import tempfile
 import types
 import unittest
+import io
+import subprocess
+import sys
 from unittest.mock import patch
 
 import diagnostics
@@ -111,6 +114,81 @@ class ProbeTests(unittest.TestCase):
             self.assertTrue(any(c["status"] == "warning" for c in report["checks"]))
             self.assertIn("화면 조작·모델 연결", report["scope"])
             self.assertFalse(report["connection"]["screen_session_started"])
+
+
+class ProcessDiagnosisTests(unittest.TestCase):
+    @staticmethod
+    def no_job(process):
+        def forbidden_tree_cleanup():
+            raise AssertionError("No process-tree cleanup is allowed in this diagnostic fallback")
+        return types.SimpleNamespace(job=None, job_error={"stage": "assign_process", "winerror": 5}, close=forbidden_tree_cleanup)
+
+    def test_no_job_still_performs_real_metadata_handshake_and_confirms_exit(self):
+        source = '''import json,sys
+for line in sys.stdin:
+ value=json.loads(line)
+ if 'id' in value:
+  result={'serverInfo':{'version':'synthetic'}} if value['method']=='initialize' else {'structuredContent':{'session':None}}
+  print(json.dumps({'jsonrpc':'2.0','id':value['id'],'result':result}),flush=True)
+'''
+        entry={"command":sys.executable,"args":["-B","-c",source]}
+        client=diagnostics.ReadOnlyMCP(entry,owner_factory=self.no_job)
+        try:
+            response=client.request('initialize',{},timeout=5)
+            self.assertEqual(response['serverInfo']['version'],'synthetic')
+            client.initialized()
+            self.assertIsNone(client.request('tools/call',{'name':'computer_status','arguments':{}},timeout=5)['structuredContent']['session'])
+            self.assertEqual(client.process_management['mode'],'stdio_lifecycle')
+            self.assertEqual(client.process_management['job_error']['winerror'],5)
+        finally:client.close()
+        self.assertEqual(client.cleanup,{'verified':True,'graceful':True,'exit_code':0})
+
+    def test_actual_startup_message_and_exit_code_survive_stdout_eof(self):
+        source="import sys; print('computer-use-admin: 관리자 연결 실패: 같은 로그인 계정 권한 확인',file=sys.stderr,flush=True);sys.exit(5)"
+        client=diagnostics.ReadOnlyMCP({'command':sys.executable,'args':['-B','-c',source], 'env':{'PYTHONUTF8':'1','PYTHONIOENCODING':'utf-8'}},owner_factory=self.no_job)
+        try:
+            with self.assertRaisesRegex(RuntimeError,'같은 로그인 계정'):
+                client.request('initialize',{},timeout=5)
+        finally:
+            with self.assertRaisesRegex(RuntimeError,'종료 코드: 5'):
+                client.close()
+        self.assertTrue(client.cleanup['verified'])
+        self.assertFalse(client.cleanup['graceful'])
+
+    def test_uac_cancellation_is_not_reported_as_company_policy(self):
+        source="import sys;print('computer-use-admin: 관리자 권한 요청이 취소되었습니다.',file=sys.stderr,flush=True);sys.exit(1223)"
+        client=diagnostics.ReadOnlyMCP({'command':sys.executable,'args':['-B','-c',source], 'env':{'PYTHONUTF8':'1','PYTHONIOENCODING':'utf-8'}},owner_factory=self.no_job)
+        try:
+            with self.assertRaisesRegex(RuntimeError,'UAC.*취소'):
+                client.request('initialize',{},timeout=5)
+        finally:
+            with self.assertRaisesRegex(RuntimeError,'UAC.*취소'):
+                client.close()
+
+    def test_unrecognized_stderr_is_not_exposed_as_diagnostic_content(self):
+        source="import sys;print('private log contents should stay hidden',file=sys.stderr,flush=True);sys.exit(3)"
+        client=diagnostics.ReadOnlyMCP({'command':sys.executable,'args':['-B','-c',source], 'env':{'PYTHONUTF8':'1','PYTHONIOENCODING':'utf-8'}},owner_factory=self.no_job)
+        try:
+            with self.assertRaises(RuntimeError) as caught:
+                client.request('initialize',{},timeout=5)
+            self.assertNotIn('private log contents',str(caught.exception))
+            self.assertIn('단정할 수 없습니다',str(caught.exception))
+        finally:
+            with self.assertRaises(RuntimeError):client.close()
+
+    def test_failed_normal_shutdown_is_not_connection_success(self):
+        client=object.__new__(diagnostics.ReadOnlyMCP)
+        process=types.SimpleNamespace(stdin=io.StringIO(),stdout=io.StringIO(),stderr=io.StringIO(),returncode=-1,
+                                      wait=unittest.mock.Mock(side_effect=[subprocess.TimeoutExpired('owned',20),-1]),
+                                      kill=unittest.mock.Mock())
+        client.process=process;client.owner=self.no_job(process);client.cleanup={'verified':False,'graceful':False}
+        client.reader=types.SimpleNamespace(join=lambda timeout:None)
+        client.stderr_reader=types.SimpleNamespace(join=lambda timeout:None)
+        with self.assertRaisesRegex(RuntimeError,'연결 성공으로 처리하지'):
+            client.close()
+        process.kill.assert_called_once()
+        self.assertTrue(client.cleanup['verified'])
+        self.assertFalse(client.cleanup['graceful'])
 
 
 if __name__ == "__main__":

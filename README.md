@@ -1,4 +1,4 @@
-# Computer Use MCP 0.7.0
+# Computer Use MCP 0.7.1
 
 Claude Code 등 MCP를 지원하는 클라이언트에서 **이 PC의 프로그램 화면을 읽고 조작하는 Windows용 도구**입니다. Chrome, 메모장, 설치된 Excel뿐 아니라 사용자가 실행파일을 지정한 다른 프로그램도 등록할 수 있습니다. 실제 화면을 확인해 클릭·입력하고, 요청한 결과까지 확인하는 것을 목표로 합니다.
 
@@ -8,12 +8,12 @@ Claude Code 등 MCP를 지원하는 클라이언트에서 **이 PC의 프로그�
 
 | 파일 | 용도 |
 | --- | --- |
-| [Computer-Use-MCP-0.7.0-with-driver.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.7.0/Computer-Use-MCP-0.7.0-with-driver.zip) | MCP와 Cua Driver 0.28.2를 함께 준비하는 권장 묶음 |
-| [Computer-Use-MCP-0.7.0.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.7.0/Computer-Use-MCP-0.7.0.zip) | Driver를 직접 준비하는 기존 배포본 |
-| [Computer-Use-MCP-0.7.0-source.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.7.0/Computer-Use-MCP-0.7.0-source.zip) | 개발·코드 확인용 원본 소스 |
-| [cua-driver.exe](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.7.0/cua-driver.exe) | 실행파일만 받기. 전체 구성은 Driver 포함 ZIP 사용 |
+| [Computer-Use-MCP-0.7.1-with-driver.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.7.1/Computer-Use-MCP-0.7.1-with-driver.zip) | MCP와 Cua Driver 0.28.2를 함께 준비하는 권장 묶음 |
+| [Computer-Use-MCP-0.7.1.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.7.1/Computer-Use-MCP-0.7.1.zip) | Driver를 직접 준비하는 기존 배포본 |
+| [Computer-Use-MCP-0.7.1-source.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.7.1/Computer-Use-MCP-0.7.1-source.zip) | 개발·코드 확인용 원본 소스 |
+| [cua-driver.exe](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.7.1/cua-driver.exe) | 실행파일만 받기. 전체 구성은 Driver 포함 ZIP 사용 |
 
-[전체 릴리스와 파일 해시](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.7.0) · [SHA256SUMS.txt](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.7.0/SHA256SUMS.txt)
+[전체 릴리스와 파일 해시](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.7.1) · [SHA256SUMS.txt](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.7.1/SHA256SUMS.txt)
 
 GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실행파일과 동봉 Python이 필요한 일반 사용자는 위의 배포 ZIP을 받으세요. 지원 대상은 Windows x86_64이며, 사용할 프로그램과 Claude Code 등 MCP 클라이언트는 이 PC에 설치되어 있어야 합니다.
 
@@ -51,7 +51,7 @@ GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실�
 
 ## 작업 후 종료까지 확인하기
 
-0.7.0은 종료 요청 전에 원래 창·프로세스를 확인하고, 종료 후 상태를 다시 읽습니다. 저장·종료 확인창이 남으면 완료로 처리하지 않습니다. 숨김·최소화와 실제 종료를 구분하고, **특정 창이 닫혔는지**와 **원래 프로세스가 종료됐는지**도 구분합니다.
+0.7.1은 종료 요청 전에 원래 창·프로세스를 확인하고, 종료 후 상태를 다시 읽습니다. 저장·종료 확인창이 남으면 완료로 처리하지 않습니다. 숨김·최소화와 실제 종료를 구분하고, **특정 창이 닫혔는지**와 **원래 프로세스가 종료됐는지**도 구분합니다.
 
 > 작업이 끝나면 지정한 시험 파일에 저장하고 프로그램을 종료해줘. 저장·종료 확인창도 처리하고 실제 종료됐는지 확인해줘.
 
@@ -59,7 +59,11 @@ GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실�
 
 ## 검증 범위와 안내
 
-0.7.0은 MCP와 Cua Driver가 관리자 권한으로 실행되도록 전용 연결 프로그램을 추가합니다. 일반 Claude Code에서도 연결할 수 있으며 Windows UAC 승인이 필요할 수 있습니다. 같은 로그인 사용자·세션만 허용하며 취소·차단·다른 계정 사용 시 일반 실행으로 대신 연결하지 않습니다. `computer_status.execution`에서 실제 관리자·승격·무결성 수준을 확인합니다.
+0.7.1은 설치 연결 진단을 수정합니다. 0.7.0에서 Job 객체를 만들지 못하면 연결 검사 전에 중단하던 조건을 보완하고, 실제 시작 오류·종료 코드·UAC 취소를 구분합니다. Job을 사용할 수 없어도 읽기 전용 연결과 정상 종료를 따로 확인하며, 종료 확인 실패는 설치 성공으로 처리하지 않습니다. 이 오류 메시지만으로 회사 보안 정책 차단을 단정하지 않습니다.
+
+자동 검사 485개 중 483개 통과, 2개 조건부 제외. 새 배포 구성과 기존 Driver로 Job 실패를 주입한 일반 실행 상태 조회에서 32개 도구·Driver 스키마·정상 종료를 확인했습니다. 실제 운영 PC의 실패 원인과 관리자 화면 조작은 별도 검증이 필요합니다.
+
+0.7.0부터 MCP와 Cua Driver를 관리자 권한으로 실행하는 전용 연결 프로그램을 사용합니다. 일반 Claude Code에서도 연결할 수 있으며 Windows UAC 승인이 필요할 수 있습니다. 같은 로그인 사용자·세션만 허용하며 취소·차단·다른 계정 사용 시 일반 실행으로 대신 연결하지 않습니다. `computer_status.execution`에서 실제 관리자·승격·무결성 수준을 확인합니다.
 
 관리자 권한을 확보해도 다른 계정의 프로그램, Windows 보안 확인 화면, 회사 정책으로 차단된 프로그램, UIA를 제공하지 않는 화면까지 자동 지원되는 것은 아닙니다. 기존 허용 프로그램과 작업 제한은 유지합니다.
 
@@ -74,4 +78,4 @@ GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실�
 
 GitHub에서는 HTML이 소스로 보일 수 있습니다. **배포 ZIP을 압축 푼 뒤 README.html 또는 VALIDATION.html을 두 번 누르면 브라우저에서 안내와 보고서를 읽을 수 있습니다.**
 
-Driver는 Git 소스에 넣지 않고 릴리스 파일로 제공합니다. 포함판과 별도 준비판을 함께 유지하며, 실제 환경 시험 후 Driver 포함 배포를 제외할 수 있습니다. 기존 0.7.0 MCP 본체는 그대로 제공됩니다.
+Driver는 Git 소스에 넣지 않고 릴리스 파일로 제공합니다. 포함판과 별도 준비판을 함께 유지하며, 실제 환경 시험 후 Driver 포함 배포를 제외할 수 있습니다. 기존 0.7.1 MCP 본체는 그대로 제공됩니다.

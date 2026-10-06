@@ -50,6 +50,24 @@ class ReleaseProvenanceTests(unittest.TestCase):
         self.manifest("0.3.3")
         self.assertIsNone(register._previous_entry(self.entry))
 
+    def test_proven_administrator_bridge_entry_is_supported_without_extra_args_or_env(self):
+        bridge=self.base/'Computer Use MCP 관리자 연결.exe'
+        bridge.write_bytes(b'synthetic known bridge - never execute')
+        self.manifest('0.7.0')
+        path=self.base/'SHA256SUMS.txt'
+        data=path.read_bytes()+(hashlib.sha256(bridge.read_bytes()).hexdigest()+'  '+bridge.name+'\n').encode('utf-8')
+        path.write_bytes(data)
+        digest=hashlib.sha256(data).hexdigest()
+        entry={**copy.deepcopy(self.entry),'command':str(bridge),'args':['--config',str(self.config)]}
+        with patch.dict(register.PREVIOUS_MANIFESTS,{digest:'0.7.0'}):
+            self.assertEqual(register._previous_entry(entry)['version'],'0.7.0')
+            modified=copy.deepcopy(entry);modified['args'].append('--normal')
+            self.assertIsNone(register._previous_entry(modified))
+            modified=copy.deepcopy(entry);modified['env']['PYTHONPATH']='foreign'
+            self.assertIsNone(register._previous_entry(modified))
+            bridge.write_bytes(b'changed bridge')
+            self.assertIsNone(register._previous_entry(entry))
+
     def test_known_manifest_cannot_hide_modified_server_or_command(self):
         digest = self.manifest("0.3.3")
         with patch.dict(register.PREVIOUS_MANIFESTS, {digest: "0.3.3"}):

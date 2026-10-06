@@ -22,6 +22,7 @@ SERVER_NAME = "local-computer-use"
 # Version labels alone are never trusted; a foreign same-name MCP is preserved.
 # This proves these exact distributions, not signed-code security.
 PREVIOUS_MANIFESTS = {
+    "6d0c32b2338ddc185a4cc15cc0d52ea447e5bad1415df6b1a38601828c7bd47d": "0.7.0",
     "1778b37b2ed5fc839dcf0de1a7a11c145f96693269981eb70935f2968dff58a8": "0.6.0",
     "17e2c4cb787c6b54f001b0bbed58c88adb949d1c14f4b4e2b22cd43b82bb8ba9": "0.5.0",
     "fd408ef370fe7cd779e1dd985b35db955549c2888c6fa493d8038a2c9758b4ef": "0.1.0",
@@ -89,8 +90,8 @@ def make_server_entry(config_path: str | Path) -> dict:
         entry["args"] = ["--config", str(config)]
     elif bundled.is_file() and (APP_DIR / "BUILD-MANIFEST.json").is_file():
         manifest = _read_object(APP_DIR / "BUILD-MANIFEST.json")
-        if manifest.get("product") == "Computer-Use-MCP" and manifest.get("version") == "0.7.0":
-            raise RegistrationError("관리자 연결 실행파일이 없습니다. 0.7.0 ZIP 전체를 다시 압축 해제해 주세요. 일반 권한 연결로 대체하지 않았습니다.")
+        if manifest.get("product") == "Computer-Use-MCP" and manifest.get("version") in {"0.7.0", "0.7.1"}:
+            raise RegistrationError("관리자 연결 실행파일이 없습니다. ZIP 전체를 다시 압축 해제해 주세요. 일반 권한 연결로 대체하지 않았습니다.")
     return entry
 
 
@@ -113,15 +114,26 @@ def _previous_entry(existing) -> dict | None:
         return None
     try:
         args = existing.get("args")
-        if not isinstance(args, list) or len(args) != 5 or args[:2] != ["-B", "-s"] or args[3] != "--config":
+        if not isinstance(args, list):
             return None
-        python, server, config = Path(existing["command"]), Path(args[2]), Path(args[4])
+        bridge = None
+        command = Path(existing["command"])
+        if len(args) == 5 and args[:2] == ["-B", "-s"] and args[3] == "--config":
+            python, server, config = command, Path(args[2]), Path(args[4])
+        elif len(args) == 2 and args[0] == "--config" and command.name == "Computer Use MCP 관리자 연결.exe":
+            bridge = command
+            python, server, config = command.parent / "runtime/python.exe", command.parent / "server.py", Path(args[1])
+        else:
+            return None
         if not all(p.is_absolute() for p in (python, server, config)):
             return None
         base = server.parent
         if server.name != "server.py" or python != base / "runtime" / "python.exe" or not _plain_chain(base):
             return None
-        if existing != _entry_for_paths(python, server, config):
+        expected_entry = _entry_for_paths(python, server, config)
+        if bridge is not None:
+            expected_entry.update(command=str(bridge), args=["--config", str(config)])
+        if existing != expected_entry:
             return None
         manifest = base / "SHA256SUMS.txt"
         if not _plain_chain(manifest) or manifest.stat().st_size > 1_000_000:
@@ -130,7 +142,10 @@ def _previous_entry(existing) -> dict | None:
         version = PREVIOUS_MANIFESTS.get(hashlib.sha256(manifest_bytes).hexdigest())
         if not version:
             return None
+        if bridge is not None and version != "0.7.0":
+            return None
         checked_folders = set()
+        checked_names = set()
         for line in manifest_bytes.decode("utf-8").splitlines():
             digest, name = line.split("  ", 1)
             relative = PurePosixPath(name)
@@ -146,6 +161,9 @@ def _previous_entry(existing) -> dict | None:
                 return None
             if hashlib.sha256(file.read_bytes()).hexdigest() != digest:
                 return None
+            checked_names.add(name)
+        if bridge is not None and bridge.name not in checked_names:
+            return None
         return {"version": version, "previous_command": str(python), "previous_server": str(server),
                 "previous_config": str(config)}
     except (OSError, ValueError, TypeError, KeyError):

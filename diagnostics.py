@@ -101,19 +101,68 @@ class ReadOnlyMCP:
     """Only the three diagnostic requests below are accepted by this client."""
     ALLOWED = {"initialize", "tools/list", "tools/call"}
 
-    def __init__(self, entry: dict):
+    def __init__(self, entry: dict, *, owner_factory=None):
         self.events = queue.Queue()
         self.sequence = 0
+        self.stderr_messages = []
+        self.stderr_lock = threading.Lock()
+        self.stderr_done = threading.Event()
+        self.cleanup = {"verified": False, "graceful": False}
         self.process = subprocess.Popen([entry["command"], *entry["args"]], stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace",
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
             env=dict(os.environ, **entry.get("env", {})), creationflags=hidden_flags(), bufsize=1)
-        self.owner = OwnedProcess(self.process)
-        if os.name == "nt" and self.owner.job is None:
-            self.owner.close()
-            self.process.wait(timeout=5)
-            raise RuntimeError("진단 프로세스의 종료 범위를 확보하지 못했습니다. 다른 실행환경에서 다시 확인해주세요.")
+        try:
+            self.owner = (owner_factory or OwnedProcess)(self.process)
+        except Exception:
+            self.process.stdin.close()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=5)
+            raise
+        self.process_management = {"mode": "job_object" if self.owner.job is not None else "stdio_lifecycle",
+                                   "job_error": getattr(self.owner, "job_error", None)}
+        self.stderr_reader = threading.Thread(target=self._read_stderr, daemon=True)
+        self.stderr_reader.start()
         self.reader = threading.Thread(target=self._read, daemon=True)
         self.reader.start()
+
+    def _read_stderr(self):
+        try:
+            while True:
+                line = self.process.stderr.readline(2049)
+                if not line:
+                    break
+                # Do not expose arbitrary logs/tracebacks or unbounded screen data.
+                if line.startswith(("computer-use-admin:", "computer-use-mcp:")):
+                    text = " ".join(line[:1024].split())
+                    with self.stderr_lock:
+                        self.stderr_messages.append(text)
+                        self.stderr_messages[:] = self.stderr_messages[-4:]
+        finally:
+            self.stderr_done.set()
+
+    def _exit_error(self):
+        self.stderr_done.wait(.25)
+        code = self.process.poll()
+        if code is None:
+            try:
+                code = self.process.wait(timeout=.2)
+            except subprocess.TimeoutExpired:
+                pass
+        with self.stderr_lock:
+            detail = self.stderr_messages[-1] if self.stderr_messages else ""
+        if code == 1223 or "관리자 권한 요청이 취소" in detail:
+            return RuntimeError("Windows 관리자 승인(UAC)이 취소되어 MCP 연결이 시작되지 않았습니다. 같은 로그인 계정으로 승인한 뒤 다시 연결하세요.")
+        message = "MCP 진단 프로세스가 응답 전에 종료되었습니다."
+        if code is not None:
+            message += f" 종료 코드: {code}."
+        if detail:
+            message += " 실제 실행 오류: " + detail
+        else:
+            message += " 종료 원인을 확인하지 못했습니다. 회사 보안 정책 차단으로 단정할 수 없습니다."
+        return RuntimeError(message)
 
     def _read(self):
         try:
@@ -130,7 +179,7 @@ class ReadOnlyMCP:
                     self.events.put(RuntimeError("MCP가 올바른 응답 형식으로 실행되지 않았습니다."))
                     break
         finally:
-            self.events.put(RuntimeError("MCP 진단 프로세스가 종료되었습니다."))
+            self.events.put(self._exit_error())
 
     def request(self, method: str, params=None, timeout=120) -> dict:
         params = params or {}
@@ -138,8 +187,11 @@ class ReadOnlyMCP:
             raise ValueError("연결 확인에서는 상태 조회만 허용합니다.")
         self.sequence += 1
         request_id = self.sequence
-        self.process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}) + "\n")
-        self.process.stdin.flush()
+        try:
+            self.process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}) + "\n")
+            self.process.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            raise self._exit_error() from exc
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
@@ -162,19 +214,36 @@ class ReadOnlyMCP:
         self.process.stdin.flush()
 
     def close(self):
+        failure = None
         try:
             if self.process.stdin:
                 self.process.stdin.close()
             try:
-                self.process.wait(timeout=4)
+                self.process.wait(timeout=20)
+                self.cleanup.update(verified=True, graceful=self.process.returncode == 0, exit_code=self.process.returncode)
+                if self.process.returncode != 0:
+                    failure = self._exit_error()
             except subprocess.TimeoutExpired:
-                pass
+                if self.owner.job is not None:
+                    self.owner.close()
+                else:
+                    # Exact Popen handle only. Pipe loss makes the authenticated
+                    # bridge close its own MCP; never use a process-name/tree scan.
+                    self.process.kill()
+                self.process.wait(timeout=5)
+                self.cleanup.update(verified=True, graceful=False, exit_code=self.process.returncode)
+                failure = RuntimeError("MCP 진단의 정상 종료를 확인하지 못해 이번 연결만 중지했습니다. 연결 성공으로 처리하지 않았습니다.")
         finally:
-            self.owner.close()
-            self.process.wait(timeout=5)
+            if self.owner.job is not None:
+                self.owner.close()
             self.reader.join(timeout=1)
+            self.stderr_reader.join(timeout=1)
             if self.process.stdout:
                 self.process.stdout.close()
+            if self.process.stderr:
+                self.process.stderr.close()
+        if failure:
+            raise failure
 
 
 def _structured(response: dict) -> dict:
@@ -197,6 +266,7 @@ def probe_connection(config: dict) -> dict:
         path = Path(directory) / "diagnostic-config.json"
         save_config(path, copied)
         client = ReadOnlyMCP(make_server_entry(path))
+        primary_error = None
         try:
             initialized = client.request("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "computer-use-connection-check", "version": VERSION}})
             client.initialized()
@@ -206,11 +276,21 @@ def probe_connection(config: dict) -> dict:
                 raise RuntimeError("연결 확인 중 예상하지 못한 화면 세션이 감지되었습니다.")
             names = {item.get("name") for item in tools if isinstance(item, dict)}
             compatible = {"computer_status", "computer_begin", "computer_stop", "get_window_state"} <= names
-            return {"ok": compatible and not status.get("driver_schema_error"), "tool_count": len(names),
+            result = {"ok": compatible and not status.get("driver_schema_error"), "tool_count": len(names),
                     "server": initialized.get("serverInfo", {}), "status": status,
                     "schema_error": status.get("driver_schema_error", ""), "screen_session_started": False}
+        except Exception as exc:
+            primary_error = exc
+            raise
         finally:
-            client.close()
+            try:
+                client.close()
+            except Exception:
+                if primary_error is None:
+                    raise
+        result["process_management"] = getattr(client, "process_management", {"mode": "unreported"})
+        result["cleanup"] = getattr(client, "cleanup", {"verified": None, "graceful": None})
+        return result
 
 
 def run_diagnostics(config: dict) -> dict:
@@ -242,6 +322,13 @@ def run_diagnostics(config: dict) -> dict:
                 report["connection"] = probe_connection(value)
                 connected = report["connection"]
                 add("MCP 실제 연결", "ok" if connected["ok"] else "error", f"도구 {connected['tool_count']}개 조회 / 화면 세션 시작 없음" + ("\n" + connected["schema_error"] if connected["schema_error"] else ""))
+                management = connected.get("process_management", {})
+                if management.get("mode") == "stdio_lifecycle":
+                    job_error = management.get("job_error") or {}
+                    detail = "Job 객체를 사용하지 못해 stdio 연결의 정상 종료를 별도로 확인했습니다. 회사 보안 정책 차단으로 판정하지 않습니다."
+                    if job_error.get("winerror") is not None:
+                        detail += f" Windows 오류: {job_error['winerror']} ({job_error.get('stage', 'unknown')})."
+                    add("진단 프로세스 관리", "warning", detail)
             except (OSError, ValueError, RuntimeError, TimeoutError, subprocess.SubprocessError) as exc:
                 add("MCP 실제 연결", "error", str(exc) + "\n배포 폴더를 옮겼다면 전체 압축을 다시 풀고 Driver를 선택한 뒤 재확인하세요.")
     cli = native_claude()
