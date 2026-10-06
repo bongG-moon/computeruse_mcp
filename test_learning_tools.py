@@ -1,5 +1,6 @@
 """Real MCP manager integration for teaching and verified use of named controls."""
 import copy
+import gc
 from pathlib import Path
 import tempfile
 import threading
@@ -60,6 +61,8 @@ class MutableRuntime(Runtime):
 
 class LearningToolTests(unittest.TestCase):
     def setUp(self):
+        # Keep unrelated hidden Tk fixture finalizers on their owning thread.
+        gc.collect()
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.config = config_at(self.temporary.name)
@@ -81,13 +84,18 @@ class LearningToolTests(unittest.TestCase):
             "step": step or {"operation": "set_value", "value": "sample-user", "verification_timeout_ms": 0}, **extra})
 
     def test_default_picker_is_called_then_stable_identity_is_saved(self):
+        from test_teaching_sessions import native_choice
         args = self.arguments(timeout_seconds=30)
         args.pop("element_index")
         args.pop("expected_selector")
-        with mock.patch("learning_picker.pick_element", return_value={"element_index": 3, "expected_selector": FIELD_SELECTOR}) as picker:
+        def pick(runtime, target, label, timeout, **kwargs):
+            kwargs["on_ready"]({"helper_pid": 111, "helper_window_id": 222})
+            return native_choice()
+        with mock.patch("teaching_sessions._run_helper", side_effect=pick) as picker:
             answer = self.manager.call("computer_teach_element", args)
-        picker.assert_called_once_with(self.runtime, TARGET, "신청자 입력", timeout_seconds=30)
-        learned = answer["structuredContent"]
+            job = answer["structuredContent"]
+            learned = self.manager.call("computer_teach_status", {"teaching_id": job["teaching_id"], "wait_ms": 1000})["structuredContent"]
+        self.assertEqual(picker.call_count, 1)
         self.assertEqual(learned["selector"], FIELD_SELECTOR)
         self.assertEqual(learned["status"], "learned")
         self.assertFalse(learned["model_trained"])
@@ -121,9 +129,9 @@ class LearningToolTests(unittest.TestCase):
         args = self.arguments()
         args.pop("element_index")
         args.pop("expected_selector")
-        with mock.patch("learning_picker.pick_element", side_effect=OperationError("사용자가 취소했습니다.", "picker_cancelled")):
+        with mock.patch("teaching_sessions._run_helper", side_effect=OperationError("사용자가 취소했습니다.", "picker_cancelled")):
             answer = self.manager.call("computer_teach_element", args)
-        self.assertTrue(answer["isError"])
+        self.assertEqual(answer["structuredContent"]["status"], "cancelled")
         self.assertEqual(answer["structuredContent"]["diagnostic"]["code"], "picker_cancelled")
         self.assertFalse(answer["structuredContent"]["input_dispatched"])
         self.assertEqual(self.manager.elements.all(), [])
@@ -136,9 +144,9 @@ class LearningToolTests(unittest.TestCase):
         def choose(*args, **kwargs):
             cancelled.set()
             return {"element_index": 3, "expected_selector": FIELD_SELECTOR}
-        with mock.patch("learning_picker.pick_element", side_effect=choose):
-            with self.assertRaises(SessionError):
-                self.manager.call("computer_teach_element", args, cancel_event=cancelled)
+        with mock.patch("teaching_sessions._run_helper", side_effect=choose):
+            answer = self.manager.call("computer_teach_element", args, cancel_event=cancelled)
+        self.assertEqual(answer["structuredContent"]["status"], "cancelled")
         self.assertEqual(self.manager.elements.all(), [])
         self.assertEqual(self.runtime.calls, [])
 

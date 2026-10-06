@@ -46,13 +46,13 @@ APP_FILES = (
     "server.py", "settings.py", "setup.py", "consent.py", "register.py", "README.html", "VALIDATION.html",
     "maintenance.py", "diagnostics.py", "install.py", "programs.py", "INSTALL.md", "vendor/__init__.py", "vendor/guard.py", "vendor/windows.py",
     "session_runtime.py", "configuration_state.py", "operations.py", "workflows.py", "inspection.py", "accessibility_tree.py", "closing.py", "close_actions.py", "privileges.py",
-    "program_launch.py", "learning.py", "learning_picker.py",
+    "program_launch.py", "learning.py", "learning_picker.py", "teaching_sessions.py",
     "README.md", "DRIVER-BUNDLE.md", "CUA-DRIVER-LICENSE.md",
 )
 OPTIONAL_APP_FILES = ()
 SOURCE_SUPPORT_FILES = (
     "Launcher.cs", "AdministratorBridge.cs", "build_portable.py", "bundle_driver.py", ".gitignore", "test_consent.py", "test_register.py", "test_administrator.py", "administrator_validation.py",
-    "ElementPicker.cs", "test_program_launch.py", "test_learning.py", "test_learning_picker.py", "test_learning_tools.py", "learning_validation.py",
+    "ElementPicker.cs", "test_program_launch.py", "test_learning.py", "test_learning_picker.py", "test_learning_tools.py", "learning_validation.py", "test_teaching_sessions.py", "picker_validation.py",
     "test_maintenance.py", "test_server.py", "test_settings.py", "test_diagnostics.py",
     "test_setup.py", "test_task_store.py", "test_install.py", "test_install_review.py", "test_install_live.py", "test_acceptance_workflows.py", "acceptance_workflows.py", "live_validation.py",
     "test_browser_defaults.py", "test_consent_ui.py", "test_programs.py", "test_setup_programs.py", "fixtures/blank.xlsx",
@@ -299,7 +299,7 @@ def main() -> int:
     if not json.loads(launched.stdout).get("ok"):
         raise RuntimeError("Launcher self-test did not return a successful result.")
     run_hidden([str(runtime / "python.exe"), "-B", "-s", "-c",
-        "import server,settings,consent,register,maintenance,diagnostics,install,programs,vendor.guard,vendor.windows; print(\"Application imports passed\")"],
+        "import server,settings,consent,register,maintenance,diagnostics,install,programs,learning,learning_picker,teaching_sessions,vendor.guard,vendor.windows; print(\"Application imports passed\")"],
         cwd=bundle, env=runtime_environment(runtime))
     print("Bundled Python, application imports, and launcher checks passed.", flush=True)
     source_zip = write_source_archive(staging, bundle, snapshot, proof)

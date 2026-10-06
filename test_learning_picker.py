@@ -23,7 +23,7 @@ def identity(role="ComboBox", name="신청 상태", automation_id=""):
 
 
 def selected(**extra):
-    return {"status": "selected", **TARGET, "element": identity(), "ancestors": [],
+    return {"status": "selected", "human_confirmed": True, **TARGET, "element": identity(), "ancestors": [],
             "point": {"x": 40, "y": 80}, "bounds": {"x": 10, "y": 50, "width": 100, "height": 60}, **extra}
 
 
@@ -51,6 +51,7 @@ class Runtime:
 
 class FakeChild:
     def __init__(self):
+        self.pid = 888
         self.returncode = None
         self.terminated = False
         self.killed = False
@@ -196,6 +197,59 @@ class PickerLifecycleTests(unittest.TestCase):
         with patch.object(picker, "_run_helper", return_value=selected()), self.assertRaises(OperationError) as failure:
             picker.pick_element(self.runtime, TARGET, "상태")
         self.assertEqual(failure.exception.code, "picker_not_found")
+
+    def test_async_ready_requires_actual_owned_visible_window(self):
+        child = FakeChild()
+        notified = []
+        def spawn(args, **kwargs):
+            request = json.loads(Path(args[2]).read_text(encoding="utf-8"))
+            ready = {"nonce": request["nonce"], "status": "ready", **TARGET,
+                     "helper_pid": child.pid, "helper_window_id": 999}
+            Path(args[3] + ".ready.json").write_text(json.dumps(ready), encoding="utf-8")
+            Path(args[3]).write_text(json.dumps({**selected(), "nonce": request["nonce"]}), encoding="utf-8")
+            return child
+        with patch.object(Path, "is_file", return_value=True), patch.object(picker.subprocess, "Popen", side_effect=spawn), \
+                patch.object(picker, "_helper_visible", return_value=True) as visible:
+            result = picker._run_helper(self.runtime, TARGET, "상태", 10, on_ready=notified.append)
+        visible.assert_called_once_with(888, 999)
+        self.assertEqual(notified, [{"helper_pid": 888, "helper_window_id": 999}])
+        self.assertEqual(result["status"], "selected")
+        self.assertEqual(list((self.runtime.run_dir / "learning").iterdir()), [])
+
+    def test_async_ready_file_cannot_claim_hidden_or_foreign_helper_visible(self):
+        for visible_result, helper_pid in ((False, 888), (True, 777)):
+            child = FakeChild()
+            notified = []
+            def spawn(args, **kwargs):
+                request = json.loads(Path(args[2]).read_text(encoding="utf-8"))
+                Path(args[3] + ".ready.json").write_text(json.dumps({"nonce": request["nonce"], "status": "ready",
+                    **TARGET, "helper_pid": helper_pid, "helper_window_id": 999}), encoding="utf-8")
+                return child
+            with self.subTest(visible=visible_result, pid=helper_pid), patch.object(Path, "is_file", return_value=True), \
+                    patch.object(picker.subprocess, "Popen", side_effect=spawn), \
+                    patch.object(picker, "_helper_visible", return_value=visible_result), self.assertRaises(OperationError) as failure:
+                picker._run_helper(self.runtime, TARGET, "상태", 10, on_ready=notified.append)
+            self.assertEqual(failure.exception.code, "picker_not_visible")
+            self.assertEqual(notified, [])
+            self.assertTrue(child.terminated)
+
+    def test_async_final_selection_without_ready_cannot_be_saved(self):
+        child, spawn = self.spawn_reply("selected")
+        with patch.object(Path, "is_file", return_value=True), patch.object(picker.subprocess, "Popen", side_effect=spawn), self.assertRaises(OperationError) as failure:
+            picker._run_helper(self.runtime, TARGET, "상태", 10, on_ready=lambda value: None)
+        self.assertEqual(failure.exception.code, "picker_not_visible")
+
+    def test_native_startup_diagnostic_is_preserved(self):
+        child = FakeChild()
+        def spawn(args, **kwargs):
+            request = json.loads(Path(args[2]).read_text(encoding="utf-8"))
+            Path(args[3]).write_text(json.dumps({"nonce": request["nonce"], "status": "startup_failed",
+                "code": "desktop_unavailable", "stage": "show", "error_type": "Win32Exception"}), encoding="utf-8")
+            return child
+        with patch.object(Path, "is_file", return_value=True), patch.object(picker.subprocess, "Popen", side_effect=spawn), self.assertRaises(OperationError) as failure:
+            picker._run_helper(self.runtime, TARGET, "상태", 10, on_ready=lambda value: None)
+        self.assertEqual(failure.exception.code, "picker_startup_failed")
+        self.assertEqual(failure.exception.picker_diagnostic["code"], "desktop_unavailable")
 
 
 if __name__ == "__main__":

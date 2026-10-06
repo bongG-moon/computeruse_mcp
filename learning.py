@@ -342,6 +342,36 @@ class ElementLibrary:
         if len(targets) != 1 or _unique(snapshot, expected_selector) is not targets[0]:
             raise LearningError("관찰 이후 요소 번호 또는 대상이 변경되었습니다. 화면을 다시 확인한 후 학습하세요.", "stale_selection")
         element = targets[0]
+        return self._save_observed(runtime, snapshot, binding, element, program_id, label, screen,
+                                   instructions, element_id, expected_revision)
+
+    def teach_picked(self, runtime, target, program_id, selected, label, *, screen="", instructions="",
+                     id=None, expected_revision=None, cancel_event=None):
+        """One fresh guarded read for a human-confirmed native identity, independent of old indices."""
+        from learning_picker import match_picked_element
+        if not isinstance(selected, dict) or selected.get("human_confirmed") is not True:
+            raise LearningError("사용자가 선택 창에서 후보를 확정해야 요소를 저장할 수 있습니다.", "picker_confirmation_required")
+        label = _text(label, "요소 이름", 100).strip()
+        screen = _text(screen, "화면 분류", 100, empty=True).strip()
+        _text(instructions, "사용 설명", 4000, empty=True)
+        element_id = _id(id) if id is not None else uuid.uuid4().hex
+        if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 1):
+            raise LearningError("수정할 요소의 현재 revision을 지정하세요.")
+        self._check_teaching_active(runtime, cancel_event)
+        snapshot, binding = self._observe(runtime, target, program_id)
+        matched = match_picked_element(snapshot, selected, target)
+        element = _unique(snapshot, matched["expected_selector"])
+        return self._save_observed(runtime, snapshot, binding, element, program_id, label, screen,
+                                   instructions, element_id, expected_revision, cancel_event)
+
+    @staticmethod
+    def _check_teaching_active(runtime, cancel_event):
+        runtime.check_active()
+        if cancel_event is not None and cancel_event.is_set():
+            raise LearningError("요소 학습을 취소하여 저장하지 않았습니다.", "picker_cancelled")
+
+    def _save_observed(self, runtime, snapshot, binding, element, program_id, label, screen,
+                       instructions, element_id, expected_revision, cancel_event=None):
         entry = {"id": element_id, "label": label, "screen": screen, "instructions": instructions,
                  "program_id": program_id, "program_binding": binding, "selector": stable_selector(snapshot, element),
                  "fingerprint": _fingerprint(element), "revision": 1, "updated_at": utc_now()}
@@ -360,6 +390,7 @@ class ElementLibrary:
                    and item["screen"].casefold() == screen.casefold() and item["label"].casefold() == label.casefold() for item in items):
                 raise LearningError("같은 프로그램과 화면 분류에 같은 요소 이름이 있습니다. 다른 이름을 사용하거나 기존 요소를 다시 학습하세요.", "duplicate_label")
             self._validate_entry(entry)
+            self._check_teaching_active(runtime, cancel_event)
             self._write([item for item in items if item["id"] != element_id] + [entry])
         return copy.deepcopy(entry)
 

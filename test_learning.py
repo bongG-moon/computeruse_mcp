@@ -55,7 +55,7 @@ def _process_teach(config, index, ready, start, results):
                                                         expected_selector={"automation_id": "status"})
         results.put((index, None))
     except Exception as error:
-        results.put((index, repr(error)))
+        results.put((index, repr(error) + ("; cause=" + repr(error.__cause__) if error.__cause__ else "")))
 
 
 class LearningTests(unittest.TestCase):

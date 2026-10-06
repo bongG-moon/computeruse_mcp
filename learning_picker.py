@@ -22,6 +22,7 @@ from operations import OperationError, _elements, _find, _name, _payload
 HELPER_NAME = "Computer Use MCP 요소 선택.exe"
 MAX_RESPONSE_BYTES = 32768
 HELPER_READ_SECONDS = 6
+HELPER_START_SECONDS = 8
 
 
 def _target(target):
@@ -134,25 +135,74 @@ def match_picked_element(snapshot, selected, target):
 def _end_helper(child):
     if child is None:
         return
-    if child.poll() is None:
-        child.terminate()
     try:
-        child.wait(timeout=1)
-    except subprocess.TimeoutExpired:
-        child.kill()
+        if child.poll() is None:
+            child.terminate()
         try:
             child.wait(timeout=1)
-        except subprocess.TimeoutExpired as exc:
-            raise OperationError("요소 선택 창 종료를 확인하지 못했습니다.", "picker_close_failed") from exc
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=1)
+    except (OSError, subprocess.SubprocessError) as exc:
+        error = OperationError("요소 선택 창 종료를 확인하지 못했습니다. 새 선택 창을 열지 않습니다.", "picker_close_failed")
+        error.helper_cleanup_pending = True
+        raise error from exc
 
 
-def _run_helper(runtime, target, label, timeout_seconds):
+def _helper_visible(pid, window_id):
+    """Check the owned helper window, never trust a ready file alone."""
+    if os.name != "nt":
+        return False
+    import ctypes
+    from ctypes import wintypes
+    user = ctypes.WinDLL("user32", use_last_error=True)
+    user.IsWindowVisible.argtypes = [wintypes.HWND]
+    user.IsWindowVisible.restype = wintypes.BOOL
+    user.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    owner = wintypes.DWORD()
+    user.GetWindowThreadProcessId(window_id, ctypes.byref(owner))
+    return owner.value == pid and bool(user.IsWindowVisible(window_id))
+
+
+def _read_exchange(path, nonce):
+    if path.stat().st_size > MAX_RESPONSE_BYTES:
+        raise OperationError("요소 선택 응답이 너무 큽니다.", "picker_invalid_response")
+    value = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(value, dict) or value.get("nonce") != nonce:
+        raise OperationError("요소 선택 응답의 실행 정보를 확인하지 못했습니다.", "picker_invalid_response")
+    return value
+
+
+def _selection_result(value):
+    status = value.get("status")
+    messages = {"cancelled": ("요소 학습을 취소했습니다.", "picker_cancelled"),
+                "timeout": ("요소 선택 시간이 지나 취소했습니다. 선택 창을 다시 열려면 학습 시작을 요청하세요.", "picker_timeout"),
+                "read_timeout": ("프로그램의 요소 응답이 늦어 학습을 중단했습니다. 선택 창은 열렸으나 요소 읽기에 실패했습니다.", "picker_read_timeout"),
+                "hotkey_unavailable": ("선택 도우미 단축키를 등록하지 못했습니다.", "picker_hotkey_unavailable"),
+                "outside_target": ("선택한 위치가 지정한 학습 창에 속하지 않습니다. 현재 창 연결을 확인하세요.", "target_mismatch"),
+                "protected": ("비밀번호 또는 보호 요소는 학습하지 않습니다.", "protected_element"),
+                "unavailable": ("이 위치의 접근성 요소를 읽지 못했습니다. 같은 F8 안내를 반복하지 말고 오류를 전달하세요.", "picker_unavailable"),
+                "target_unavailable": ("학습 대상 창이 닫혔거나 현재 사용할 수 없습니다. 대상 프로그램의 현재 창을 다시 연결하세요.", "target_unavailable"),
+                "ready_failed": ("선택 도우미 실행 후 창 표시 확인에 실패했습니다. F8을 누를 단계가 아닙니다.", "picker_not_visible"),
+                "runtime_failed": ("요소 선택 창에서 오류가 발생해 학습을 중단했습니다. 선택 도우미 진단을 확인하세요.", "picker_runtime_failed"),
+                "startup_failed": ("요소 선택 창을 표시하지 못했습니다. 도우미 시작 진단을 확인하세요.", "picker_startup_failed")}
+    if status != "selected":
+        message, code = messages.get(status, ("요소 선택 응답을 확인하지 못했습니다.", "picker_invalid_response"))
+        exc = OperationError(message, code)
+        exc.picker_diagnostic = {key: value[key] for key in ("code", "stage", "error_type")
+                                 if isinstance(value.get(key), str) and len(value[key]) <= 80}
+        raise exc
+    return value
+
+
+def _run_helper(runtime, target, label, timeout_seconds, *, on_ready=None, cancel_event=None):
     helper = Path(__file__).resolve().with_name(HELPER_NAME)
     if not helper.is_file():
         raise OperationError("요소 선택 도구가 없습니다. 새 배포 ZIP을 모두 압축 해제해 주세요.", "picker_missing")
     nonce = uuid.uuid4().hex + uuid.uuid4().hex
     folder = Path(runtime.run_dir) / "learning"
     request, response = folder / (nonce + ".request.json"), folder / (nonce + ".response.json")
+    ready_path = response.with_name(response.name + ".ready.json")
     child = None
     result = None
     try:
@@ -163,45 +213,52 @@ def _run_helper(runtime, target, label, timeout_seconds):
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                  close_fds=True,
                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0)
-        deadline = time.monotonic() + timeout_seconds + HELPER_READ_SECONDS + 2
-        while not _stopped(runtime):
+        started = time.monotonic()
+        deadline = started + timeout_seconds + HELPER_READ_SECONDS + 3
+        ready = False
+        while not _stopped(runtime) and not (cancel_event is not None and cancel_event.is_set()):
+            if not ready and ready_path.exists():
+                shown = _read_exchange(ready_path, nonce)
+                if (shown.get("status") != "ready" or any(shown.get(k) != v for k, v in target.items())
+                        or type(shown.get("helper_pid")) is not int or shown["helper_pid"] != child.pid
+                        or type(shown.get("helper_window_id")) is not int or shown["helper_window_id"] <= 0
+                        or not _helper_visible(child.pid, shown["helper_window_id"])):
+                    raise OperationError("선택 도우미가 실제 화면에 표시되었는지 확인하지 못했습니다.", "picker_not_visible")
+                ready = True
+                if on_ready is not None:
+                    on_ready({k: shown[k] for k in ("helper_pid", "helper_window_id")})
             if response.exists():
-                if response.stat().st_size > MAX_RESPONSE_BYTES:
-                    raise OperationError("요소 선택 응답이 너무 큽니다.", "picker_invalid_response")
-                result = json.loads(response.read_text(encoding="utf-8-sig"))
-                if not isinstance(result, dict) or result.get("nonce") != nonce:
-                    raise OperationError("요소 선택 응답을 확인하지 못했습니다.", "picker_invalid_response")
+                result = _read_exchange(response, nonce)
+                if on_ready is not None and result.get("status") == "selected":
+                    if not ready:
+                        raise OperationError("선택 창 표시 확인 전에 선택 결과가 도착해 저장하지 않았습니다.", "picker_not_visible")
+                    if result.get("human_confirmed") is not True:
+                        raise OperationError("사용자가 후보를 확정한 결과가 아니므로 저장하지 않았습니다.", "picker_confirmation_required")
                 break
             if child.poll() is not None:
-                raise OperationError("요소 선택 창이 응답 없이 종료되었습니다.", "picker_closed")
+                raise OperationError("요소 선택 도우미가 응답 없이 종료되었습니다 (종료 코드: " + str(child.returncode) + ").", "picker_closed")
+            if not ready and on_ready is not None and time.monotonic() - started >= HELPER_START_SECONDS:
+                raise OperationError(f"요소 선택 도우미를 실행했지만 {HELPER_START_SECONDS}초 안에 창 표시를 확인하지 못했습니다. F8을 누를 단계가 아닙니다.", "picker_start_timeout")
             if time.monotonic() >= deadline:
                 raise OperationError("요소 선택 대기 시간이 지나 취소했습니다.", "picker_timeout")
             runtime.stop_event.wait(0.05)
-        if _stopped(runtime):
+        if _stopped(runtime) or (cancel_event is not None and cancel_event.is_set()):
             raise OperationError("화면 작업이 중지되어 요소 학습도 취소했습니다.", "picker_cancelled")
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         if isinstance(exc, OperationError):
             raise
         raise OperationError("요소 선택 도구의 응답을 확인하지 못했습니다.", "picker_invalid_response") from exc
     finally:
-        _end_helper(child)
-        for path in (request, response, response.with_name(response.name + ".tmp")):
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
-    status = result.get("status")
-    messages = {"cancelled": ("요소 학습을 취소했습니다.", "picker_cancelled"),
-                "timeout": ("요소 선택 대기 시간이 지나 취소했습니다.", "picker_timeout"),
-                "read_timeout": ("프로그램의 요소 응답이 늦어 학습을 중단했습니다.", "picker_read_timeout"),
-                "hotkey_unavailable": ("F8 또는 Esc 키를 다른 프로그램이 사용 중입니다. 해당 단축키를 해제한 뒤 다시 시도해 주세요.", "picker_hotkey_unavailable"),
-                "outside_target": ("학습 대상 프로그램의 지정한 창 안에서 요소를 가리켜 주세요.", "target_mismatch"),
-                "protected": ("비밀번호 또는 보호 요소는 학습하지 않습니다.", "protected_element"),
-                "unavailable": ("이 위치의 요소를 읽지 못했습니다. 프로그램이 준비된 뒤 다시 시도해 주세요.", "picker_unavailable")}
-    if status != "selected":
-        message, code = messages.get(status, ("요소 선택 응답을 확인하지 못했습니다.", "picker_invalid_response"))
-        raise OperationError(message, code)
-    return result
+        try:
+            _end_helper(child)
+        finally:
+            for path in (request, response, ready_path, response.with_name(response.name + ".tmp"),
+                         ready_path.with_name(ready_path.name + ".tmp")):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+    return _selection_result(result)
 
 
 def pick_element(runtime, target, label, timeout_seconds=60):
