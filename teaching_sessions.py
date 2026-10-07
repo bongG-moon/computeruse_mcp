@@ -5,9 +5,34 @@ import copy
 import threading
 import time
 import uuid
+from pathlib import Path
 
 from learning_picker import _run_helper, HELPER_START_SECONDS
 from operations import OperationError
+from settings import VERSION
+
+
+def failure_guidance(code, stage, arguments, *, cleanup_pending=False):
+    """Report recovery without inferring missing UIA support from startup failure."""
+    value = {"uia_picker_supported": True, "repeat_f8": False, "automatic_retry": False,
+             "substitute_saved_lists_for_teaching": False}
+    if cleanup_pending:
+        value.update(action="wait_for_owned_helper_cleanup", next_tool="computer_teach_status",
+                     message="선택 창 종료 확인을 기다리세요. 새 선택 창을 열지 않습니다.")
+    elif code == "picker_cancelled":
+        value.update(action="none", message="사용자가 취소했습니다. 선택을 다시 시작하지 않습니다.")
+    elif code in {"picker_controls_not_exposed", "picker_not_found"}:
+        value.update(action="use_process_image_selection", next_tool="computer_process_editor",
+                     suggested_arguments={"targets": [{k: arguments[k] for k in ("program_id", "pid", "window_id")}],
+                                          "name": arguments["label"]},
+                     message="UIA 요소 저장을 완료하지 못했습니다. 프로세스 편집 창의 '이미지로 선택'으로 직접 대상을 지정할 수 있습니다. 이미지 단계는 UIA 요소 보관함과 별도로 저장됩니다.")
+    elif stage == "starting_picker" or code in {"picker_missing", "picker_startup_failed", "picker_launch_failed", "picker_start_timeout", "picker_not_visible", "picker_closed", "picker_ipc_failed"}:
+        value.update(action="check_connection_and_picker_startup", next_tool="computer_status",
+                     message="UIA는 직접 선택 창을 지원합니다. 이번에는 선택 창의 시작·표시를 확인하지 못했습니다. computer_status의 버전·실행 폴더·teaching_support와 실제 진단 코드를 확인하세요. F8을 누를 단계가 아닙니다.")
+    else:
+        value.update(action="report_actual_diagnostic",
+                     message="진단 코드와 실패 단계를 그대로 전달하세요. 이 결과만으로 UIA 선택 창 미지원이라고 판단하지 않습니다.")
+    return value
 
 
 class _Cancellation:
@@ -39,11 +64,16 @@ class TeachingSessions:
         with self.lock:
             identity = {key: job["args"][key] for key in ("program_id", "pid", "window_id", "label")}
             return copy.deepcopy({**identity, **job["result"], "teaching_id": job["id"],
+                                  "server_version": VERSION, "server_directory": str(Path(__file__).resolve().parent),
+                                  "uia_picker_supported": True,
+                                  "pending": not job["done"].is_set() or bool(job["result"].get("cleanup_pending")),
                                   "automatic_retry": False, "input_dispatched": False,
                                   "model_trained": False, **extra})
 
     def start(self, runtime, arguments, cancel_event=None):
         args = copy.deepcopy(arguments)
+        if runtime.mode != "uia":
+            raise OperationError("요소 직접 학습은 UIA 세션에서 지원합니다. 현재 세션 방식을 확인하세요. UIA 선택 창 자체가 미지원인 것은 아닙니다.", "unsupported_mode")
         target = {key: args[key] for key in ("pid", "window_id")}
         # This resolves the executable through the guard, which enforces same
         # user/session, and verifies exact HWND ownership. No UIA tree is read.
@@ -94,7 +124,8 @@ class TeachingSessions:
             with self.lock:
                 job["result"] = {"status": "awaiting_selection", "stage": stage, "picker_visible": True,
                                  **info, **target, "program_id": args["program_id"], "label": args["label"], "next_tool": "computer_teach_status",
-                                 "message": "요소 선택 창을 표시했습니다. 창에서 안내하는 방식으로 요소를 가리키고, 후보를 확인한 뒤 '이 요소로 선택'을 누르세요.",
+                                 "selection_method": "countdown_button", "f8_available": info.get("f8_available") is True,
+                                 "message": "요소 선택 창을 표시했습니다. 창의 '3초 후 위치 선택'을 누른 뒤 원하는 요소 위로 마우스를 옮기세요. 후보를 확인한 뒤 '이 요소로 선택'을 누릅니다.",
                                  "next_step": "사용자 선택 후 같은 teaching_id로 상태를 확인하세요. 같은 학습을 다시 시작하거나 F8 안내를 반복하지 마세요."}
             job["started"].set()
         try:
@@ -124,6 +155,7 @@ class TeachingSessions:
                                  "picker_visible": None if cleanup_pending else False, "cleanup_pending": cleanup_pending, "message": message,
                                  "diagnostic": {"code": code, "stage": stage,
                                                 "native": getattr(exc, "picker_diagnostic", {})},
+                                 "recovery": failure_guidance(code, stage, args, cleanup_pending=cleanup_pending),
                                  "next_step": "실패 원인을 그대로 전달하세요. F8 안내나 학습 시작을 자동 반복하지 마세요. 목록 조회와 작업 저장은 요소 학습을 대신하지 않습니다.",
                                  "task_verified": False}
         finally:

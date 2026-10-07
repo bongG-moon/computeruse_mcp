@@ -48,11 +48,12 @@ APP_FILES = (
     "server.py", "settings.py", "setup.py", "consent.py", "register.py", "README.html", "VALIDATION.html",
     "maintenance.py", "diagnostics.py", "install.py", "programs.py", "INSTALL.md", "vendor/__init__.py", "vendor/guard.py", "vendor/windows.py",
     "session_runtime.py", "configuration_state.py", "operations.py", "workflows.py", "inspection.py", "accessibility_tree.py", "closing.py", "close_actions.py", "privileges.py",
-    "program_launch.py", "learning.py", "learning_picker.py", "teaching_sessions.py", "process_editor.py", "process_steps.py", "image_targets.py", "image_steps.py",
+    "program_launch.py", "learning.py", "learning_picker.py", "teaching_sessions.py", "teaching_support.py", "process_editor.py", "process_steps.py", "image_targets.py", "image_steps.py",
     "README.md", "DRIVER-BUNDLE.md", "CUA-DRIVER-LICENSE.md", "PROCESS_GUIDE.html",
 )
 OPTIONAL_APP_FILES = ()
 SOURCE_SUPPORT_FILES = (
+    "test_teaching_support.py",
     "VisualTools.cs", "test_image_targets.py", "test_image_steps.py", "test_image_guard.py", "test_visual_native.py", "test_driver_overlay.py", "visual_fixture.py", "visual_validation.py",
     "ProcessEditor.cs", "test_process_editor.py", "test_process_steps.py", "test_checkpoint_capture.py", "test_store_locks.py", "process_validation.py",
     "Launcher.cs", "AdministratorBridge.cs", "build_portable.py", "bundle_driver.py", ".gitignore", "test_consent.py", "test_register.py", "test_administrator.py", "administrator_validation.py",

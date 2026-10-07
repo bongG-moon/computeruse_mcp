@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import learning_picker as picker
 from operations import OperationError
@@ -312,7 +312,7 @@ class PickerLifecycleTests(unittest.TestCase):
         def spawn(args, **kwargs):
             request = json.loads(Path(args[2]).read_text(encoding="utf-8"))
             ready = {"nonce": request["nonce"], "status": "ready", **TARGET,
-                     "helper_pid": child.pid, "helper_window_id": 999}
+                     "helper_pid": child.pid, "helper_window_id": 999, "f8_available": False, "escape_available": True}
             Path(args[3] + ".ready.json").write_text(json.dumps(ready), encoding="utf-8")
             Path(args[3]).write_text(json.dumps({**selected(), "nonce": request["nonce"]}), encoding="utf-8")
             return child
@@ -320,12 +320,12 @@ class PickerLifecycleTests(unittest.TestCase):
                 patch.object(picker, "_helper_visible", return_value=True) as visible:
             result = picker._run_helper(self.runtime, TARGET, "상태", 10, on_ready=notified.append)
         visible.assert_called_once_with(888, 999)
-        self.assertEqual(notified, [{"helper_pid": 888, "helper_window_id": 999}])
+        self.assertEqual(notified, [{"helper_pid": 888, "helper_window_id": 999, "f8_available": False, "escape_available": True}])
         self.assertEqual(result["status"], "selected")
         self.assertEqual(list((self.runtime.run_dir / "learning").iterdir()), [])
 
     def test_async_ready_file_cannot_claim_hidden_or_foreign_helper_visible(self):
-        for visible_result, helper_pid in ((False, 888), (True, 777)):
+        for visible_result, helper_pid, code in ((False, 888, "picker_start_timeout"), (True, 777, "picker_not_visible")):
             child = FakeChild()
             notified = []
             def spawn(args, **kwargs):
@@ -335,11 +335,56 @@ class PickerLifecycleTests(unittest.TestCase):
                 return child
             with self.subTest(visible=visible_result, pid=helper_pid), patch.object(Path, "is_file", return_value=True), \
                     patch.object(picker.subprocess, "Popen", side_effect=spawn), \
+                    patch.object(picker.time, "monotonic", side_effect=[0, 9]), \
                     patch.object(picker, "_helper_visible", return_value=visible_result), self.assertRaises(OperationError) as failure:
                 picker._run_helper(self.runtime, TARGET, "상태", 10, on_ready=notified.append)
-            self.assertEqual(failure.exception.code, "picker_not_visible")
+            self.assertEqual(failure.exception.code, code)
             self.assertEqual(notified, [])
             self.assertTrue(child.terminated)
+
+    def test_temporary_hidden_window_waits_for_visible_republished_current_handle(self):
+        child, notified, paths = FakeChild(), [], {}
+        def spawn(args, **kwargs):
+            request = json.loads(Path(args[2]).read_text(encoding="utf-8"))
+            paths.update(response=Path(args[3]), ready=Path(args[3] + ".ready.json"), nonce=request["nonce"])
+            paths["ready"].write_text(json.dumps({"nonce": request["nonce"], "status": "ready", **TARGET,
+                "helper_pid": child.pid, "helper_window_id": 999}), encoding="utf-8")
+            return child
+        def publish_after_wait(_):
+            paths["ready"].write_text(json.dumps({"nonce": paths["nonce"], "status": "ready", **TARGET,
+                "helper_pid": child.pid, "helper_window_id": 1000}), encoding="utf-8")
+            paths["response"].write_text(json.dumps({**selected(), "nonce": paths["nonce"]}), encoding="utf-8")
+        with patch.object(Path, "is_file", return_value=True), patch.object(picker.subprocess, "Popen", side_effect=spawn), \
+                patch.object(picker, "_helper_visible", side_effect=[False, True]) as visible, \
+                patch.object(self.runtime.stop_event, "wait", side_effect=publish_after_wait):
+            result = picker._run_helper(self.runtime, TARGET, "상태", 10, on_ready=notified.append)
+        self.assertEqual(result["status"], "selected")
+        self.assertEqual([tuple(c.args) for c in visible.call_args_list], [(888, 999), (888, 1000)])
+        self.assertEqual(notified, [{"helper_pid": 888, "helper_window_id": 1000}])
+
+    def test_hidden_completed_selection_does_not_bypass_verified_visibility(self):
+        child = FakeChild()
+        def spawn(args, **kwargs):
+            request = json.loads(Path(args[2]).read_text(encoding="utf-8"))
+            Path(args[3] + ".ready.json").write_text(json.dumps({"nonce": request["nonce"], "status": "ready", **TARGET,
+                "helper_pid": child.pid, "helper_window_id": 999}), encoding="utf-8")
+            Path(args[3]).write_text(json.dumps({**selected(), "nonce": request["nonce"]}), encoding="utf-8")
+            return child
+        with patch.object(Path, "is_file", return_value=True), patch.object(picker.subprocess, "Popen", side_effect=spawn), \
+                patch.object(picker, "_helper_visible", return_value=False), self.assertRaises(OperationError) as failure:
+            picker._run_helper(self.runtime, TARGET, "상태", 10, on_ready=lambda _: self.fail("must not acknowledge"))
+        self.assertEqual(failure.exception.code, "picker_not_visible")
+
+    def test_launch_error_preserves_numeric_diagnostic_without_private_exception_text(self):
+        failure = OSError("private application path and policy message")
+        failure.winerror = 5
+        with patch.object(Path, "is_file", return_value=True), patch.object(picker.subprocess, "Popen", side_effect=failure), \
+                self.assertRaises(OperationError) as caught:
+            picker._run_helper(self.runtime, TARGET, "상태", 10, on_ready=lambda _: None)
+        self.assertEqual(caught.exception.code, "picker_launch_failed")
+        self.assertEqual(caught.exception.picker_diagnostic["stage"], "process_start")
+        self.assertEqual(caught.exception.picker_diagnostic["winerror"], 5)
+        self.assertNotIn("private application", str(caught.exception))
 
     def test_async_final_selection_without_ready_cannot_be_saved(self):
         child, spawn = self.spawn_reply("selected")
@@ -358,6 +403,42 @@ class PickerLifecycleTests(unittest.TestCase):
             picker._run_helper(self.runtime, TARGET, "상태", 10, on_ready=lambda value: None)
         self.assertEqual(failure.exception.code, "picker_startup_failed")
         self.assertEqual(failure.exception.picker_diagnostic["code"], "desktop_unavailable")
+
+
+class PickerVisibilityTests(unittest.TestCase):
+    def native(self, **changes):
+        user, dwm = Mock(), Mock()
+        user.IsWindow.return_value = user.IsWindowVisible.return_value = True
+        user.IsIconic.return_value = False
+        user.MonitorFromWindow.return_value = 9
+        def owner(_, pointer):
+            pointer._obj.value = changes.get("owner", 888)
+            return 4
+        def rectangle(_, pointer):
+            pointer._obj.left, pointer._obj.top = 100, 100
+            pointer._obj.right, pointer._obj.bottom = 740, 580
+            return True
+        def cloaked(_, attribute, pointer, size):
+            pointer._obj.value = changes.get("cloaked", 0)
+            return changes.get("dwm_error", 0)
+        user.GetWindowThreadProcessId.side_effect = owner
+        user.GetWindowRect.side_effect = rectangle
+        dwm.DwmGetWindowAttribute.side_effect = cloaked
+        for name, value in changes.items():
+            if name not in {"owner", "cloaked", "dwm_error"}:
+                getattr(user, name).return_value = value
+        return user, dwm
+
+    def test_only_owned_visible_restored_onscreen_uncloaked_window_is_ready(self):
+        import ctypes
+        cases = [({}, True), ({"owner": 777}, False), ({"IsWindow": False}, False),
+                 ({"IsWindowVisible": False}, False), ({"IsIconic": True}, False),
+                 ({"MonitorFromWindow": 0}, False), ({"cloaked": 1}, False), ({"dwm_error": -1}, False)]
+        for changes, expected in cases:
+            user, dwm = self.native(**changes)
+            with self.subTest(changes=changes), patch.object(picker.os, "name", "nt"), \
+                    patch.object(ctypes, "WinDLL", side_effect=lambda name, **_: user if name == "user32" else dwm, create=True):
+                self.assertEqual(picker._helper_visible(888, 999), expected)
 
 
 if __name__ == "__main__":

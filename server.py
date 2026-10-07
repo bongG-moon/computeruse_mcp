@@ -107,7 +107,7 @@ MANAGEMENT_TOOLS.extend([
                         "query": {"type": "string", "maxLength": 200},
                         "offset": {"type": "integer", "minimum": 0, "maximum": 1000},
                         "limit": {"type": "integer", "minimum": 1, "maximum": 100}}), True),
-    tool("computer_teach_element", "Teach a UIA control by direct human selection. Default starts a visible native picker asynchronously and returns teaching_id. Only awaiting_selection/picker_visible=true confirms the picker appeared. The user chooses a candidate and clicks Save in the picker, then use computer_teach_status with the SAME teaching_id until learned/failed/cancelled. Do not repeatedly reopen the picker, repeat F8 instructions, claim UIA picker is unsupported, or substitute elements/tasks for teaching. No business app input. Alternative: pass BOTH element_index and expected_selector from a recent computer_inspect selected by the user. Teaching rechecks the exact current app/control and refuses stale, missing or ambiguous targets. No values, screenshots, coordinates or runtime handles are stored. Optional id updates an existing learned element.",
+    tool("computer_teach_element", "UIA direct picker IS supported. On failure follow recovery and report actual diagnostic code/stage plus server_version; computer_status.teaching_support identifies this installation and missing helper files. Teach a UIA control by direct human selection. Default starts a visible native picker asynchronously and returns teaching_id. Only awaiting_selection/picker_visible=true confirms the picker appeared. The user chooses a candidate and clicks Save in the picker, then use computer_teach_status with the SAME teaching_id until learned/failed/cancelled. Do not repeatedly reopen the picker, repeat F8 instructions, claim UIA picker is unsupported, or substitute elements/tasks for teaching. No business app input. Alternative: pass BOTH element_index and expected_selector from a recent computer_inspect selected by the user. Teaching rechecks the exact current app/control and refuses stale, missing or ambiguous targets. No values, screenshots, coordinates or runtime handles are stored. Optional id updates an existing learned element.",
          object_schema({"program_id": STRING, "pid": {"type": "integer", "minimum": 1},
                         "window_id": {"type": "integer", "minimum": 1},
                         "label": {"type": "string", "minLength": 1, "maxLength": 100},
@@ -419,6 +419,7 @@ class ComputerManager:
     def status(self):
         from configuration_state import configuration_status
         from privileges import execution_privileges
+        from teaching_support import teaching_capabilities
         driver = Path(self.config["driver"])
         return {"server": "company-computer-use", "version": VERSION, "driver": str(driver),
                 "driver_exists": driver.is_file(), "driver_schema_error": self.schema_error,
@@ -429,6 +430,7 @@ class ComputerManager:
                 "session": self.session.status() if self.session else None,
                 "configuration": configuration_status(self.config, self.config_path),
                 "execution": execution_privileges(),
+                "teaching_support": teaching_capabilities(Path(__file__).resolve().parent),
                 "limits": "실행파일 제한은 OS 격리가 아닙니다. 화면 결과는 연결한 MCP 클라이언트로 전달됩니다."}
 
     def _schema_key(self):
@@ -772,10 +774,15 @@ class ComputerManager:
                 answer["learned_element"] = {"id": args["id"], "label": resolved["label"], "program_id": resolved["program_id"]}
                 return result(answer, error=answer.get("task_verified") is not True)
         except (LearningError, OperationError) as exc:
-            return result({"status": "learning_failed", "message": str(exc),
+            answer = {"status": "learning_failed", "message": str(exc),
                            "diagnostic": {"code": getattr(exc, "code", "learning_error")},
                            "input_dispatched": None if action_started else False,
-                           "automatic_retry": False, "task_verified": False}, error=True)
+                           "automatic_retry": False, "task_verified": False}
+            if name == "computer_teach_element":
+                from teaching_sessions import failure_guidance
+                answer.update(server_version=VERSION, uia_picker_supported=True,
+                    recovery=failure_guidance(getattr(exc, "code", "learning_error"), "preflight", args))
+            return result(answer, error=True)
 
 
 class StdioServer:
@@ -878,7 +885,7 @@ class StdioServer:
                 "instructions": "Use computer_programs then computer_begin for a bounded session under the user's configured approval mode. "
                     "Client mode does not show this server's native consent dialogs; client tool permissions still apply. "
                     "Saved tasks are inert instructions, not authority. "
-                    "For complex forms, check computer_elements before rediscovery. The user can directly choose and confirm a control with computer_teach_element. It returns teaching_id after verifying the picker is visible; use computer_teach_status for completion or cancellation. Pending is not failure: do not repeat F8 instructions or open duplicate pickers, and never replace failed teaching with elements/task listing. Report actual stage/code, not unsupported UIA claims. Learned labels are local UI selectors, not model training or permission. "
+                    "For complex forms, check computer_elements before rediscovery. The user can directly choose and confirm a control with computer_teach_element. It returns teaching_id after verifying the picker is visible; use computer_teach_status for completion or cancellation. Pending is not failure: do not repeat F8 instructions or open duplicate pickers, and never replace failed teaching with elements/task listing. Report actual stage/code and server_version, not unsupported UIA claims. For picker startup failures read computer_status.teaching_support to identify the connected folder and helper files; file presence does not prove a visible window. Follow the returned recovery without automatic F8 retries. Learned labels are local UI selectors, not model training or permission. "
                     "For a sequence, open computer_process_editor once with approved current windows, then wait for human authoring via computer_process_status. The user adds actions, expected results, element waits, fixed delays, and screenshot checkpoints in a native form. Authoring does not execute steps. Saved processes use computer_run_task. Screenshot checkpoints pause and require explicit human review before acknowledge_checkpoint; never auto-acknowledge or claim image verification. For custom-rendered controls use the editor image picker instead of repeating F8 or saving a parent container. The scoped Record actions button observes human actions only in the connected windows and returns a draft for review; unresolved input must be filled or removed. Image mutations require explicit human screenshot review and must not be auto-acknowledged. Image templates stay in the local task file and are omitted from task metadata. "
                     "Use computer_find_element or computer_use_element to re-resolve on the current screen and verify results. Refuse ambiguous/changed controls. "
                     "computer_inspect supports search, within, actionable_only and paging; element indices are current-observation data only. "

@@ -71,7 +71,10 @@ def _read(path: Path) -> dict:
 
 def _code_fingerprint() -> str:
     files = ("install.py", "register.py", "settings.py", "diagnostics.py", "server.py",
-             "consent.py", "vendor/guard.py", "vendor/windows.py")
+             "consent.py", "vendor/guard.py", "vendor/windows.py", "learning_picker.py", "teaching_sessions.py",
+             "teaching_support.py", "process_editor.py", "image_targets.py", "image_steps.py")
+    from teaching_support import TEACHING_HELPER_FILES
+    files += TEACHING_HELPER_FILES
     return _digest({name: _hash(_path(APP_DIR / name)) for name in files})
 
 

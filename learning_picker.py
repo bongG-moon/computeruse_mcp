@@ -257,18 +257,40 @@ def _end_helper(child):
 
 
 def _helper_visible(pid, window_id):
-    """Check the owned helper window, never trust a ready file alone."""
-    if os.name != "nt":
+    """Verify an owned, restored, on-screen window on the visible desktop."""
+    if (os.name != "nt" or type(pid) is not int or pid <= 0
+            or type(window_id) is not int or window_id <= 0):
         return False
     import ctypes
     from ctypes import wintypes
     user = ctypes.WinDLL("user32", use_last_error=True)
-    user.IsWindowVisible.argtypes = [wintypes.HWND]
-    user.IsWindowVisible.restype = wintypes.BOOL
+    for name in ("IsWindow", "IsWindowVisible", "IsIconic"):
+        function = getattr(user, name)
+        function.argtypes, function.restype = [wintypes.HWND], wintypes.BOOL
     user.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-    owner = wintypes.DWORD()
-    user.GetWindowThreadProcessId(window_id, ctypes.byref(owner))
-    return owner.value == pid and bool(user.IsWindowVisible(window_id))
+    user.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    user.GetWindowRect.restype = wintypes.BOOL
+    user.MonitorFromWindow.argtypes, user.MonitorFromWindow.restype = [wintypes.HWND, wintypes.DWORD], wintypes.HANDLE
+    hwnd, owner, rect = wintypes.HWND(window_id), wintypes.DWORD(), wintypes.RECT()
+    if (not user.IsWindow(hwnd) or not user.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+            or owner.value != pid or not user.IsWindowVisible(hwnd) or user.IsIconic(hwnd)
+            or not user.GetWindowRect(hwnd, ctypes.byref(rect)) or rect.right <= rect.left or rect.bottom <= rect.top
+            or not user.MonitorFromWindow(hwnd, 0)):
+        return False
+    try:
+        dwm = ctypes.WinDLL("dwmapi", use_last_error=True)
+        dwm.DwmGetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+        dwm.DwmGetWindowAttribute.restype = ctypes.c_long
+        cloaked = wintypes.DWORD()
+        if dwm.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked)) != 0 or cloaked.value:
+            return False
+    except OSError:
+        return False
+    # Recheck ownership after the native queries; a stale/reused HWND is not
+    # proof that this retained helper process is visible.
+    return (bool(user.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))) and owner.value == pid
+            and bool(user.IsWindowVisible(hwnd)) and not bool(user.IsIconic(hwnd)))
 
 
 def _read_exchange(path, nonce):
@@ -299,6 +321,8 @@ def _selection_result(value):
         exc = OperationError(message, code)
         exc.picker_diagnostic = {key: value[key] for key in ("code", "stage", "error_type")
                                  if isinstance(value.get(key), str) and len(value[key]) <= 80}
+        exc.picker_diagnostic.update({key: value[key] for key in ("winerror", "hresult", "errno")
+                                     if type(value.get(key)) is int})
         raise exc
     return value
 
@@ -315,6 +339,7 @@ def _run_helper(runtime, target, label, timeout_seconds, *, on_ready=None, cance
     ready_path = response.with_name(response.name + ".ready.json")
     child = None
     result = None
+    stage = "request_setup"
     try:
         folder.mkdir(parents=True, exist_ok=True)
         temporary = request.with_name(request.name + ".tmp")
@@ -327,11 +352,13 @@ def _run_helper(runtime, target, label, timeout_seconds, *, on_ready=None, cance
         finally:
             temporary.unlink(missing_ok=True)
         runtime.check_active()
+        stage = "process_start"
         child = subprocess.Popen([str(helper), "--pick", str(request), str(response)],
                                  cwd=str(helper.parent), stdin=subprocess.DEVNULL,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                  close_fds=True,
                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0)
+        stage = "waiting_for_ready"
         started = time.monotonic()
         deadline = started + timeout_seconds + HELPER_READ_SECONDS + 3
         ready = False
@@ -340,12 +367,18 @@ def _run_helper(runtime, target, label, timeout_seconds, *, on_ready=None, cance
                 shown = _read_exchange(ready_path, nonce)
                 if (shown.get("status") != "ready" or any(shown.get(k) != v for k, v in target.items())
                         or type(shown.get("helper_pid")) is not int or shown["helper_pid"] != child.pid
-                        or type(shown.get("helper_window_id")) is not int or shown["helper_window_id"] <= 0
-                        or not _helper_visible(child.pid, shown["helper_window_id"])):
+                        or type(shown.get("helper_window_id")) is not int or shown["helper_window_id"] <= 0):
                     raise OperationError("선택 도우미가 실제 화면에 표시되었는지 확인하지 못했습니다.", "picker_not_visible")
-                ready = True
-                if on_ready is not None:
-                    on_ready({k: shown[k] for k in ("helper_pid", "helper_window_id")})
+                # Authenticated identity does not imply visibility. During a
+                # handle/desktop transition, wait only within the original
+                # startup budget and reread the helper's current HWND.
+                if _helper_visible(child.pid, shown["helper_window_id"]):
+                    ready = True
+                    stage = "waiting_for_selection"
+                    if on_ready is not None:
+                        info = {k: shown[k] for k in ("helper_pid", "helper_window_id")}
+                        info.update({k: shown[k] for k in ("f8_available", "escape_available") if type(shown.get(k)) is bool})
+                        on_ready(info)
             if response.exists():
                 result = _read_exchange(response, nonce)
                 if on_ready is not None and result.get("status") == "selected":
@@ -366,7 +399,13 @@ def _run_helper(runtime, target, label, timeout_seconds, *, on_ready=None, cance
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         if isinstance(exc, OperationError):
             raise
-        raise OperationError("요소 선택 도구의 응답을 확인하지 못했습니다.", "picker_invalid_response") from exc
+        error = OperationError("요소 선택 도구를 시작하지 못했습니다. 시작 단계와 Windows 오류 번호를 확인하세요."
+                               if stage == "process_start" else "요소 선택 도구의 응답을 확인하지 못했습니다.",
+                               "picker_launch_failed" if stage == "process_start" else "picker_invalid_response")
+        error.picker_diagnostic = {"stage": stage, "error_type": type(exc).__name__}
+        error.picker_diagnostic.update({key: getattr(exc, key) for key in ("winerror", "errno")
+                                       if type(getattr(exc, key, None)) is int})
+        raise error from exc
     finally:
         try:
             _end_helper(child)

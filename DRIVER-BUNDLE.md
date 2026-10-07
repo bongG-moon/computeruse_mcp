@@ -1,23 +1,23 @@
 # Cua Driver 포함 배포 안내
 
-사용자가 Driver를 따로 찾는 단계를 줄이기 위해, 이번 `v0.11.0` 릴리스에는 **Computer Use MCP와 Cua Driver를 함께 압축한 파일**을 추가합니다. 기존 Driver 별도 준비용 ZIP도 유지합니다.
+사용자가 Driver를 따로 찾는 단계를 줄이기 위해, 이번 `v0.11.1` 릴리스에는 **Computer Use MCP와 Cua Driver를 함께 압축한 파일**을 추가합니다. 기존 Driver 별도 준비용 ZIP도 유지합니다.
 
 ## 무엇이 들어 있나요?
 
 | 구분 | 내용 |
 | --- | --- |
-| MCP 본체 | 검증한 Computer Use MCP 0.11.0 배포본 |
+| MCP 본체 | 검증한 Computer Use MCP 0.11.1 배포본 |
 | 추가 Driver | Cua Driver 0.28.2 Windows x86_64 공식 ZIP의 6개 파일 전체. 실행파일은 `driver/cua-driver.exe` |
 | 출처·파일 정보 | `DRIVER-BUNDLE-MANIFEST.json` |
 | Driver 라이선스 | 배포 폴더의 `CUA-DRIVER-LICENSE.md`와 `driver/LICENSE.md` |
 
 이미 이 PC에서 시험한 **0.28.2 실행파일을 사용하며 Driver 버전을 새로 올린 배포가 아닙니다.** 공식 ZIP에 함께 들어 있는 UIA·도우미 파일도 모두 보존합니다. Driver는 MCP 본체와 별도의 외부 구성요소입니다. 출처·파일 해시·버전 등 정확한 정보는 [DRIVER-BUNDLE-MANIFEST.json](DRIVER-BUNDLE-MANIFEST.json)을 확인하세요.
 
-[Driver 포함 ZIP 다운로드](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.11.0/Computer-Use-MCP-0.11.0-with-driver.zip) · [Driver 별도 준비용 ZIP](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.11.0/Computer-Use-MCP-0.11.0.zip)
+[Driver 포함 ZIP 다운로드](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.11.1/Computer-Use-MCP-0.11.1-with-driver.zip) · [Driver 별도 준비용 ZIP](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.11.1/Computer-Use-MCP-0.11.1.zip)
 
 ## 출처와 라이선스
 
-Cua 프로젝트의 공개 소스는 [trycua/cua](https://github.com/trycua/cua)에 있습니다. 동봉 Driver의 상위 프로젝트 라이선스는 MIT이며, `cua-driver-rs-v0.28.2`에 고정한 원본 출처와 저작권 고지를 [CUA-DRIVER-LICENSE.md](CUA-DRIVER-LICENSE.md)에 보존합니다. [릴리스의 같은 라이선스 파일](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.11.0/CUA-DRIVER-LICENSE.md)도 함께 제공합니다.
+Cua 프로젝트의 공개 소스는 [trycua/cua](https://github.com/trycua/cua)에 있습니다. 동봉 Driver의 상위 프로젝트 라이선스는 MIT이며, `cua-driver-rs-v0.28.2`에 고정한 원본 출처와 저작권 고지를 [CUA-DRIVER-LICENSE.md](CUA-DRIVER-LICENSE.md)에 보존합니다. [릴리스의 같은 라이선스 파일](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.11.1/CUA-DRIVER-LICENSE.md)도 함께 제공합니다.
 
 이 Driver 라이선스 안내는 MCP 본체의 라이선스를 새로 지정한다는 뜻이 아닙니다. 파일 해시 확인도 회사의 반입·사용 승인이나 모든 프로그램의 동작 보장을 대신하지 않습니다.
 
@@ -28,7 +28,7 @@ Cua 프로젝트의 공개 소스는 [trycua/cua](https://github.com/trycua/cua)
 3. **연결 확인 (화면 조작 없음)**으로 Driver와 MCP 기능 연결을 확인합니다.
 4. 사용할 프로그램을 등록하고 클라이언트에 연결합니다. 상세 순서는 [README.md](README.md)와 [INSTALL.md](INSTALL.md)를 확인하세요.
 
-[릴리스 SHA256SUMS.txt](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.11.0/SHA256SUMS.txt)에는 내려받을 릴리스 파일의 SHA-256 해시가 있습니다. 동봉 Driver 자체의 해시와 묶음 구성은 `DRIVER-BUNDLE-MANIFEST.json`으로 확인할 수 있습니다. 해시가 같은지는 파일 일치 여부를 보여주며, 실제 업무의 성공 여부는 별도로 시험해야 합니다.
+[릴리스 SHA256SUMS.txt](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.11.1/SHA256SUMS.txt)에는 내려받을 릴리스 파일의 SHA-256 해시가 있습니다. 동봉 Driver 자체의 해시와 묶음 구성은 `DRIVER-BUNDLE-MANIFEST.json`으로 확인할 수 있습니다. 해시가 같은지는 파일 일치 여부를 보여주며, 실제 업무의 성공 여부는 별도로 시험해야 합니다.
 
 ## 포함판을 만드는 방식
 

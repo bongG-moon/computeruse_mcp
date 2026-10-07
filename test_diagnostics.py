@@ -44,6 +44,10 @@ class ProbeTests(unittest.TestCase):
             root = Path(tmp)
             original = config(root / "real-state", r"C:\Tools\cua-driver.exe")
             original_copy = copy.deepcopy(original)
+            from teaching_support import TEACHING_HELPER_FILES, teaching_capabilities
+            for name in TEACHING_HELPER_FILES:
+                (root/name).write_bytes(b"test placeholder, never executed")
+            support = teaching_capabilities(root)
             requests = []
             saved = []
 
@@ -59,10 +63,10 @@ class ProbeTests(unittest.TestCase):
                 def request(self, method, params=None):
                     requests.append((method, params))
                     if method == "initialize":
-                        return {"serverInfo": {"name": "company-computer-use", "version": "0.2.0"}}
+                        return {"serverInfo": {"name": "company-computer-use", "version": diagnostics.VERSION}}
                     if method == "tools/list":
-                        return {"tools": [{"name": name} for name in ("computer_status", "computer_begin", "computer_stop", "get_window_state")]}
-                    return {"structuredContent": {"session": None, "driver_schema_error": ""}}
+                        return {"tools": [{"name": name} for name in ("computer_status", "computer_begin", "computer_stop", "get_window_state", "computer_teach_element", "computer_teach_status", "computer_process_editor", "computer_process_status")]}
+                    return {"structuredContent": {"session": None, "driver_schema_error": "", "version": diagnostics.VERSION, "teaching_support": support}}
                 def initialized(self):
                     requests.append(("notifications/initialized", None))
                 def close(self):
@@ -77,6 +81,22 @@ class ProbeTests(unittest.TestCase):
             self.assertNotEqual(saved[0]["state_dir"], original["state_dir"])
             self.assertFalse(Path(saved[0]["state_dir"]).exists())
             self.assertTrue(Client.closed)
+
+    def test_legacy_connection_is_not_accepted_for_current_teaching(self):
+        issues = diagnostics.connection_issues({"serverInfo": {"name": "company-computer-use", "version": "0.2.0"}},
+            {"computer_status", "computer_begin", "computer_stop", "get_window_state"}, {"version": "0.2.0"})
+        self.assertEqual(len(issues), 3)
+        self.assertTrue(any("computer_teach_status" in message for message in issues))
+
+    def test_matching_version_does_not_hide_missing_native_helpers(self):
+        from teaching_support import teaching_capabilities
+        with tempfile.TemporaryDirectory() as tmp:
+            support = teaching_capabilities(Path(tmp))
+        names = {"computer_status", "computer_begin", "computer_stop", "get_window_state", "computer_teach_element", "computer_teach_status", "computer_process_editor", "computer_process_status"}
+        issues = diagnostics.connection_issues({"serverInfo": {"name": "company-computer-use", "version": diagnostics.VERSION}},
+            names, {"version": diagnostics.VERSION, "teaching_support": support})
+        self.assertEqual(len(issues), 1)
+        self.assertIn("ZIP", issues[0])
 
     def test_missing_driver_does_not_launch_process_and_gives_recovery(self):
         with tempfile.TemporaryDirectory() as tmp:

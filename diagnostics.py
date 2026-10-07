@@ -259,6 +259,30 @@ def _structured(response: dict) -> dict:
     raise RuntimeError("MCP 상태 정보를 읽을 수 없습니다.")
 
 
+def connection_issues(initialized: dict, names: set, status: dict) -> list[str]:
+    from teaching_support import TEACHING_HELPER_FILES
+    required = {"computer_status", "computer_begin", "computer_stop", "get_window_state",
+                "computer_teach_element", "computer_teach_status", "computer_process_editor", "computer_process_status"}
+    issues = []
+    server = initialized.get("serverInfo", {})
+    if server.get("name") != "company-computer-use" or server.get("version") != VERSION or status.get("version") != VERSION:
+        issues.append(f"연결된 MCP 버전이 현재 배포 {VERSION}과 다릅니다. 새 배포 폴더로 연결을 갱신하고 클라이언트를 다시 연결하세요.")
+    if required - names:
+        issues.append("필수 학습 도구가 없습니다: " + ", ".join(sorted(required - names)))
+    support = status.get("teaching_support", {})
+    if not isinstance(support, dict):
+        support = {}
+    if support.get("format") != "computer-teaching-capabilities/v1" or support.get("version") != VERSION:
+        issues.append("학습 도우미 진단이 없는 이전 연결입니다. UIA 미지원으로 판단하지 마세요.")
+        return issues
+    direct, image = support.get("direct_picker", {}), support.get("image_process", {})
+    helpers = [direct.get("helper", {}), *image.get("helpers", [])]
+    present = {item.get("filename") for item in helpers if isinstance(item, dict) and item.get("file_present") is True}
+    if set(TEACHING_HELPER_FILES) - present:
+        issues.append("학습 도우미 파일을 확인하지 못했습니다: " + ", ".join(sorted(set(TEACHING_HELPER_FILES) - present)) + ". ZIP 전체를 다시 압축 해제하세요.")
+    return issues
+
+
 def probe_connection(config: dict) -> dict:
     copied = copy.deepcopy(config)
     with tempfile.TemporaryDirectory(prefix="computer-use-connection-") as directory:
@@ -275,9 +299,10 @@ def probe_connection(config: dict) -> dict:
             if status.get("session") is not None:
                 raise RuntimeError("연결 확인 중 예상하지 못한 화면 세션이 감지되었습니다.")
             names = {item.get("name") for item in tools if isinstance(item, dict)}
-            compatible = {"computer_status", "computer_begin", "computer_stop", "get_window_state"} <= names
-            result = {"ok": compatible and not status.get("driver_schema_error"), "tool_count": len(names),
+            issues = connection_issues(initialized, names, status)
+            result = {"ok": not issues and not status.get("driver_schema_error"), "tool_count": len(names),
                     "server": initialized.get("serverInfo", {}), "status": status,
+                    "compatibility_issues": issues,
                     "schema_error": status.get("driver_schema_error", ""), "screen_session_started": False}
         except Exception as exc:
             primary_error = exc
@@ -321,7 +346,10 @@ def run_diagnostics(config: dict) -> dict:
                 add("Driver 실행", "ok", version.stdout.strip())
                 report["connection"] = probe_connection(value)
                 connected = report["connection"]
-                add("MCP 실제 연결", "ok" if connected["ok"] else "error", f"도구 {connected['tool_count']}개 조회 / 화면 세션 시작 없음" + ("\n" + connected["schema_error"] if connected["schema_error"] else ""))
+                details = [f"도구 {connected['tool_count']}개 조회 / 화면 세션 시작 없음", *connected.get("compatibility_issues", [])]
+                if connected["schema_error"]:
+                    details.append(connected["schema_error"])
+                add("MCP 실제 연결", "ok" if connected["ok"] else "error", "\n".join(details))
                 management = connected.get("process_management", {})
                 if management.get("mode") == "stdio_lifecycle":
                     job_error = management.get("job_error") or {}

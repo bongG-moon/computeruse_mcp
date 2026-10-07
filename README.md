@@ -1,4 +1,4 @@
-# Computer Use MCP 0.11.0
+# Computer Use MCP 0.11.1
 
 Claude Code 등 MCP를 지원하는 클라이언트에서 **이 PC의 프로그램 화면을 읽고 조작하는 Windows용 도구**입니다. Chrome, 메모장, 설치된 Excel뿐 아니라 사용자가 실행파일을 지정한 다른 프로그램도 등록할 수 있습니다. 실제 화면을 확인해 클릭·입력하고, 요청한 결과까지 확인하는 것을 목표로 합니다.
 
@@ -8,12 +8,12 @@ Claude Code 등 MCP를 지원하는 클라이언트에서 **이 PC의 프로그�
 
 | 파일 | 용도 |
 | --- | --- |
-| [Computer-Use-MCP-0.11.0-with-driver.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.11.0/Computer-Use-MCP-0.11.0-with-driver.zip) | MCP와 Cua Driver 0.28.2를 함께 준비하는 권장 묶음 |
-| [Computer-Use-MCP-0.11.0.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.11.0/Computer-Use-MCP-0.11.0.zip) | Driver를 직접 준비하는 기존 배포본 |
-| [Computer-Use-MCP-0.11.0-source.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.11.0/Computer-Use-MCP-0.11.0-source.zip) | 개발·코드 확인용 원본 소스 |
-| [cua-driver.exe](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.11.0/cua-driver.exe) | 실행파일만 받기. 전체 구성은 Driver 포함 ZIP 사용 |
+| [Computer-Use-MCP-0.11.1-with-driver.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.11.1/Computer-Use-MCP-0.11.1-with-driver.zip) | MCP와 Cua Driver 0.28.2를 함께 준비하는 권장 묶음 |
+| [Computer-Use-MCP-0.11.1.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.11.1/Computer-Use-MCP-0.11.1.zip) | Driver를 직접 준비하는 기존 배포본 |
+| [Computer-Use-MCP-0.11.1-source.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.11.1/Computer-Use-MCP-0.11.1-source.zip) | 개발·코드 확인용 원본 소스 |
+| [cua-driver.exe](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.11.1/cua-driver.exe) | 실행파일만 받기. 전체 구성은 Driver 포함 ZIP 사용 |
 
-[전체 릴리스와 파일 해시](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.11.0) · [SHA256SUMS.txt](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.11.0/SHA256SUMS.txt)
+[전체 릴리스와 파일 해시](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.11.1) · [SHA256SUMS.txt](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.11.1/SHA256SUMS.txt)
 
 GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실행파일과 동봉 Python이 필요한 일반 사용자는 위의 배포 ZIP을 받으세요. 지원 대상은 Windows x86_64이며, 사용할 프로그램과 Claude Code 등 MCP 클라이언트는 이 PC에 설치되어 있어야 합니다.
 
@@ -57,6 +57,14 @@ GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실�
 
 저장 또는 버리기 방침이 불명확하면 임의로 선택하지 않습니다. 저장 내용 확인은 종료 확인과 별도이며, 저장이 목적이면 파일을 다시 열어 내용까지 확인해야 합니다. `computer_end`는 화면 작업 세션을 끝내는 기능이고 앱 종료 확인을 대신하지 않습니다.
 
+## 0.11.1: 선택 창 표시와 연결 진단 보완
+
+UIA 모드는 직접 요소 선택 창을 지원합니다. 창이 보이지 않을 때 F8을 반복하지 말고 `computer_status`의 `version`과 `teaching_support`를 확인하세요. 연결된 실행 폴더와 도우미 파일 존재를 확인할 수 있습니다. 파일 존재는 실행 성공을 뜻하지 않습니다.
+
+최소화·화면 밖·다른 가상 데스크톱의 창을 표시 완료로 판단하지 않도록 보완했습니다. 시작 중 일시적으로 보이지 않는 경우에는 제한 시간 안에서 확인하고, 시작 오류의 단계와 Windows 오류 번호를 보존합니다. 선택은 **3초 후 위치 선택** 버튼으로 시작할 수 있으며 F8은 보조 수단입니다. 요소 정보가 없는 경우에는 실제 오류에 맞춰 프로세스 이미지 선택을 안내합니다.
+
+운영 PC의 실제 원인은 버전과 오류 코드 확인 전에는 확정하지 않습니다. `computer_elements` 목록 조회나 `computer_save_task`는 직접 학습의 대체 기능이 아닙니다.
+
 ## 0.11.0: 이미지 선택과 동작 녹화
 
 프로세스 편집 창에서 **이미지로 선택** 또는 **동작 녹화**를 사용할 수 있습니다. Windows가 버튼 정보를 제공하지 않거나 선택한 요소와 Driver 결과를 연결하지 못하면 이미지 선택으로 이어집니다. 프로그램 연결·권한 확인 실패 또는 취소를 이미지 방식으로 건너뛰지는 않습니다.
@@ -90,9 +98,9 @@ GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실�
 
 요소 저장 전 대조에서 Driver의 `frame{x,y,w,h}` 형식을 처리하도록 수정했습니다. 자동화 ID가 누락된 경우에도 정확한 이름·종류·위치가 모두 맞는 요소만 교차 확인합니다. 명시적으로 다른 ID나 여러 후보를 임의로 받아들이지는 않습니다.
 
-**자체 그림 화면의 버튼이 Windows 접근성 정보에 아예 없는 경우에는 UIA 학습을 할 수 없습니다.** 실제 로컬 프로그램에서 네이티브 UIA와 Driver에 버튼 정보가 없는 경우를 확인했습니다. 이때 `picker_controls_not_exposed`로 이유를 알리고 F8 반복이나 상위 영역을 버튼으로 잘못 저장하는 일을 막습니다. 0.10.0에는 그림 버튼의 이미지 학습·자동 재탐색이 없었습니다. 현재 0.11.0에서는 위의 **이미지로 선택** 기능을 사용할 수 있습니다.
+**자체 그림 화면의 버튼이 Windows 접근성 정보에 아예 없는 경우에는 UIA 학습을 할 수 없습니다.** 실제 로컬 프로그램에서 네이티브 UIA와 Driver에 버튼 정보가 없는 경우를 확인했습니다. 이때 `picker_controls_not_exposed`로 이유를 알리고 F8 반복이나 상위 영역을 버튼으로 잘못 저장하는 일을 막습니다. 0.10.0에는 그림 버튼의 이미지 학습·자동 재탐색이 없었습니다. 현재 0.11.1에서는 위의 **이미지로 선택** 기능을 사용할 수 있습니다.
 
-새 ZIP 전체를 압축 풀고 기존 설정을 유지한 채 연결을 갱신한 뒤 **0.11.0** 및 `computer_process_editor`가 표시되는지 확인하세요. 편집 실행파일은 MCP가 자동 실행합니다.
+새 ZIP 전체를 압축 풀고 기존 설정을 유지한 채 연결을 갱신한 뒤 **0.11.1** 및 `computer_process_editor`가 표시되는지 확인하세요. 편집 실행파일은 MCP가 자동 실행합니다.
 
 ## 0.9.0: 직접 선택 → 확인 → 학습 완료
 
@@ -108,7 +116,7 @@ GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실�
 
 이름·화면 분류·설명·찾는 기준을 이 PC에 저장합니다. LLM 자체 훈련이나 전체 작업 녹화는 아닙니다. 입력 값·이미지·좌표·임시 창 번호는 학습 파일에 저장하지 않습니다. “배운 요소 목록을 보여줘”, “조회 버튼을 다시 가르칠게”, “저장한 조회 버튼을 지워줘”로 관리합니다. 같은 이름의 대상은 고유한 상위 영역으로 구분하며 화면이 바뀌면 다시 확인합니다.
 
-새 배포 ZIP을 모두 압축 풀고 `INSTALL.md`를 첨부하여 **“기존 Driver·프로그램·저장한 작업·학습 요소를 유지하고 이 버전으로 연결을 갱신해줘”**라고 요청하세요. 연결을 다시 연 뒤 **0.11.0**과 `computer_teach_status`가 표시돼야 새 방식이 적용됩니다. 기존 연결 파일을 그대로 실행하면 이전 버전이 계속 사용됩니다.
+새 배포 ZIP을 모두 압축 풀고 `INSTALL.md`를 첨부하여 **“기존 Driver·프로그램·저장한 작업·학습 요소를 유지하고 이 버전으로 연결을 갱신해줘”**라고 요청하세요. 연결을 다시 연 뒤 **0.11.1**과 `computer_teach_status`가 표시돼야 새 방식이 적용됩니다. 기존 연결 파일을 그대로 실행하면 이전 버전이 계속 사용됩니다.
 
 ## 0.8.0: 프로그램 시작 방식 수정
 

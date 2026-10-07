@@ -57,7 +57,7 @@ def create_bundle(base_zip: Path, driver_zip: Path, license_file: Path, output: 
     if any(not name.startswith(BASE_PREFIX) for name in original):
         raise ValueError("Unexpected MCP ZIP layout")
     build = json.loads(original[BASE_PREFIX + "BUILD-MANIFEST.json"])
-    if build.get("product") != "Computer-Use-MCP" or build.get("version") not in {"0.6.0", "0.7.0", "0.7.1", "0.8.0", "0.9.0", "0.10.0", "0.11.0"}:
+    if build.get("product") != "Computer-Use-MCP" or build.get("version") not in {"0.6.0", "0.7.0", "0.7.1", "0.8.0", "0.9.0", "0.10.0", "0.11.0", "0.11.1"}:
         raise ValueError("Unexpected MCP build identity")
     base_manifest = original[BASE_PREFIX + "SHA256SUMS.txt"].decode("utf-8")
     listed = {}

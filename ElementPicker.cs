@@ -22,13 +22,17 @@ internal static class ElementPicker
     [DllImport("user32.dll")] internal static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
     [DllImport("user32.dll")] internal static extern bool IsWindow(IntPtr hwnd);
     [DllImport("user32.dll")] internal static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hwnd);
     [DllImport("user32.dll")] internal static extern bool GetWindowRect(IntPtr hwnd, out RECT bounds);
+    [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+    [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr hwnd, uint attribute, out uint value, int size);
     [DllImport("user32.dll")] internal static extern bool RegisterHotKey(IntPtr hwnd, int id, uint modifiers, uint key);
     [DllImport("user32.dll")] internal static extern bool UnregisterHotKey(IntPtr hwnd, int id);
     [DllImport("user32.dll")] internal static extern short GetAsyncKeyState(int key);
     [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
     [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr hwnd);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool MoveFileEx(string source, string destination, uint flags);
 
     static bool ValidNonce(string value)
     {
@@ -37,13 +41,22 @@ internal static class ElementPicker
         return true;
     }
 
-    internal static void WriteJson(string path, Dictionary<string, object> value)
+    internal static void WriteJson(string path, Dictionary<string, object> value, bool replace = false)
     {
         string text = new JavaScriptSerializer().Serialize(value);
         if (Encoding.UTF8.GetByteCount(text) > 32768) throw new InvalidOperationException("response_too_large");
         string temporary = path + ".tmp";
-        File.WriteAllText(temporary, text, new UTF8Encoding(false));
-        File.Move(temporary, path);
+        try {
+            using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            using (var writer = new StreamWriter(stream, new UTF8Encoding(false))) writer.Write(text);
+            Stopwatch wait = Stopwatch.StartNew();
+            while (!MoveFileEx(temporary, path, replace ? 1U : 0U)) {
+                int code = Marshal.GetLastWin32Error();
+                if ((code != 5 && code != 32 && code != 33) || wait.ElapsedMilliseconds >= 500)
+                    throw new System.ComponentModel.Win32Exception(code);
+                Thread.Sleep(10);
+            }
+        } finally { try { File.Delete(temporary); } catch { } }
     }
 
     [STAThread]
@@ -71,6 +84,7 @@ internal static class ElementPicker
                 throw new ArgumentException("invalid_request");
             stage = "target_validation";
             if (!ValidTarget(pid, new IntPtr(hwnd))) throw new InvalidOperationException("target_unavailable");
+            stage = "desktop_validation";
             if (!Environment.UserInteractive) throw new InvalidOperationException("interactive_desktop_unavailable");
             stage = "form_startup";
             try { SetProcessDpiAwarenessContext(new IntPtr(-4)); }
@@ -88,8 +102,9 @@ internal static class ElementPicker
                 bool shown = File.Exists(response + ".ready.json");
                 try { WriteJson(response, new Dictionary<string, object> {
                     { "nonce", nonce }, { "status", shown ? "runtime_failed" : "startup_failed" }, { "stage", shown ? "picker_ui" : stage },
-                    { "code", stage == "target_validation" ? "target_unavailable" : "picker_initialization_failed" },
-                    { "error_type", error.GetType().Name }
+                    { "code", stage == "target_validation" ? "target_unavailable" : stage == "desktop_validation" ? "desktop_unavailable" : "picker_initialization_failed" },
+                    { "error_type", error.GetType().Name }, { "hresult", error.HResult },
+                    { "winerror", error is System.ComponentModel.Win32Exception ? (object)((System.ComponentModel.Win32Exception)error).NativeErrorCode : null }
                 }); } catch { }
             }
             return 2;
@@ -100,6 +115,15 @@ internal static class ElementPicker
     {
         uint found;
         return IsWindow(target) && GetWindowThreadProcessId(target, out found) != 0 && found == (uint)pid;
+    }
+
+    static bool VisibleOnScreen(IntPtr hwnd)
+    {
+        RECT bounds; uint cloaked;
+        return IsWindow(hwnd) && IsWindowVisible(hwnd) && !IsIconic(hwnd)
+            && GetWindowRect(hwnd, out bounds) && bounds.Right > bounds.Left && bounds.Bottom > bounds.Top
+            && MonitorFromWindow(hwnd, 0) != IntPtr.Zero
+            && DwmGetWindowAttribute(hwnd, 14, out cloaked, sizeof(uint)) == 0 && cloaked == 0;
     }
 
     internal static bool TargetAt(POINT point, int pid, IntPtr expected)
@@ -211,7 +235,8 @@ internal static class ElementPicker
         readonly ListBox choices = new ListBox();
         readonly Button save = new Button(), reselect = new Button(), selectLater = new Button();
         readonly Color ink = Color.FromArgb(24, 43, 72), muted = Color.FromArgb(91, 107, 132), blue = Color.FromArgb(37, 99, 235);
-        bool done, reading, reviewing, finishing, f8, escape, delayedPick;
+        bool done, reading, reviewing, finishing, f8, escape, delayedPick, shownOnce;
+        IntPtr hotkeyWindow, readyWindow;
         int invalidAttempts;
         DateTime readingDeadline, releaseDeadline, pickAt;
         Dictionary<string, object> pending;
@@ -283,17 +308,45 @@ internal static class ElementPicker
             FormClosing += delegate(object sender, FormClosingEventArgs args) { if (!done) { args.Cancel = true; Finish("cancelled"); } };
             Shown += delegate {
                 // An occupied hotkey must not suppress the whole picker.
-                f8 = RegisterHotKey(Handle, 1, 0x4000, 0x77); escape = RegisterHotKey(Handle, 2, 0x4000, 0x1B);
-                ResetSelection(); timer.Interval = 100; timer.Tick += Tick; timer.Start();
-                BeginInvoke(new Action(delegate {
-                    if (!Visible || !IsWindowVisible(Handle) || !ValidTarget(pid, target)) { Finish("target_unavailable"); return; }
-                    try { WriteJson(response + ".ready.json", new Dictionary<string, object> {
-                        { "nonce", nonce }, { "status", "ready" }, { "pid", pid }, { "window_id", target.ToInt64() },
-                        { "helper_pid", Process.GetCurrentProcess().Id }, { "helper_window_id", Handle.ToInt64() },
-                        { "f8_available", f8 }, { "escape_available", escape }
-                    }); } catch { Finish("ready_failed"); }
-                }));
+                shownOnce = true; timer.Interval = 100; timer.Tick += Tick; timer.Start();
+                BeginInvoke(new Action(PublishReady));
             };
+            HandleDestroyed += delegate { readyWindow = IntPtr.Zero; ReleaseHotkeys(); };
+            HandleCreated += delegate { if (shownOnce && !done && !finishing) BeginInvoke(new Action(PublishReady)); };
+            VisibleChanged += delegate {
+                readyWindow = IntPtr.Zero;
+                if (shownOnce && Visible && IsHandleCreated && !done && !finishing) BeginInvoke(new Action(PublishReady));
+            };
+        }
+
+        void ReleaseHotkeys()
+        {
+            if (hotkeyWindow != IntPtr.Zero) {
+                if (f8) UnregisterHotKey(hotkeyWindow, 1);
+                if (escape) UnregisterHotKey(hotkeyWindow, 2);
+            }
+            hotkeyWindow = IntPtr.Zero; f8 = escape = false;
+        }
+
+        void PublishReady()
+        {
+            if (!shownOnce || done || finishing || IsDisposed || !IsHandleCreated) return;
+            if (!ValidTarget(pid, target)) { Finish("target_unavailable"); return; }
+            if (!Visible || !VisibleOnScreen(Handle)) { readyWindow = IntPtr.Zero; return; }
+            if (hotkeyWindow != Handle) {
+                ReleaseHotkeys(); hotkeyWindow = Handle;
+                f8 = RegisterHotKey(Handle, 1, 0x4000, 0x77); escape = RegisterHotKey(Handle, 2, 0x4000, 0x1B);
+                if (!reading && !reviewing && !delayedPick) ResetSelection();
+            }
+            if (readyWindow == Handle) return;
+            try {
+                WriteJson(response + ".ready.json", new Dictionary<string, object> {
+                    { "nonce", nonce }, { "status", "ready" }, { "pid", pid }, { "window_id", target.ToInt64() },
+                    { "helper_pid", Process.GetCurrentProcess().Id }, { "helper_window_id", Handle.ToInt64() },
+                    { "f8_available", f8 }, { "escape_available", escape }
+                }, true);
+                readyWindow = Handle;
+            } catch { Finish("ready_failed"); }
         }
 
         void DrawCandidate(object sender, DrawItemEventArgs e)
@@ -328,6 +381,8 @@ internal static class ElementPicker
         void Tick(object sender, EventArgs args)
         {
             if (finishing) { CompleteAfterRelease(); return; }
+            PublishReady();
+            if (finishing || done) return;
             if (!ValidTarget(pid, target)) { Finish("target_unavailable"); return; }
             if (reading && DateTime.UtcNow >= readingDeadline) { Finish("read_timeout"); return; }
             if (DateTime.UtcNow >= deadline) { Finish("timeout"); return; }
@@ -422,7 +477,7 @@ internal static class ElementPicker
             if (((f8 && (GetAsyncKeyState(0x77) & 0x8000) != 0) || (escape && (GetAsyncKeyState(0x1B) & 0x8000) != 0))
                 && DateTime.UtcNow < releaseDeadline) return;
             done = true; timer.Stop();
-            if (f8) UnregisterHotKey(Handle, 1); if (escape) UnregisterHotKey(Handle, 2);
+            ReleaseHotkeys();
             pending["nonce"] = nonce;
             try {
                 try { WriteJson(response, pending); }

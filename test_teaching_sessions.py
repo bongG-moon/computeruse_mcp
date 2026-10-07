@@ -152,6 +152,37 @@ class AsyncTeachingTests(unittest.TestCase):
         self.assertEqual(helper.call_count, 1)
         self.assertEqual(self.runtime.calls, [])
 
+    def test_start_failure_identifies_supported_picker_and_connection_recovery(self):
+        from settings import VERSION
+        with mock.patch("teaching_sessions._run_helper", side_effect=OperationError("missing", "picker_missing")):
+            failed = self.start()
+        self.assertEqual(failed["server_version"], VERSION)
+        self.assertTrue(failed["uia_picker_supported"])
+        self.assertTrue(Path(failed["server_directory"]).is_absolute())
+        self.assertEqual(failed["recovery"]["next_tool"], "computer_status")
+        self.assertFalse(failed["recovery"]["repeat_f8"])
+        self.assertNotIn("suggested_arguments", failed["recovery"])
+
+    def test_visual_session_does_not_open_or_claim_unsupported_uia_picker(self):
+        self.runtime.mode = "visual"
+        with mock.patch("teaching_sessions._run_helper") as helper:
+            failed = self.start()
+        helper.assert_not_called()
+        self.assertEqual(failed["diagnostic"]["code"], "unsupported_mode")
+        self.assertTrue(failed["uia_picker_supported"])
+
+    def test_only_unsupported_control_can_offer_exact_image_process_target(self):
+        from teaching_sessions import failure_guidance
+        for code in ("picker_not_found", "picker_controls_not_exposed"):
+            guidance = failure_guidance(code, "verifying_selection", self.args)
+            self.assertEqual(guidance["next_tool"], "computer_process_editor")
+            self.assertEqual(guidance["suggested_arguments"]["targets"], [{**TARGET, "program_id": "editor"}])
+        for code in ("picker_cancelled", "picker_missing", "target_mismatch", "picker_read_timeout"):
+            guidance = failure_guidance(code, "waiting_for_human", self.args)
+            self.assertNotEqual(guidance.get("next_tool"), "computer_process_editor")
+        guidance = failure_guidance("picker_not_found", "verifying_selection", self.args, cleanup_pending=True)
+        self.assertEqual(guidance["next_tool"], "computer_teach_status")
+
     def test_read_failure_after_selection_reports_verifying_stage_without_reopening(self):
         with mock.patch("teaching_sessions._run_helper", side_effect=self.helper) as helper:
             job = self.start()

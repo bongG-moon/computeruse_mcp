@@ -1,5 +1,5 @@
 <!-- Image recognition and recording are explicit local workflow capabilities, not authorization for unrelated apps. -->
-# Claude에게 화면 작업 기능 연결 부탁하기 — 0.11.0
+# Claude에게 화면 작업 기능 연결 부탁하기 — 0.11.1
 
 ## 연속 작업을 만들 때
 
@@ -8,8 +8,15 @@
 - `saved`와 `saved_task.id`가 반환되어야 저장 완료입니다. 저장은 실행이 아니며, 이후 `computer_run_task`를 사용합니다. `task_id`로 편집 창을 열면 새 복사본으로 저장합니다.
 - `checkpoint`는 현재 연결 창의 이미지를 반환하고 멈춥니다. 사용자의 확인 없이 승인하지 않습니다. 확인 후 같은 `resume_run_id`와 `acknowledge_checkpoint=checkpoint.id`로 이어갑니다. 세션/창이 바뀌었으면 승인 없이 다시 관찰합니다. 화면 캡처 자체를 완료 검증으로 보고하지 않습니다.
 - `picker_controls_not_exposed`는 앱이 버튼 정보를 UIA에 제공하지 않는 경우입니다. F8 반복, 부모 컨테이너를 버튼으로 저장, 성공했다고 보고하는 일을 하지 않습니다. 프로세스 편집 창에서는 이미지 영역과 클릭 위치를 직접 지정해 저장할 수 있습니다. 단독 `computer_teach_element`의 UIA 요소 보관함과 프로세스의 이미지 대상을 구분합니다.
-- 자세한 사용자 안내는 `PROCESS_GUIDE.html`입니다. 연결 갱신 후 `computer_status.version: 0.11.0`과 `computer_process_editor` 제공 여부를 확인합니다.
+- 자세한 사용자 안내는 `PROCESS_GUIDE.html`입니다. 연결 갱신 후 `computer_status.version: 0.11.1`과 `computer_process_editor` 제공 여부를 확인합니다.
 
+
+## 선택 창이 안 보일 때 먼저 확인할 것
+
+- `computer_status.version`이 0.11.1인지, `teaching_support.identity.app_directory`가 새 압축 해제 폴더인지 확인합니다. 기존 연결이나 캐시된 도구 목록이면 새 폴더로 연결을 갱신하고 클라이언트를 다시 연결합니다. 다른 MCP 설정은 유지합니다.
+- `teaching_support`는 파일 존재만 읽습니다. `readiness: not_tested`는 실행 오류가 아니며 실제 창 표시를 검사하지 않았다는 뜻입니다.
+- `direct_picker.supported: true`는 UIA 직접 선택 기능이 있다는 뜻입니다. 파일 누락·권한·표시 실패를 UIA 미지원으로 바꾸어 설명하지 않습니다.
+- 학습 실패 시 `server_version`, `diagnostic.code`, `diagnostic.stage`, `diagnostic.native`와 `recovery`를 전달합니다. 시작 실패에 F8을 요구하지 않습니다. 명시적 선택 정보 부재에만 프로세스 이미지 선택을 안내하고, 취소·권한·대상 불일치를 이미지 방식으로 우회하지 않습니다.
 
 ## 직접 요소 학습: 클라이언트 진행 규칙
 
@@ -32,7 +39,7 @@
 
 0.7.0 배포본은 **MCP와 Cua Driver를 관리자 권한으로 실행하는 연결 프로그램**을 사용합니다. Claude Code 전체를 관리자 권한으로 열 필요는 없습니다. 연결 시작 때 Windows UAC 창이 나타나면 같은 로그인 사용자의 관리자 권한으로 허용합니다. 승인 취소·회사 정책 차단·다른 관리자 계정 사용 시에는 일반 권한으로 대신 실행하지 않습니다. Windows 보안 설정·UAC 정책은 변경하지 않습니다.
 
-갱신 후 연결을 다시 열고 `computer_status.version: 0.11.0`과 `computer_teach_status` 제공 여부를 확인합니다. 기존 0.6.0·0.7.0·0.7.1·0.8.0·0.9.0·0.10.0 연결을 갱신할 때는 실제 등록 범위와 설정 경로를 먼저 확인합니다. 새 배포 폴더의 `runtime/python.exe`로 `register.py upgrade --config <기존 설정 경로> --scope user` 또는 `--scope local --project <기존 프로젝트 전체 경로>`를 실행합니다. 검증한 이전 배포본만 갱신하며 다른 MCP·모델·로그인은 유지합니다. 갱신한 연결의 command는 새 폴더의 `Computer Use MCP 관리자 연결.exe`, args는 `--config`와 기존 설정 경로입니다. 연결을 다시 연 뒤 `computer_status.execution.administrator: true`, `integrity: high`를 확인해야 합니다. 관리자 프로그램을 조작할 수 있다는 결론은 실제 작은 작업을 확인한 뒤 내립니다.
+갱신 후 연결을 다시 열고 `computer_status.version: 0.11.1`과 `computer_teach_status` 제공 여부를 확인합니다. 기존 0.6.0·0.7.0·0.7.1·0.8.0·0.9.0·0.10.0 연결을 갱신할 때는 실제 등록 범위와 설정 경로를 먼저 확인합니다. 새 배포 폴더의 `runtime/python.exe`로 `register.py upgrade --config <기존 설정 경로> --scope user` 또는 `--scope local --project <기존 프로젝트 전체 경로>`를 실행합니다. 검증한 이전 배포본만 갱신하며 다른 MCP·모델·로그인은 유지합니다. 갱신한 연결의 command는 새 폴더의 `Computer Use MCP 관리자 연결.exe`, args는 `--config`와 기존 설정 경로입니다. 연결을 다시 연 뒤 `computer_status.execution.administrator: true`, `integrity: high`를 확인해야 합니다. 관리자 프로그램을 조작할 수 있다는 결론은 실제 작은 작업을 확인한 뒤 내립니다.
 
 배포 ZIP을 모두 압축 풀고 이 파일을 Claude Code에 첨부한 뒤 다음처럼 요청하세요. 아래의 Chrome은 처음 연결하는 예제이며, Chrome 전용 기능이라는 뜻은 아닙니다.
 
@@ -81,7 +88,7 @@ Claude는 현재 설정의 등록·활성화 여부와 실제 실행파일을 �
 
 현재 창을 조사할 때는 `computer_inspect(pid, window_id)`를 사용합니다. 기본 최대 제어 항목은 80개이며 기본 관찰 깊이·요소 수는 12·600입니다. 현재 세션의 방식을 유지하며 UIA에서는 항목별 `actions`, `suggested_operations`, `selector_unique` 등을 알려줍니다. 추천은 시도할 수 있는 동작의 안내이며 업무 성공 판정이 아닙니다. 같은 이름의 대상은 관찰한 상위 영역 하나를 `selector.within`으로 지정해 좁힐 수 있고, 범위 안에서도 정확히 하나를 찾을 수 있어야 합니다. 이미지 세션의 inspect는 화면 이미지와 해당 방식의 가능 범위를 제공합니다.
 
-UIA 정보가 부족하면 읽은 범위와 부족한 정보를 알리고 이미지 방식 사용을 제안할 수 있습니다. 0.11.0의 프로세스 이미지 선택·녹화·저장 단계는 `mode: uia` 세션에서 그대로 사용하며, 기본 이미지 검색에는 모델이 필요하지 않습니다. 실행 결과를 사용자가 볼 수 있도록 이미지 표시를 지원하는 MCP 클라이언트가 필요합니다. 모델이 직접 전체 이미지를 해석해 임의 조작하는 기존 `mode: visual` 기능은 별개입니다. 그 방식을 명시적으로 요청받았을 때만 기존 세션을 끝내고 같은 허용 프로그램으로 전환하며, 이미지 입력을 지원하는 모델이 필요합니다.
+UIA 정보가 부족하면 읽은 범위와 부족한 정보를 알리고 이미지 방식 사용을 제안할 수 있습니다. 0.11.1의 프로세스 이미지 선택·녹화·저장 단계는 `mode: uia` 세션에서 그대로 사용하며, 기본 이미지 검색에는 모델이 필요하지 않습니다. 실행 결과를 사용자가 볼 수 있도록 이미지 표시를 지원하는 MCP 클라이언트가 필요합니다. 모델이 직접 전체 이미지를 해석해 임의 조작하는 기존 `mode: visual` 기능은 별개입니다. 그 방식을 명시적으로 요청받았을 때만 기존 세션을 끝내고 같은 허용 프로그램으로 전환하며, 이미지 입력을 지원하는 모델이 필요합니다.
 
 > 이 시험용 창은 이미지로 확인하는 방식을 사용해도 돼. 현재 세션을 끝내고 같은 허용 프로그램만 이미지 방식으로 시작해 줘. 화면을 먼저 보고 위치를 확인한 뒤 내가 요청한 작은 작업만 진행해 줘.
 
@@ -269,7 +276,7 @@ Claude Code가 로컬 설정 도우미를 실행할 수 있다면 대신 추가�
 
 수동 변경·진단·긴급 중지가 필요하면 `Computer Use MCP 설정.exe`를 열 수 있습니다. 다른 설정을 확인할 때는 해당 `--config` 경로를 전달합니다. 이미 등록한 다른 연결을 자동으로 삭제하거나 갱신하지 않습니다.
 
-## 이미지 선택과 동작 녹화 사용 규칙 (0.11.0)
+## 이미지 선택과 동작 녹화 사용 규칙 (0.11.1)
 
 사용자가 반복 작업을 만들거나 녹화하려고 하면 `computer_process_editor`를 한 번 열고 같은 ID로 상태를 확인합니다. 사용자가 직접 이미지 영역과 클릭 위치를 확인하거나, 녹화 창에서 명시적으로 시작하게 합니다. UIA 요소 선택이 실패하더라도 F8 재시도를 반복시키지 마세요. 지원되는 선택 실패는 편집 창에서 이미지 선택으로 이어집니다.
 

@@ -12,6 +12,17 @@ REAL_APP_CANDIDATES = install.app_candidates
 
 
 class ConversationSetupTests(unittest.TestCase):
+    def test_native_picker_change_invalidates_prepared_code_fingerprint(self):
+        from teaching_support import ELEMENT_PICKER_FILE
+        with tempfile.TemporaryDirectory() as directory, patch.object(install, "APP_DIR", Path(directory)):
+            before = install._code_fingerprint()
+            helper = Path(directory)/ELEMENT_PICKER_FILE
+            helper.write_bytes(b"first test-only helper")
+            created = install._code_fingerprint()
+            helper.write_bytes(b"changed test-only helper")
+            changed = install._code_fingerprint()
+        self.assertEqual(len({before, created, changed}), 3)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="computer-use-install-")
         self.addCleanup(self.tmp.cleanup)
