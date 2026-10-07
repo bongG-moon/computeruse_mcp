@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import copy
+import math
 import time
 
-from operations import OperationError, _elements, _limited, _payload, _unique, validate_selector
+from operations import Operations, OperationError, _elements, _limited, _payload, _unique, validate_selector, validate_assertions
 
 
-PROCESS_OPERATIONS = {"delay", "wait_for_element", "checkpoint"}
+PROCESS_OPERATIONS = {"delay", "wait_for_element", "wait_for_state", "checkpoint"}
 
 
 def validate_process_step(step):
@@ -15,14 +16,18 @@ def validate_process_step(step):
         raise OperationError("지원하지 않는 프로세스 단계입니다.")
     operation = step["operation"]
     allowed = {"operation"} | ({"duration_ms"} if operation == "delay" else
-        {"selector", "timeout_ms", "poll_interval_ms"} if operation == "wait_for_element" else {"message"})
+        {"selector", "timeout_ms", "poll_interval_ms"} if operation == "wait_for_element" else
+        {"expect", "timeout_ms", "poll_interval_ms"} if operation == "wait_for_state" else {"message"})
     if set(step) - allowed:
         raise OperationError("이 프로세스 단계에 지원하지 않는 설정이 있습니다.")
     if operation == "delay":
         if type(step.get("duration_ms")) is not int or not 0 <= step["duration_ms"] <= 60000:
             raise OperationError("고정 대기 시간 duration_ms는 0~60000ms로 지정하세요.")
-    elif operation == "wait_for_element":
-        validate_selector(step.get("selector"))
+    elif operation in ("wait_for_element", "wait_for_state"):
+        if operation == "wait_for_element":
+            validate_selector(step.get("selector"))
+        else:
+            validate_assertions(step.get("expect"))
         if type(step.get("timeout_ms")) is not int or not 0 <= step["timeout_ms"] <= 60000:
             raise OperationError("요소 대기 제한 시간 timeout_ms는 0~60000ms로 지정하세요.")
         interval = step.get("poll_interval_ms", 250)
@@ -60,6 +65,9 @@ def execute_process_step(runtime, step, target):
     runtime.check_active()
     started, observations = time.monotonic(), 0
     operation = step["operation"]
+    if operation == "wait_for_state":
+        return Operations(runtime).wait_for_state(step["expect"], target,
+            timeout_ms=step["timeout_ms"], poll_interval_ms=step.get("poll_interval_ms", 250))
     def result(passed, code, message, **extra):
         return {"status": "verified" if passed else "needs_review", "operation": operation,
                 "task_verified": passed, "input_dispatched": False,
@@ -93,12 +101,23 @@ def execute_process_step(runtime, step, target):
                       checkpoint_content=[{key: copy.deepcopy(image[key]) for key in ("type", "data", "mimeType")} for image in images],
                       checkpoint_ready=True, image_verified=False)
     deadline = started + step["timeout_ms"]/1000
+    read_deadline = started + max(30000, step["timeout_ms"])/1000
     while True:
         runtime.check_active()
-        answer = runtime.call("get_window_state", {**target, "include_accessibility_tree": True, "include_screenshot": False,
-                                                    "max_depth": 32, "max_elements": 5000})
+        if observations and time.monotonic() >= deadline:
+            return result(False, "element_wait_timeout", "제한 시간 안에 지정한 요소가 나타나지 않았습니다.")
+        args = {**target, "include_accessibility_tree": True, "include_screenshot": False,
+                "max_depth": 32, "max_elements": 5000}
+        bounded = getattr(runtime, "call_with_timeout", None)
+        # Do not turn a short polling wait into a Driver connection timeout.
+        # The current read finishes within the whole wait's bounded read budget;
+        # a result arriving after the polling deadline is still rejected below.
+        remaining = max(1, math.floor((read_deadline-time.monotonic())*1000+1e-6))
+        answer = bounded("get_window_state", args, timeout_ms=remaining) if callable(bounded) else runtime.call("get_window_state", args)
         observations += 1
         runtime.check_active()
+        if step["timeout_ms"] and time.monotonic() >= deadline:
+            return result(False, "element_wait_timeout", "제한 시간이 지난 뒤 도착한 관찰을 완료로 판정하지 않았습니다.")
         if not isinstance(answer, dict) or answer.get("isError"):
             return result(False, "observation_failed", "화면 읽기에 실패했습니다. 접근 오류를 요소 부재로 간주하거나 반복하지 않습니다.")
         try:

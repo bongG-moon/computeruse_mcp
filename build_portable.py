@@ -44,15 +44,20 @@ ADMINISTRATOR_LAUNCHER_NAME = "Computer Use MCP 관리자 연결.exe"
 ELEMENT_PICKER_NAME = "Computer Use MCP 요소 선택.exe"
 PROCESS_EDITOR_NAME = "Computer Use MCP 프로세스 만들기.exe"
 VISUAL_TOOLS_NAME = "Computer Use MCP 이미지 도구.exe"
+SCOPED_CONTROLS_NAME = "Computer Use MCP 빠른 확인.exe"
 APP_FILES = (
     "server.py", "settings.py", "setup.py", "consent.py", "register.py", "README.html", "VALIDATION.html",
     "maintenance.py", "diagnostics.py", "install.py", "programs.py", "INSTALL.md", "vendor/__init__.py", "vendor/guard.py", "vendor/windows.py",
     "session_runtime.py", "configuration_state.py", "operations.py", "workflows.py", "inspection.py", "accessibility_tree.py", "closing.py", "close_actions.py", "privileges.py",
     "program_launch.py", "learning.py", "learning_picker.py", "teaching_sessions.py", "teaching_support.py", "process_editor.py", "process_steps.py", "image_targets.py", "image_steps.py",
     "README.md", "DRIVER-BUNDLE.md", "CUA-DRIVER-LICENSE.md", "PROCESS_GUIDE.html",
+    "scoped_controls.py", "repeat_profiles.py", "result_files.py", "CHANGES_0.12.0.html",
 )
 OPTIONAL_APP_FILES = ()
 SOURCE_SUPPORT_FILES = (
+    "ScopedControls.cs", "test_scoped_controls.py", "test_repeat_profiles.py", "test_result_files.py", "repeat_validation.py",
+    "test_operation_verification.py", "test_launch_profiles.py", "test_workflow_contract012.py", "recording_validation.py",
+    "scoped_nested_validation.py",
     "test_teaching_support.py",
     "VisualTools.cs", "test_image_targets.py", "test_image_steps.py", "test_image_guard.py", "test_visual_native.py", "test_driver_overlay.py", "visual_fixture.py", "visual_validation.py",
     "ProcessEditor.cs", "test_process_editor.py", "test_process_steps.py", "test_checkpoint_capture.py", "test_store_locks.py", "process_validation.py",
@@ -221,6 +226,15 @@ def compile_visual_tools(destination: Path) -> None:
         print(output.stdout.strip())
 
 
+def compile_scoped_controls(destination: Path) -> None:
+    references = ["System.dll", "System.Core.dll", "System.Web.Extensions.dll"]
+    references.extend(str(COMPILER.parent / "WPF" / name) for name in ("WindowsBase.dll", "UIAutomationClient.dll", "UIAutomationTypes.dll"))
+    output = run_hidden([str(COMPILER), "/nologo", "/target:exe", "/platform:anycpu", "/optimize+", "/codepage:65001",
+                         *["/reference:" + ref for ref in references], f"/out:{destination}", str(SOURCE / "ScopedControls.cs")], cwd=SOURCE)
+    if output.stdout.strip():
+        print(output.stdout.strip())
+
+
 def write_bundle_manifest(bundle: Path) -> None:
     entries = []
     for path in sorted(bundle.rglob("*")):
@@ -290,6 +304,7 @@ def main() -> int:
         compile_element_picker(staging / ELEMENT_PICKER_NAME)
         compile_process_editor(staging / PROCESS_EDITOR_NAME)
         compile_visual_tools(staging / VISUAL_TOOLS_NAME)
+        compile_scoped_controls(staging / SCOPED_CONTROLS_NAME)
         result = run_hidden([str(python_root / "python.exe"), "-B", "-s", "-c", IMPORT_CHECK], cwd=staging, env=runtime_environment(python_root))
         print(result.stdout.strip())
         print(f"Source check passed. Compiler output retained at: {staging}")
@@ -314,6 +329,7 @@ def main() -> int:
     compile_element_picker(bundle / ELEMENT_PICKER_NAME)
     compile_process_editor(bundle / PROCESS_EDITOR_NAME)
     compile_visual_tools(bundle / VISUAL_TOOLS_NAME)
+    compile_scoped_controls(bundle / SCOPED_CONTROLS_NAME)
     result = run_hidden([str(runtime / "python.exe"), "-B", "-s", "-c", IMPORT_CHECK], cwd=bundle, env=runtime_environment(runtime))
     proof = json.loads(result.stdout)
     if not proof.get("ok"):

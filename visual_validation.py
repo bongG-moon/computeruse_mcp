@@ -139,6 +139,38 @@ def run(folder, driver, bundle=None):
             return state if (saved and state["status"] == "saved" and state.get("pending") is False) or (count is not None and len(state["steps"]) == count) else None
         return wait(check, 40)
 
+    def recording_status(editor_id, expected):
+        def check():
+            state = call("computer_process_status", {"editor_id": editor_id, "wait_ms": 100}, allow_error=True)
+            progress = state.get("recording", {})
+            if state.get("status") in {"failed", "cancelled"} or progress.get("state") == "failed":
+                raise AssertionError(state)
+            return progress if progress.get("state") == expected else None
+        progress = wait(check, 20)
+        assert progress.get("task_verified") is False and progress.get("hover_is_action") is False, progress
+        report.setdefault("recording_progress", []).append(progress)
+        return progress
+
+    def acknowledge_recording_warnings(edit, editor_id):
+        state = call("computer_process_status", {"editor_id": editor_id, "wait_ms": 100})
+        review = state.get("recording_review", {})
+        if not review.get("partial"):
+            return {"present": False, "synthetic_ack_only": False}
+        assert review.get("warning_codes") and review.get("acknowledged") is False, review
+        save_button = next(r for r in controls(edit) if r["text"] == "프로세스 저장")
+        assert not save_button["enabled"], "Unacknowledged partial recording must not be saveable"
+        native.click_helper(edit, "누락 경고 확인 · 저장 전 필수")
+        dialog = wait(lambda: next((r for r in native.windows(edit["pid"]) if r["visible"] and r["text"] == "부분 기록과 누락 내용 확인"), None))
+        dialog_helper = {**edit, "hwnd": dialog["hwnd"]}
+        native.capture_helper(dialog_helper, folder / "partial-recording-warning-review.png")
+        native.click_helper(dialog_helper, "누락 내용을 확인했습니다")
+        def acknowledged():
+            current = call("computer_process_status", {"editor_id": editor_id, "wait_ms": 100}).get("recording_review", {})
+            return current if current.get("acknowledged") is True else None
+        accepted = wait(acknowledged)
+        assert accepted["partial"] is True and accepted["warning_codes"] == review["warning_codes"]
+        return {"present": True, "synthetic_ack_only": True, "warning_codes": accepted["warning_codes"], "save_disabled_before_ack": True}
+
     def editor(target, name):
         started = call("computer_process_editor", {"targets": [{"program_id": "painted", **target}], "name": name, "timeout_seconds": 600})
         helper = native.ready_helper(started, root / EDITOR); helpers.append(helper)
@@ -276,7 +308,10 @@ def run(folder, driver, bundle=None):
         child, target = spawn("reopened"); client = connect(); begin()
         report["scenarios"]["reconnect_reopen_and_reuse"] = run_task(task_id, target, "reopened")
         # Native input is explicitly injected into this exact owned test HWND.
-        # A pre-existing editable value must become a manual-review input row.
+        # This scenario covers fast-click image/manual fallback. Deliberately
+        # hover over the painted (non-UIA) area first, then click the Edit.
+        # Dedicated recording_validation.py tests the new hovered UIA semantic
+        # Edit/checkbox path and final-value postconditions independently.
         field = next(r for r in native.windows(child.pid, target["window_id"]) if "EDIT" in r["class"].upper() and r["bounds"][0] == min(q["bounds"][0] for q in native.windows(child.pid, target["window_id"]) if "EDIT" in q["class"].upper()))
         text = ctypes.create_unicode_buffer("OLD")
         native.user.SendMessageW(field["hwnd"], 0x000C, 0, ctypes.addressof(text))
@@ -287,7 +322,12 @@ def run(folder, driver, bundle=None):
         width = bounds[2] - bounds[0]
         native.user.SetWindowPos(record["hwnd"], -1, 20, 20, 0, 0, 0x0011)
         native.user.SetWindowPos(target["window_id"], 0, native.user.GetSystemMetrics(0)-width-30, 30, 0, 0, 0x0011)
-        native.click_helper(record, "기록 시작"); activate(target); time.sleep(.65)
+        preflight = recording_status(editor_id, "ready")
+        assert preflight["probe"]["hooks"] == "available", preflight
+        native.click_helper(record, "기록 시작"); activate(target)
+        recording_status(editor_id, "recording")
+        point = client_point(target, 150, 260)
+        assert native.user.SetCursorPos(point.x, point.y); time.sleep(.7)
         owned_click(target, 150, 385); time.sleep(.75)
         assert native.user.GetForegroundWindow() == target["window_id"]
         native.user.keybd_event(0x51, 0, 0, 0); native.user.keybd_event(0x51, 0, 2, 0); time.sleep(.85)
@@ -320,11 +360,17 @@ def run(folder, driver, bundle=None):
         crop(replacement, target, (102, 335, 195, 400), (150, 382))
         wait(lambda: status(editor_id, 4)["steps"][2]["label"] == "다시 선택한 이미지")
         native.capture_helper(edit, folder / "recorded-draft-resolved.png")
+        warning_review = acknowledge_recording_warnings(edit, editor_id)
         native.click_helper(edit, "프로세스 저장"); saved = status(editor_id, saved=True); assert native.wait_exited(edit)
         assert len(call("computer_tasks")["tasks"]) == 2
+        if warning_review["present"]:
+            stored_review = call("computer_get_task", {"id": saved["saved_task"]["id"]})["recording_review"]
+            assert stored_review["partial"] is True and stored_review["acknowledged"] is True
+            assert stored_review["warning_codes"] == warning_review["warning_codes"]
         report["scenarios"]["scoped_recording_review_and_manual_input"] = {"passed": True, "injected_test_input": True,
             "not_saved_until_review": True, "manual_input_resolved_in_native_dialog": True,
-            "input_image_reselected_in_native_dialog": True, "recorded_steps": 4}
+            "input_image_reselected_in_native_dialog": True, "recorded_steps": 4,
+            "startup_preflight_observed": True, "warning_review": warning_review}
         report["recording_limitations"] = ["Automatic input crops can fail after focus or text changes; this validation reselects stable input context in the native review dialog before replay."]
         report["scenarios"]["saved_recording_real_driver_replay"] = replay_recording(saved["saved_task"]["id"], target, field)
         report["passed"] = True

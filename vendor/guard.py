@@ -43,6 +43,11 @@ class ProtectedImageInput(GuardError):
     code = "image_protected_input"
 
 
+class RequestDeadlineExceeded(GuardError):
+    """The total request budget expired before any Driver dispatch."""
+    pass
+
+
 KEY_ALIASES = {alias: canonical for canonical, aliases in {
     "ctrl": {"ctrl", "control", "lctrl", "rctrl", "leftctrl", "rightctrl", "leftcontrol", "rightcontrol", "control_l", "control_r"},
     "shift": {"shift", "lshift", "rshift", "leftshift", "rightshift", "shift_l", "shift_r"},
@@ -1047,7 +1052,7 @@ class Guard:
         if hasattr(self.transport, "check_running"):
             self.transport.check_running()
 
-    def approve(self, name, args, call_id):
+    def approve(self, name, args, call_id, *, request_deadline=None):
         self.check_stop()
         if self.policy["approval_mode"] == "run":
             return
@@ -1056,7 +1061,8 @@ class Guard:
         response_path.unlink(missing_ok=True)
         request_id = uuid.uuid4().hex
         atomic_json(request_path, {"id": request_id, "tool": name, "arguments": args, "created_at": utc_now()})
-        deadline = time.monotonic() + self.policy.get("approval_timeout_seconds", 300)
+        approval_deadline = time.monotonic() + self.policy.get("approval_timeout_seconds", 300)
+        deadline = min(approval_deadline, request_deadline) if request_deadline is not None else approval_deadline
         try:
             while time.monotonic() < deadline:
                 self.check_stop()
@@ -1071,7 +1077,9 @@ class Guard:
                         return
                 except (FileNotFoundError, json.JSONDecodeError, PermissionError):
                     pass
-                time.sleep(0.05)
+                time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+            if request_deadline is not None and time.monotonic() >= request_deadline:
+                raise RequestDeadlineExceeded("단계 시간이 지나 승인을 기다리는 작업을 취소했습니다. 입력은 전달하지 않았습니다.")
             raise GuardError("Action approval timed out; no action was sent.")
         finally:
             request_path.unlink(missing_ok=True)
@@ -1242,8 +1250,9 @@ class Guard:
                            checkpoint_ready_resolver=self.checkpoint_ready_resolver,
                            image_geometry_resolver=self.image_geometry_resolver, image_focus_resolver=self.image_focus_resolver)
             visual.action_count = self.action_count
-            def approve(name, args, call_id):
-                self.approve(name, args, call_id)
+            def approve(name, args, call_id, *, request_deadline=None):
+                self.approve(name, args, call_id,
+                    **({"request_deadline": request_deadline} if request_deadline is not None else {}))
                 ready()  # Human approval may have changed the foreground/geometry.
             visual.approve = approve
             def observe_image():
@@ -1337,8 +1346,9 @@ class Guard:
                 self.action_count = visual.action_count
             self.observed_targets.clear()
 
-    def call(self, name, arguments):
+    def call(self, name, arguments, *, timeout_seconds=None):
         started = time.monotonic()
+        deadline = started + timeout_seconds if timeout_seconds is not None else None
         call_id = uuid.uuid4().hex
         safe_arguments = arguments if isinstance(arguments, dict) else {}
         route = journal_route(name, safe_arguments, self.policy["mode"])
@@ -1363,11 +1373,16 @@ class Guard:
                     raise GuardError("Reobserve this exact window with get_window_state(pid, window_id) before the next action.")
                 if self.action_count >= self.policy["max_actions"]:
                     raise GuardError("Maximum action count reached.")
-                self.approve(name, args, call_id)
+                if deadline is None:
+                    self.approve(name, args, call_id)
+                else:
+                    self.approve(name, args, call_id, request_deadline=deadline)
                 # Approval may have taken minutes: resolve PID/HWND again.
                 args = validate_arguments(name, args, self.policy, self.process_resolver, self.window_resolver)
             self.check_stop()
             target_evidence = {}
+            if deadline is not None and time.monotonic() >= deadline:
+                raise RequestDeadlineExceeded("단계 시간이 지나 입력을 전달하지 않았습니다. 현재 상태를 다시 확인하세요.")
             if name not in {"list_apps", "list_windows"}:
                 target_evidence = {"pid": args["pid"],
                                    "exe": _allowed_pid(args["pid"], self.policy, self.process_resolver)}
@@ -1392,7 +1407,13 @@ class Guard:
                         driver_args = validate_arguments(driver_name, driver_args, self.policy, self.process_resolver, self.window_resolver)
                         target_evidence["driver_tool"] = driver_name
                     request = {"name": driver_name, "arguments": driver_args}
-                    if name in OBSERVATIONS and isinstance(self.transport, DriverTransport):
+                    if timeout_seconds is not None and isinstance(self.transport, DriverTransport):
+                        configured = self.policy.get("observation_timeout_seconds", 20) if name in OBSERVATIONS else self.policy.get("request_timeout_seconds", 90)
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise RequestDeadlineExceeded("단계 시간이 지나 Driver 요청을 전달하지 않았습니다.")
+                        raw = self.transport.driver_request("tools/call", request, timeout=min(configured, remaining))
+                    elif name in OBSERVATIONS and isinstance(self.transport, DriverTransport):
                         raw = self.transport.driver_request("tools/call", request,
                             timeout=self.policy.get("observation_timeout_seconds", 20))
                     else:
@@ -1414,6 +1435,10 @@ class Guard:
             refused = {"isError": True, "content": [{"type": "text", "text": str(error)}]}
             if isinstance(error, BackgroundShortcutUnavailable):
                 refused["structuredContent"] = {"error_code": "background_unavailable", "input_sent": False,
+                                                "effect": "not_applied", "automatic_retry": False}
+            elif isinstance(error, RequestDeadlineExceeded):
+                self.observed_targets.discard(target_key)
+                refused["structuredContent"] = {"error_code": "step_timeout", "input_sent": False,
                                                 "effect": "not_applied", "automatic_retry": False}
             refused = action_guidance(refused, name)
             metrics = add_metrics(refused, started)

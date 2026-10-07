@@ -16,7 +16,7 @@ import uuid
 
 from settings import VERSION
 from session_runtime import SessionRuntime, SessionError, SAFE_TOOLS
-from vendor.guard import ALLOWED_KEYS, DriverTransport, atomic_json, utc_now
+from vendor.guard import ALLOWED_KEYS, DriverTransport, GuardError, atomic_json, utc_now
 from workflows import WorkflowRunner, WorkflowError, validate_recipe
 from operations import OPERATION_SCHEMA, SELECTOR_SCHEMA
 from close_actions import CLOSE_ACTION_SCHEMA
@@ -48,7 +48,7 @@ MANAGEMENT_TOOLS = [
                         "max_actions": {"type": "integer", "minimum": 1}}, ["program_ids"])),
     tool("computer_end", "End this automation session and release its desktop lease. This does NOT close applications or prove they exited. Verify any requested application/window closure with computer_verify_closed before ending; closure tickets expire with this session.", object_schema()),
     tool("computer_stop", "Immediately stop this server's desktop session, including blocked approval or driver requests.", object_schema()),
-    tool("computer_launch", "Launch exactly one approved program from its executable directory with MCP runtime environment overrides removed. Reports early exit/window observations; process creation is not proof the app is ready. Never automatically relaunch after uncertainty. No command arguments or paths can be supplied.",
+    tool("computer_launch", "Launch exactly one approved saved profile: executable with saved arguments/working directory, or the exact saved registered URI/URL. EXE launches remove MCP runtime overrides. URI launches use Windows association and may not return a process ID. Reports early exit/window observations; launch acceptance is not app readiness. Never automatically relaunch. Call arguments cannot override paths, URI or command arguments.",
          object_schema({"program_id": STRING}, ["program_id"])),
     tool("computer_tasks", "List reusable task descriptions. Saved tasks do not grant permission or execute code.", object_schema(), True),
     tool("computer_save_task", "Save inert reusable task text, expected result and configured program IDs. Never executes the task or changes permissions.",
@@ -70,6 +70,13 @@ MANAGEMENT["computer_save_task"]["inputSchema"]["properties"].update({
     "variables": {"type": "object", "description": "Named text inputs: {name:{description,default?}}. Use ${name} in step string values."},
     "steps": {"type": "array", "minItems": 1, "maxItems": 30, "items": {"type": "object"},
               "description": "Verified UIA steps with program_id, operation, selector, value and/or expect; no scripts or saved handles."}})
+RECORDING_WARNINGS = ["outside_target_not_recorded", "uia_text_unavailable", "uia_probe_unavailable",
+    "recording_timeout_partial", "recording_hook_unavailable", "recording_mouse_failed", "recording_keyboard_failed",
+    "recording_progress_failed", "semantic_target_unverified", "recording_event_limit", "recording_final_value_unconfirmed", "recording_method_unverified"]
+MANAGEMENT["computer_save_task"]["inputSchema"]["properties"]["recording_review"] = object_schema({
+    "partial": {"type": "boolean", "enum": [True]}, "acknowledged": {"type": "boolean", "enum": [True]},
+    "warning_codes": {"type": "array", "minItems": 1, "maxItems": 30, "uniqueItems": True,
+                      "items": {"type": "string", "enum": RECORDING_WARNINGS}}}, ["partial", "acknowledged", "warning_codes"])
 MANAGEMENT["computer_save_task"]["description"] += " Optional declarative steps and variables enable computer_run_task; saved text is never evaluated as code."
 MANAGEMENT_TOOLS.extend([
     tool("computer_prepare_close", "Read-only: capture one live approved window and retain its original process identity BEFORE any close/menu/keyboard action. Returns a session-local close_id for computer_verify_closed, usable even after the process exits. scope=window verifies that window and related dialogs are gone; scope=process requires the exact original process to exit, not all same-name application instances. Hidden/minimized is not closed. No UI input. Works in UIA and visual sessions.",
@@ -132,6 +139,12 @@ MANAGEMENT_TOOLS.extend([
          object_schema({"id": STRING, "expected_revision": {"type": "integer", "minimum": 1}}, ["id"]), destructive=True),
 ])
 MANAGEMENT.update({t["name"]: t for t in MANAGEMENT_TOOLS})
+MANAGEMENT["computer_run_task"]["inputSchema"]["properties"]["execution_mode"] = {
+    "type": "string", "enum": ["auto", "standard", "fast"], "default": "auto"}
+MANAGEMENT["computer_run_task"]["description"] += (
+    " Default auto reuses a prior verified recipe's execution method and uses scoped read-only verification when available. "
+    "First runs, recipe/program/version changes and resume use standard checks. Fast never skips target/postcondition checks, "
+    "never reuses old Driver handles, and never auto-approves image checkpoints. Reports execution mode and per-step timings.")
 MANAGEMENT["computer_perform"]["inputSchema"]["properties"]["step"] = copy.deepcopy(OPERATION_SCHEMA)
 learned_step_schema = copy.deepcopy(OPERATION_SCHEMA)
 learned_step_schema["properties"].pop("selector")
@@ -141,7 +154,7 @@ recipe_step_schema = copy.deepcopy(OPERATION_SCHEMA)
 recipe_step_schema["properties"]["program_id"] = STRING
 recipe_step_schema["properties"]["window_ref"] = {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$", "description": "Named current window within this program; default main. Never a stored PID/HWND."}
 recipe_step_schema["required"] = ["operation", "program_id"]
-recipe_step_schema["properties"]["operation"]["enum"] += ["delay", "wait_for_element", "checkpoint"]
+recipe_step_schema["properties"]["operation"]["enum"] += ["delay", "wait_for_element", "wait_for_state", "checkpoint"]
 recipe_step_schema["properties"].update({
     "duration_ms": {"type": "integer", "minimum": 0, "maximum": 60000},
     "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 60000},
@@ -150,10 +163,21 @@ recipe_step_schema["properties"].update({
 MANAGEMENT["computer_save_task"]["inputSchema"]["properties"]["steps"]["items"] = recipe_step_schema
 MANAGEMENT["computer_run_task"]["inputSchema"]["properties"]["acknowledge_checkpoint"] = STRING
 MANAGEMENT["computer_run_task"]["description"] += (
-    " delay uses duration_ms; wait_for_element uses selector/timeout_ms. checkpoint uses message and returns an image, "
+    " delay uses duration_ms; wait_for_element uses selector/timeout_ms; wait_for_state uses expect/timeout_ms and optional poll_interval_ms. "
+    "Use require_change:true on an action's completion condition to reject unchanged pre-existing results; a baseline must come from that action. checkpoint uses message and returns an image, "
     "needs_review and checkpoint.id. Pause for human review; continue only with their confirmation and matching "
     "resume_run_id/acknowledge_checkpoint. A screenshot alone is never proof of completion.")
 for item in [
+    tool("computer_prepare_result", "Before an explicitly planned export, record a bounded baseline of CSV/XLSX files in the exact user-known output folder. No recursive search, export click, file change or Excel launch. Requires an active desktop session. Returns a session-local ticket; use computer_verify_result for one exact output filename. A fresh file alone never proves the query's meaning.",
+         object_schema({"directory": STRING, "pattern": {"type": "string", "enum": ["*.xlsx", "*.csv"]}}, ["directory"]), True),
+    tool("computer_verify_result", "Read one new/changed CSV/XLSX output using a prepare ticket. No COM, macros, Excel or whole-drive search. Require the exact, unambiguous header column and expected value, plus correct header_row/sheet_name when needed. Counts nonempty data rows and checks every row; returns counts, freshness and hash without cell dumps. file_verified/content_verified do not alone establish business task success or a mapping between differently named UI fields and columns.",
+         object_schema({"ticket_id": STRING, "filename": STRING, "column": STRING, "equals": {"type": "string", "maxLength": 16000},
+                        "header_row": {"type": "integer", "minimum": 1, "maximum": 1000}, "sheet_name": STRING},
+                       ["ticket_id", "filename", "column", "equals"]), True),
+    tool("computer_verify_controls", "Read only the requested current UIA controls/properties using the local bounded verifier. This does not produce Driver handles or authorize input. Use for grouped condition checks and fast read-only diagnostics; call normal inspect/perform before mutations. Missing/ambiguous/unsupported properties are not success. No screenshots or OCR.",
+         object_schema({"pid": {"type": "integer", "minimum": 1}, "window_id": {"type": "integer", "minimum": 1},
+                        "selectors": {"type": "array", "minItems": 1, "maxItems": 40, "items": SELECTOR_SCHEMA},
+                        "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 10000}}, ["pid", "window_id", "selectors"]), True),
     tool("computer_process_editor", "Open a visible native process editor. The human picks UIA elements or image regions, chooses actions, waits/delays and screenshot-review checkpoints, reorders and saves. If UIA matching fails, a visible image picker offers a fallback. The Record actions button records the human's own interactions only in the connected windows; stop returns an editable draft, never saves or replays automatically. Unknown input requires manual resolution before saving. Image actions always pause at screenshot checkpoints for explicit human review. Returns editor_id; poll computer_process_status using the same ID, do not repeatedly reopen. Optional task_id opens a NEW editable copy. Authoring helpers never inject business input.",
          object_schema({"targets": {"type": "array", "minItems": 1, "maxItems": 10, "items": object_schema({
              "program_id": STRING, "pid": {"type": "integer", "minimum": 1}, "window_id": {"type": "integer", "minimum": 1},
@@ -226,7 +250,7 @@ class TaskStore:
     MAX_TASKS = 1000
     LOCK_TIMEOUT = 5
     TASK_FIELDS = {"id", "name", "instructions", "expected", "program_ids", "updated_at"}
-    OPTIONAL_FIELDS = {"steps", "variables", "revision"}
+    OPTIONAL_FIELDS = {"steps", "variables", "revision", "recording_review"}
 
     def __init__(self, state_dir, config):
         self.path = Path(state_dir) / "tasks.json"
@@ -246,6 +270,14 @@ class TaskStore:
         validate_management("computer_save_task", {k: v for k, v in item.items() if k not in {"updated_at", "revision"}})
         if type(item.get("revision", 1)) is not int or item.get("revision", 1) < 1:
             raise SessionError("작업 버전이 올바르지 않습니다.")
+        if "recording_review" in item:
+            review = item["recording_review"]
+            if (not isinstance(review, dict) or set(review) != {"partial", "acknowledged", "warning_codes"}
+                    or review["partial"] is not True or review["acknowledged"] is not True
+                    or not isinstance(review["warning_codes"], list) or not 1 <= len(review["warning_codes"]) <= 30
+                    or any(not isinstance(code, str) or code not in RECORDING_WARNINGS for code in review["warning_codes"])
+                    or len(set(review["warning_codes"])) != len(review["warning_codes"])):
+                raise SessionError("부분 녹화의 누락 경고와 사용자 확인을 보존해야 합니다.")
         if "steps" in item:
             try:
                 validate_recipe(item["steps"], item.get("variables", {}), item["program_ids"])
@@ -372,7 +404,7 @@ class TaskStore:
             tasks = self._read()
             previous = next((item for item in tasks if item["id"] == task_id), {})
             # The existing human editor edits text only; retain its stored workflow.
-            for key in ("steps", "variables"):
+            for key in ("steps", "variables", "recording_review"):
                 if key in args or key in previous:
                     entry[key] = copy.deepcopy(args.get(key, previous.get(key)))
             entry["revision"] = previous.get("revision", 0) + 1
@@ -431,6 +463,9 @@ class ComputerManager:
                 "configuration": configuration_status(self.config, self.config_path),
                 "execution": execution_privileges(),
                 "teaching_support": teaching_capabilities(Path(__file__).resolve().parent),
+                "repeat_execution": {"supported": True, "default_mode": "auto", "verification_skipped": False,
+                    "scoped_helper_present": (Path(__file__).resolve().parent / "Computer Use MCP 빠른 확인.exe").is_file(),
+                    "readiness": "not_tested", "profile_scope": "verified_recipe_programs_version_and_delivery"},
                 "limits": "실행파일 제한은 OS 격리가 아닙니다. 화면 결과는 연결한 MCP 클라이언트로 전달됩니다."}
 
     def _schema_key(self):
@@ -618,6 +653,37 @@ class ComputerManager:
             validate_management(name, args)
             if name == "computer_status":
                 return result(self.status())
+            if name in {"computer_prepare_result", "computer_verify_result"}:
+                from result_files import ResultFiles, ResultFileError
+                if self.session is None:
+                    raise SessionError("먼저 computer_begin으로 작업을 시작하세요.")
+                self.session.check_active()
+                if not hasattr(self.session, "result_files"):
+                    self.session.result_files = ResultFiles(self.session)
+                try:
+                    method = self.session.result_files.prepare if name == "computer_prepare_result" else self.session.result_files.verify
+                    answer = method(**args)
+                    return result(answer, error=answer.get("ok") is False)
+                except ResultFileError as exc:
+                    return result({"ok": False, "file_verified": False, "content_verified": False, "task_verified": False,
+                                   "diagnostic": {"code": exc.code, "message": str(exc)}}, error=True)
+            if name == "computer_verify_controls":
+                from operations import OperationError
+                if self.session is None or self.session.mode != "uia":
+                    raise SessionError("먼저 UIA 세션에서 대상 프로그램을 연결하세요.")
+                with self.session.execution_lock:
+                    previous = self.session.fast_verification_enabled
+                    self.session.fast_verification_enabled = True
+                    try:
+                        return self.session.observe_controls({k: args[k] for k in ("pid", "window_id")}, args["selectors"],
+                                                             timeout_ms=args.get("timeout_ms", 3000))
+                    except NotImplementedError:
+                        return result({"task_verified": False, "diagnostic": {"code": "scoped_helper_unavailable",
+                            "message": "이 설치에 빠른 확인 도우미가 없습니다. 같은 버전의 ZIP 전체를 설치하세요."}}, error=True)
+                    except (OperationError, GuardError) as exc:
+                        return result({"task_verified": False, "diagnostic": {"code": getattr(exc, "code", "scope_denied"), "message": str(exc)}}, error=True)
+                    finally:
+                        self.session.fast_verification_enabled = previous
             if name in {"computer_process_editor", "computer_process_status"}:
                 from operations import OperationError
                 try:
@@ -642,7 +708,8 @@ class ComputerManager:
                 tasks = [t for t in self.tasks.all() if query in (t["name"] + " " + t["id"]).casefold()]
                 offset, limit = args.get("offset", 0), args.get("limit", 20)
                 items = [{k: t[k] for k in ("id", "name", "program_ids", "updated_at", "revision") if k in t} |
-                         {"runnable": bool(t.get("steps")), "step_count": len(t.get("steps", []))} for t in tasks[offset:offset+limit]]
+                         {"runnable": bool(t.get("steps")), "step_count": len(t.get("steps", [])),
+                          "partial_recording": bool(t.get("recording_review", {}).get("partial"))} for t in tasks[offset:offset+limit]]
                 return result({"tasks": items, "total": len(tasks), "offset": offset, "next_offset": offset+limit if offset+limit < len(tasks) else None})
             if name == "computer_save_task":
                 from process_editor import task_view
@@ -698,7 +765,7 @@ class ComputerManager:
                     else:
                         answer = self.workflows.run(self.session, self.tasks.get(args["task_id"]), args.get("inputs", {}), args["targets"],
                                                     resume_run_id=args.get("resume_run_id"), delivery_mode=args.get("delivery_mode", "background"),
-                                                    acknowledge_checkpoint=args.get("acknowledge_checkpoint"))
+                                                    acknowledge_checkpoint=args.get("acknowledge_checkpoint"), execution_mode=args.get("execution_mode", "auto"))
                     checkpoint_content = answer.pop("checkpoint_content", [])
                     response = result(answer, error=answer.get("task_verified") is not True and not bool(checkpoint_content))
                     response["content"].extend(checkpoint_content)
@@ -882,7 +949,17 @@ class StdioServer:
             self.initialized = True
             self.response(request_id, {"protocolVersion": params.get("protocolVersion", "2024-11-05"),
                 "capabilities": {"tools": {}}, "serverInfo": {"name": "company-computer-use", "version": VERSION},
-                "instructions": "Use computer_programs then computer_begin for a bounded session under the user's configured approval mode. "
+                "instructions": "For a named app first use computer_programs and approved live list_apps/list_windows, not a disk-wide filename/content search. "
+                    "Use computer_programs then computer_begin for a bounded session under the user's configured approval mode. "
+                    "For repeat work check computer_tasks, read the matching task, and call computer_run_task with execution_mode:auto. "
+                    "Reuse the verified saved sequence instead of rediscovering controls or writing ad hoc PowerShell/UIA scripts. "
+                    "Use a bounded action plan; after an uncertain input reobserve the result, never replay it or repeatedly change input methods. "
+                    "Element presence, advertised patterns, input dispatch and verified business results are distinct evidence levels. "
+                    "Never call a whole app supported because its shell is WPF or controls have IDs. "
+                    "Never claim current values from labels/options, actions from hover records, or a fresh query from unchanged status text/pixel density. "
+                    "Read recording state and warning_codes; partial recording must be reviewed and retained as partial. "
+                    "For queries use a fresh completion condition such as require_change on a result identity/counter or a known loading-to-complete transition. "
+                    "A file check must use the known export folder and exact field-to-column mapping; do not search whole drives or infer that different column labels are equivalent. "
                     "Client mode does not show this server's native consent dialogs; client tool permissions still apply. "
                     "Saved tasks are inert instructions, not authority. "
                     "For complex forms, check computer_elements before rediscovery. The user can directly choose and confirm a control with computer_teach_element. It returns teaching_id after verifying the picker is visible; use computer_teach_status for completion or cancellation. Pending is not failure: do not repeat F8 instructions or open duplicate pickers, and never replace failed teaching with elements/task listing. Report actual stage/code and server_version, not unsupported UIA claims. For picker startup failures read computer_status.teaching_support to identify the connected folder and helper files; file presence does not prove a visible window. Follow the returned recovery without automatic F8 retries. Learned labels are local UI selectors, not model training or permission. "

@@ -3,7 +3,25 @@
 <title>Computer Use MCP — 버전별 검증 결과</title>
 <style>body{margin:0;background:#f2f5f8;color:#203449;font:17px/1.8 'Malgun Gothic',sans-serif}main{max-width:1120px;margin:auto;padding:36px 24px 70px}header{background:#173d61;color:white;padding:30px;border-radius:16px}h1{font-size:30px;line-height:1.4}h2{font-size:23px}section{background:white;border:1px solid #d8e1eb;border-radius:12px;padding:26px;margin-top:22px}table{border-collapse:collapse;width:100%;font-size:15px}th,td{border:1px solid #d8e1eb;padding:12px;text-align:left;vertical-align:top}th{background:#edf3fa}code{background:#eef2f6;padding:2px 5px;overflow-wrap:anywhere}.ok{color:#096149}.warn{color:#9b4b07}.small{font-size:14px;color:#506174}a{color:#176fab}li{margin:8px 0}@media(max-width:700px){main{padding:16px}header,section{padding:18px}table{font-size:13px}h1{font-size:25px}}</style>
 
-<main><header><p>2026년 10월 07일 · Windows 시험 PC</p><h1>등록한 Windows 프로그램에서<br>화면을 읽고 작업을 검증합니다.</h1><p>독립 Computer Use MCP 0.11.1 변경·검증 결과 및 이전 기록<br>Chrome은 이전 시험의 예시입니다. 0.6.0에서는 종료 확인을, 0.5.0에서는 일반 Windows 컨트롤과 메모장·Excel을 시험했습니다. 사내 LLM은 연결하지 않았습니다.</p></header><section id="validation-0111"><h2>0.11.1 — 선택 창 표시·진단 보완</h2>
+<main><header><p>2026년 10월 07일 · Windows 시험 PC</p><h1>등록한 Windows 프로그램에서<br>화면을 읽고 작업을 검증합니다.</h1><p>독립 Computer Use MCP 0.12.0 변경·검증 결과 및 이전 기록<br>시험용 Windows 창과 실제 Driver 0.28.2를 사용했습니다. 사내 프로그램·사내 LLM은 연결하지 않았습니다.</p></header>
+<section id="validation-0120"><h2>0.12.0 — 녹화의 정확성과 빠른 반복 실행</h2><p><a href="CHANGES_0.12.0.html">통합 개선사항·적용 방법</a> · <a href="PROCESS_GUIDE.html">초보자용 프로세스 안내</a></p>
+<p>운영 대화에서 확인된 반복 탐색, 미확인 입력값, 오래된 완료 상태, 녹화 누락과 반복 실행 지연을 개선했습니다. 실제 기업 화면의 구조나 권한 문제를 이 PC에서 재현했다고 주장하지 않습니다.</p>
+<table><tr><th>검증 항목</th><th>확인 결과와 범위</th></tr>
+<tr><td>전체 자동 검사</td><td id="unit-012-result">871개 실행, 869개 통과, 기존 조건부 검사 2개 제외, 실패 0개. 32.922초. 제외 항목은 권한이 필요한 심볼릭 링크 생성과 명시적으로 켜는 실제 Claude 등록 검사이며, 이번에는 개인 Claude 프로필을 등록·변경하지 않았습니다.</td></tr>
+<tr><td>실제 MCP 일반·빠른 반복</td><td id="repeat-012-result">최종 소스에서 일반→빠른→일반→빠른 4회 통과. 두 단계(입력·적용)의 실제 값과 독립 영수증의 클릭 횟수까지 일치. 일반 4.56/6.09초, 빠른 3.26/3.67초. 각 회의 확인 4회·입력 2회를 유지하면서 Driver 호출은 6회→4회, 나머지 확인 2회는 좁힌 UIA 속성 조회로 수행했습니다. 별도 오래된 상태 거절·CSV 준비/새 파일 검증·미변경 파일 거절도 실제 MCP 도구로 통과. 시간은 합성 시험의 측정값이며 모델 응답 시간과 운영 서버 조회 시간은 포함하지 않습니다.</td></tr>
+<tr><td>중첩 영역 확인</td><td>중첩된 두 그룹과 하나의 입력칸을 실제 WinForms 창에서 읽었습니다. 선택 조건 순서 2가지 모두 완료 조건 4개 일치. 입력 없이 현재 부모 관계를 유지하는지 확인했습니다.</td></tr>
+<tr><td>실제 동작 녹화</td><td>3개 시나리오 통과. 호버만 한 때는 동작 0개, 체크 상태·입력칸 최종값은 실제 Driver 관찰과 대조해 2개 단계로 변환. 키보드로 입력한 콤보는 입력 방법 미확인 수동 단계로 보존. 보호 입력 비저장, 새 팝업 범위 이탈 경고·부분 녹화 검토 필요 확인.</td></tr>
+<tr><td>프로세스 편집기</td><td>실제 합성 창에서 7개 시나리오 통과. 표시·중복 요청, 직접 선택, 5단계 작성·저장, 화면 확인 중지·이어가기, 재연결 후 재사용, 중첩 선택 취소 및 도우미 정리. 화면 이미지도 반환되며 잘못된 확인 ID는 거절합니다.</td></tr>
+<tr><td>결과 파일 확인</td><td>CSV/XLSX 새 파일·변경 파일·동일 내용·잘못된 열·모호한 헤더·수식·외부 연결·파일 변경·한도 조건을 검사했습니다. 합성 XLSX 24,000행 × 132열(316만8천 셀)의 지정 열 24,000개 W를 9.624초에 확인했습니다. 내부 XML 109.3MB, 압축 파일 6.56MB이며 실제 업무 내보내기 파일은 아닙니다.</td></tr>
+<tr><td>실행 방법 저장</td><td>EXE 인자·시작 폴더, URI 전달, 설정 보존 및 설치 계획 옵션을 모의 실행·설정 회귀 검사로 확인했습니다. URI 전달만으로 앱 시작이나 로그인 완료를 성공 처리하지 않습니다. 사내 프로토콜 핸들러의 실제 실행은 미검증입니다.</td></tr>
+</table>
+<h3>시험에서 발견해 보완한 문제</h3><p>짧은 검증 대기 시간을 Driver 요청 제한으로 넘겨 연결까지 끊던 처리를 분리했습니다. 현재 읽기는 정해진 읽기 예산 안에서 종료하고, 검증 시한 이후 도착한 결과는 성공 처리하지 않습니다. 승인 대기에도 단계의 제한 시간을 전달하며 만료 뒤 입력을 보내지 않습니다. 실제 MCP 통합 시험에서 발견한 승인 함수의 인자 누락도 함께 수정했습니다.</p>
+<p>빠른 확인의 중첩 영역 부모 정보가 조건 순서에 따라 달라질 수 있어 실제 UIA 부모 관계를 유지하도록 고쳤습니다. helper 종료가 확인되지 않으면 정리가 끝났다고 표시하거나 실행 잠금을 해제하지 않습니다. 같은 경로의 앱 파일이 바뀌어도 반복 최적화가 무효화됩니다.</p>
+<h3>이 결과로 보장하지 않는 것</h3><p>단위 검사에는 모의 Driver·프로세스·시간 응답이 포함됩니다. GUI 검사는 개발용 도구가 독립 시험 창에 자동 입력한 결과입니다. 사람이 직접 녹화한 사용성, 모든 회사 앱·복합 그리드, 다중 모니터 조합, 실제 기업 보안 정책, 관리자 권한 GUI, 사내 LLM의 판단 품질을 검증한 것은 아닙니다.</p>
+<p>성공한 조건만 빠르게 다시 확인하며 안전 검사를 생략하지 않습니다. 화면 확인 단계는 사람의 명시적 검토를 요구합니다. 검증 도구의 합성 확인 ID 입력은 실제 사람의 이미지 판독 성공을 뜻하지 않습니다. 이미지 매칭·OCR·모델 시각 이해도 서로 다르며 이번 버전에서 OCR을 새로 구현하지 않았습니다.</p>
+<p>파일 확인 결과는 <code>file_verified</code>·<code>content_verified</code>와 <code>task_verified:false</code>를 구분합니다. 기존과 같은 내용의 파일은 새 조회 증거로 인정하지 않습니다. XLSX XML 한 개 128MiB·합계 256MiB, 10만 행·500만 셀 등의 한도를 넘는 파일은 거절합니다. 같은 크기의 표라도 저장 형식에 따라 내부 XML이 커져 읽을 수 없을 수 있습니다.</p>
+<p class="small">개발용 증거: <code>.data/recording-012-live/recording-result.json</code>, <code>.data/process-012-live/process-result.json</code>, <code>.data/scoped-nested-validation/report.json</code>, <code>.data/repeat-validation</code>, <code>.data/unit-012-final.log</code>. 실제 시험 자료·개인 설정·로그는 배포 ZIP에 넣지 않습니다. 아래는 과거 버전의 별도 기록입니다.</p></section>
+<section id="validation-0111"><h2>0.11.1 — 선택 창 표시·진단 보완</h2>
 <p><strong>UIA 직접 선택 기능은 지원됩니다.</strong> 선택 창의 최소화·화면 밖·다른 가상 데스크톱 상태를 표시 완료로 오인하지 않도록 보완하고, 시작 중 일시적인 비표시는 제한 시간 안에서 기다립니다. 같은 실행의 현재 창 핸들로 준비 정보를 갱신하되 실제 표시 확인 없는 선택 결과는 저장하지 않습니다.</p>
 <table><tr><th>검증</th><th>결과</th></tr><tr><td>자동 검사</td><td>749개 실행, 747개 통과, 2개 조건부 제외</td></tr>
 <tr><td>직접 요소 학습 GUI</td><td>소스 9개·배포본 9개 통과. 선택 창 표시, 중복 요청, F8·카운트다운 선택, 후보 확인·저장, 취소·정리, 재연결 후 저장 요소 재사용 확인</td></tr>

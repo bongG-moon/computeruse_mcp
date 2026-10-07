@@ -108,6 +108,11 @@ class InspectionTests(unittest.TestCase):
         self.assertEqual(data["controls"][0]["selector"]["within"], {"name": "검색 조건", "role": "Group"})
         self.assertEqual(runtime.calls[0][0], "get_window_state")
         self.assertFalse(runtime.calls[0][1]["include_screenshot"])
+        self.assertEqual(data["observation_scope"], {"kind": "driver_window_tree", "max_depth": 12, "max_elements": 600})
+        self.assertEqual(data["filter_scope"], "returned_controls_after_window_observation")
+        self.assertFalse(data["filters_reduce_uia_traversal"])
+        self.assertFalse(data["execution_verified"])
+        self.assertFalse(data["controls"][0]["execution_verified"])
     def test_search_does_not_match_current_input_values_or_guess_duplicate_scope(self):
         runtime = Runtime([{"element_index": 1, "label": "입력", "role": "Edit", "value": "사내 비공개 검색값"}])
         self.assertEqual(self.inspect(runtime, search="비공개")["structuredContent"]["inspection"]["controls"], [])

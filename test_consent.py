@@ -12,6 +12,7 @@ import time
 import unittest
 from unittest.mock import patch
 import uuid
+from types import SimpleNamespace, MethodType
 
 import consent
 
@@ -130,6 +131,64 @@ class ConsentTests(unittest.TestCase):
             self.assertLess(time.monotonic() - before, 1)
         self.assertTrue(child.terminated)
         self.assertTrue(broker.last_error)
+
+    def test_step_deadline_prevents_dialog_start_and_bounds_lock_wait(self):
+        broker = consent.ConsentBroker({}, self.root)
+        with patch.object(broker, "_spawn_dialog") as spawn:
+            self.assertFalse(broker.confirm("action", "title", "details", threading.Event(), request_deadline=time.monotonic()-1))
+            spawn.assert_not_called()
+            broker._confirm_lock.acquire()
+            try:
+                started = time.monotonic()
+                self.assertFalse(broker.confirm("action", "title", "details", threading.Event(), request_deadline=started+.02))
+                self.assertLess(time.monotonic()-started, .3)
+                spawn.assert_not_called()
+            finally:
+                broker._confirm_lock.release()
+
+    def test_real_consent_guard_runtime_and_broker_share_step_deadline(self):
+        from session_runtime import SessionRuntime
+        from test_server import TestGuard
+        from test_guard_performance import TimedTransport
+        for approved in (True, False):
+            with self.subTest(approved=approved):
+                folder = self.root / str(approved)
+                broker = consent.ConsentBroker({"approval_timeout_seconds": 300}, folder)
+                event = threading.Event()
+                session = SimpleNamespace(config={"approval": "each"}, stop_event=event, broker=broker,
+                                          _check_not_stopped=lambda: None, check_active=lambda: None)
+                session.confirm = MethodType(SessionRuntime.confirm, session)
+                transport = TimedTransport()
+                policy = {"driver": str(folder / "driver.exe"), "allowed_apps": [str(folder / "Editor.exe")],
+                    "run_dir": str(folder), "mode": "uia", "approval_mode": "each", "max_actions": 10}
+                guard = TestGuard(policy, transport, session)
+                target = {"pid": 100, "window_id": 200}
+                guard.call("get_window_state", target)
+                child = FakeChild()
+                durations = []
+                def spawn(request, response):
+                    payload = json.loads(request.read_text(encoding="utf-8"))
+                    durations.append(payload["timeout_seconds"])
+                    if approved:
+                        consent._atomic_json(response, {"nonce": payload["nonce"], "approved": True})
+                    return child
+                now = [10.0]
+                def advance(seconds): now[0] += seconds
+                with patch("consent.time.monotonic", side_effect=lambda: now[0]), patch.object(event, "wait", side_effect=advance), patch.object(broker, "_spawn_dialog", side_effect=spawn):
+                    answer = guard.call("set_value", {**target, "element_token": "fresh", "value": "value"}, timeout_seconds=.2)
+                self.assertLessEqual(durations[0], .2)
+                self.assertGreater(durations[0], 0)
+                self.assertTrue(child.terminated)
+                self.assertEqual(list((folder / "consent").glob("*.request.json")), [])
+                if approved:
+                    self.assertFalse(answer.get("isError", False))
+                    self.assertEqual(len(transport.calls), 2)
+                else:
+                    self.assertTrue(answer["isError"])
+                    self.assertEqual(answer["structuredContent"]["error_code"], "step_timeout")
+                    self.assertFalse(answer["structuredContent"]["input_sent"])
+                    self.assertEqual(len(transport.calls), 1)
+                    self.assertEqual(guard.action_count, 0)
 
     def test_closed_dialog_without_response_denies(self):
         broker = consent.ConsentBroker({}, self.root)

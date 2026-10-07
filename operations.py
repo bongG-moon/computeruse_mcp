@@ -30,7 +30,8 @@ ASSERTION_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "properties": {"selector": SELECTOR_SCHEMA,
                    "property": {"enum": ["value", "name", "selected", "enabled"]},
-                   "equals": {"type": ["string", "boolean", "integer", "number", "null"]}},
+                   "equals": {"type": ["string", "boolean", "integer", "number", "null"]},
+                   "require_change": {"type": "boolean", "description": "Require an observed change from the pre-action baseline before equality can pass. Read-only resume assertions cannot recreate a lost baseline."}},
     "required": ["selector", "property", "equals"],
 }
 OPERATION_SCHEMA = {
@@ -50,8 +51,14 @@ OPERATION_SCHEMA = {
         "option_order": {"type": "array", "minItems": 1, "maxItems": 30, "uniqueItems": True,
                          "items": {"type": "string", "minLength": 1, "maxLength": 1000},
                          "description": "select_option only. Exact option labels in observed or user-confirmed order; never infer or guess this order. Uses at most 12 verified Up/Down transitions without opening a native popup."},
+        "strategy": {"enum": ["edit_commit"], "description": "Explicit editable ComboBox strategy; never an automatic fallback."},
+        "edit_selector": SELECTOR_SCHEMA,
+        "commit_key": {"enum": ["ENTER", "TAB"]},
         "expect": {"type": "array", "minItems": 1, "maxItems": 20, "items": ASSERTION_SCHEMA},
-        "verification_timeout_ms": {"type": "integer", "minimum": 0, "maximum": 5000},
+        "verification_timeout_ms": {"type": "integer", "minimum": 0, "maximum": 60000,
+            "description": "Completion observation/polling deadline, default 10000ms. A running observation keeps its normal read budget within step_timeout_ms; late results do not pass. Zero means one normal bounded read."},
+        "poll_interval_ms": {"type": "integer", "minimum": 100, "maximum": 2000},
+        "step_timeout_ms": {"type": "integer", "minimum": 1, "maximum": 120000},
     },
     "required": ["operation"],
 }
@@ -68,6 +75,28 @@ def validate_selector(selector, allow_within=True):
     if "within" in selector:
         validate_selector(selector["within"], allow_within=False)
     return copy.deepcopy(selector)
+
+
+def validate_assertions(assertions):
+    if not isinstance(assertions, list) or not 1 <= len(assertions) <= 20:
+        raise OperationError("완료 조건 expect는 1~20개여야 합니다.")
+    for item in assertions:
+        if (not isinstance(item, dict) or not {"selector", "property", "equals"} <= set(item)
+                or set(item) - {"selector", "property", "equals", "require_change"}):
+            raise OperationError("완료 조건에는 selector, property, equals와 선택적인 require_change만 사용할 수 있습니다.")
+        validate_selector(item["selector"])
+        if item["property"] not in ("value", "name", "selected", "enabled"):
+            raise OperationError("지원하지 않는 완료 조건 속성입니다.")
+        value = item["equals"]
+        if type(value) not in (str, bool, int, float, type(None)) or (isinstance(value, float) and not math.isfinite(value)):
+            raise OperationError("equals는 유한한 JSON 기본 값이어야 합니다.")
+        if isinstance(value, str) and len(value) > 16000:
+            raise OperationError("완료 조건 문자열이 너무 깁니다.")
+        if item["property"] in ("selected", "enabled") and type(value) is not bool:
+            raise OperationError("selected와 enabled의 equals는 true 또는 false여야 합니다.")
+        if "require_change" in item and type(item["require_change"]) is not bool:
+            raise OperationError("require_change는 true 또는 false여야 합니다.")
+    return copy.deepcopy(assertions)
 
 
 def validate_step(step):
@@ -124,27 +153,22 @@ def validate_step(step):
             raise OperationError("option_order는 select_option에만 사용하는, 직접 관찰하거나 사용자가 확인한 중복 없는 1~30개 항목 순서입니다.")
         if step["value"] not in order:
             raise OperationError("선택할 value가 확인된 option_order에 없습니다.")
+    if any(key in step for key in ("strategy", "edit_selector", "commit_key")):
+        if (operation != "select_option" or step.get("strategy") != "edit_commit"
+                or step.get("commit_key") not in ("ENTER", "TAB") or "option_order" in step):
+            raise OperationError("edit_commit은 select_option에서 edit_selector와 ENTER/TAB 확정키를 명시해야 하며 option_order와 함께 사용할 수 없습니다.")
+        result["edit_selector"] = validate_selector(step.get("edit_selector"))
     if "expect" in step:
-        if not isinstance(step["expect"], list) or not 1 <= len(step["expect"]) <= 20:
-            raise OperationError("완료 조건 expect는 1~20개여야 합니다.")
-        for item in step["expect"]:
-            if not isinstance(item, dict) or set(item) != {"selector", "property", "equals"}:
-                raise OperationError("완료 조건에는 selector, property, equals가 필요합니다.")
-            validate_selector(item["selector"])
-            if item["property"] not in ("value", "name", "selected", "enabled"):
-                raise OperationError("지원하지 않는 완료 조건 속성입니다.")
-            value = item["equals"]
-            if type(value) not in (str, bool, int, float, type(None)) or (isinstance(value, float) and not math.isfinite(value)):
-                raise OperationError("equals는 유한한 JSON 기본 값이어야 합니다.")
-            if isinstance(value, str) and len(value) > 16000:
-                raise OperationError("완료 조건 문자열이 너무 깁니다.")
-            if item["property"] in ("selected", "enabled") and type(value) is not bool:
-                raise OperationError("selected와 enabled의 equals는 true 또는 false여야 합니다.")
+        result["expect"] = validate_assertions(step["expect"])
     if operation in ("click", "double_click", "right_click", "press_key", "hotkey", "assert") and not step.get("expect"):
         raise OperationError("클릭, 키 입력, assert에는 실제 완료를 확인할 expect 조건이 필요합니다.")
-    timeout = step.get("verification_timeout_ms", 1200)
-    if type(timeout) is not int or not 0 <= timeout <= 5000:
-        raise OperationError("verification_timeout_ms는 0~5000 사이 정수여야 합니다.")
+    timeout = step.get("verification_timeout_ms", 10000)
+    if type(timeout) is not int or not 0 <= timeout <= 60000:
+        raise OperationError("verification_timeout_ms는 0~60000 사이 정수여야 합니다.")
+    if type(step.get("poll_interval_ms", 150)) is not int or not 100 <= step.get("poll_interval_ms", 150) <= 2000:
+        raise OperationError("poll_interval_ms는 100~2000 사이 정수여야 합니다.")
+    if type(step.get("step_timeout_ms", 30000)) is not int or not 1 <= step.get("step_timeout_ms", 30000) <= 120000:
+        raise OperationError("step_timeout_ms는 1~120000 사이 정수여야 합니다.")
     return result
 
 
@@ -158,7 +182,8 @@ def verification_step(step):
         checks.insert(0, {"selector": step["selector"], "property": "selected",
                           "equals": step["checked"] if step["operation"] == "set_checked" else True})
     return {"operation": "assert", "expect": checks,
-            "verification_timeout_ms": step.get("verification_timeout_ms", 1200)}
+            "verification_timeout_ms": step.get("verification_timeout_ms", 10000),
+            **{key: step[key] for key in ("poll_interval_ms", "step_timeout_ms") if key in step}}
 
 
 def _payload(answer):
@@ -273,6 +298,7 @@ class Operations:
         guard = getattr(self.runtime, "guard", None)
         observed_targets = getattr(guard, "observed_targets", set())
         if (reuse_verified is True and step["operation"] != "assert" and previous is not None
+                and not any(check.get("require_change") for check in step.get("expect", []))
                 and previous["target"] == target and time.monotonic() - previous["observed_at"] < 0.5
                 and (target["pid"], target["window_id"]) in observed_targets):
             initial = previous
@@ -284,14 +310,40 @@ class Operations:
                                           "observed_at": execution.observed_at, "limits": execution.observation_limits}
         return result
 
+    def wait_for_state(self, assertions, target, *, timeout_ms, poll_interval_ms=250):
+        """Read-only property wait; changes are relative to this wait's start."""
+        if (not isinstance(target, dict) or set(target) != {"pid", "window_id"}
+                or any(type(value) is not int or value < 1 for value in target.values())):
+            raise OperationError("현재 승인한 창의 pid/window_id가 필요합니다.", "invalid_target")
+        if self.runtime.mode != "uia":
+            raise OperationError("상태 대기는 UIA 세션에서 실행하세요.", "unsupported_mode")
+        if type(timeout_ms) is not int or not 0 <= timeout_ms <= 60000:
+            raise OperationError("상태 대기 제한 시간 timeout_ms는 0~60000ms로 지정하세요.")
+        self._verified_observation = None
+        step = validate_step({"operation": "assert", "expect": assertions,
+            "verification_timeout_ms": timeout_ms, "poll_interval_ms": poll_interval_ms,
+            "step_timeout_ms": max(30000, timeout_ms)})
+        execution = _Execution(self.runtime, step, dict(target), "background", baseline_at_start=True)
+        result = execution.run()
+        result["operation"] = "wait_for_state"
+        if result["status"] == "failed" and result["diagnostic"]["code"] == "verification_failed":
+            result["diagnostic"]["code"] = "state_wait_timeout"
+        return result
+
 
 class _Execution:
-    def __init__(self, runtime, step, target, delivery, initial_observation=None):
+    def __init__(self, runtime, step, target, delivery, initial_observation=None, baseline_at_start=False):
         self.runtime, self.step, self.target, self.delivery = runtime, step, target, delivery
         self.started = time.monotonic()
+        self.deadline = self.started + step.get("step_timeout_ms", 30000) / 1000
+        self.observation_deadline = None
+        self.baseline_at_start = baseline_at_start
+        self.baselines = {}
+        self.change_seen = set()
         self.metrics = {"tool_calls": 0, "observations": 0, "discovery_calls": 0, "mutations": 0,
                         "observation_ms": 0, "discovery_ms": 0, "action_ms": 0, "expanded_observations": 0,
-                        "reused_observations": 0, "focus_actions": 0, "focus_ms": 0}
+                        "reused_observations": 0, "focus_actions": 0, "focus_ms": 0,
+                        "scoped_observations": 0}
         self.dispatched = False
         self.focus_dispatched = False
         self.focus_attempted = False
@@ -306,8 +358,19 @@ class _Execution:
         self.observed_at = 0
         self.observation_limits = (12, 600)
 
-    def _call(self, name, args, mutation=False):
+    def _remaining(self):
         self.runtime.check_active()
+        now = time.monotonic()
+        if now >= self.deadline:
+            raise OperationError("단계 전체 제한 시간이 지났습니다. 후속 입력을 보내지 않았습니다.", "step_timeout")
+        # A short polling deadline must not abort an otherwise healthy Driver
+        # request: its transport timeout closes the entire Driver connection.
+        # In-flight reads retain the normal runtime budget, bounded by this
+        # whole-step deadline. Verification separately rejects late answers.
+        return max(1, math.floor((self.deadline - now) * 1000 + 1e-6))
+
+    def _call(self, name, args, mutation=False):
+        remaining = self._remaining()
         began = time.monotonic()
         self.metrics["tool_calls"] += 1
         discovery = name == "list_windows"
@@ -324,10 +387,13 @@ class _Execution:
             else:
                 self.dispatched = True  # Unknown exceptions may follow actual dispatch.
         try:
-            answer = self.runtime.call(name, args)
+            bounded = getattr(self.runtime, "call_with_timeout", None)
+            answer = bounded(name, args, timeout_ms=remaining) if callable(bounded) else self.runtime.call(name, args)
         except Exception as error:
             if not mutation:
                 self.read_failed = True
+            if isinstance(error, OperationError):
+                raise
             raise OperationError(str(error)[:1000], "mutation_error" if mutation else "observation_error") from error
         finally:
             duration = round((time.monotonic() - began) * 1000, 2)
@@ -340,6 +406,15 @@ class _Execution:
                 self.focus_dispatched = previous_focus
             else:
                 self.dispatched = previous_dispatched
+        # A guard refusal can arrive after an approval used the remaining
+        # budget. Preserve its explicit no-input evidence before reporting the
+        # deadline; earlier successful mutations in this step remain recorded.
+        try:
+            self._remaining()
+        except Exception:
+            if not mutation:
+                self.read_failed = True
+            raise
         if answer.get("isError"):
             if not mutation:
                 self.read_failed = True
@@ -373,6 +448,8 @@ class _Execution:
                 return snapshot
         for depth, count in ((12, 600), (32, 5000)):
             if depth == 32:
+                if self.observation_deadline is not None and time.monotonic() >= self.observation_deadline:
+                    raise OperationError("확인 제한 시간이 지나 추가 화면 탐색을 시작하지 않았습니다.", "verification_timeout")
                 self.metrics["expanded_observations"] += 1
             snapshot = self._capture(target, depth, count)
             limited = _limited(snapshot, depth, count)
@@ -399,6 +476,8 @@ class _Execution:
         raise AssertionError("observation loop exhausted")
 
     def _handle(self, element, snapshot):
+        if snapshot.get("scoped_observation") is True or snapshot.get("read_only") is True:
+            raise OperationError("속성 확인용 관찰은 입력용 Driver 핸들이 아닙니다. 새 Driver 관찰이 필요합니다.", "read_only_observation")
         if element.get("synthetic_ancestor") is True or (type(element.get("element_index")) is int and element["element_index"] < 0):
             raise OperationError("복원된 상위 영역은 선택 범위 확인용이며 직접 조작할 수 없습니다.", "read_only_ancestor")
         if element.get("enabled") is False:
@@ -468,6 +547,31 @@ class _Execution:
                 return snapshot, False
         return snapshot, True
 
+    def _editable_combo_child(self, snapshot):
+        combo = _unique(snapshot, self.step["selector"])
+        edit = _unique(snapshot, self.step["edit_selector"])
+        if (combo.get("role") != "ComboBox" or combo.get("enabled") is False
+                or not _descendant(edit, combo, _elements(snapshot))):
+            raise OperationError("입력칸이 현재 선택 상자의 자식인지 확인하지 못했습니다.", "combo_edit_not_descendant")
+        if (edit.get("role") not in ("Edit", "TextBox") or edit.get("enabled") is not True
+                or edit.get("read_only") is True or edit.get("is_read_only") is True
+                or edit.get("is_password") is True or not isinstance(edit.get("actions"), list)
+                or "set_value" not in edit["actions"]):
+            raise OperationError("선택 상자의 입력칸이 활성·편집 가능한 일반 입력 요소인지 확인하지 못했습니다.", "unsupported_combo_edit")
+        return edit
+
+    def _edit_commit(self, snapshot):
+        self.strategy = "edit_commit"
+        edit = self._editable_combo_child(snapshot)
+        self._mutate("set_value", edit, snapshot, value=self.step["value"])
+        # A fresh Driver snapshot is mandatory: the preceding value input
+        # consumed its handles, and a native property read supplies none.
+        snapshot = self._observe([self.step["selector"], self.step["edit_selector"]])
+        edit = self._editable_combo_child(snapshot)
+        if edit.get("value") != self.step["value"]:
+            raise OperationError("선택 상자 내부 입력값을 확인하지 못해 확정키를 보내지 않았습니다.", "combo_edit_value_unconfirmed")
+        self._mutate("press_key", edit, snapshot, key=self.step["commit_key"])
+
     def _evaluate(self, snapshot, assertions):
         checks = []
         for assertion in assertions:
@@ -480,6 +584,18 @@ class _Execution:
                 check["observed"] = actual
                 # Missing false/null values cannot count as a satisfied check.
                 check["passed"] = present and type(actual) is type(assertion["equals"]) and actual == assertion["equals"]
+                if assertion.get("require_change"):
+                    key = self._assertion_key(assertion)
+                    if key not in self.baselines:
+                        check.update(passed=False, reason="change_baseline_required", change_observed=False)
+                    else:
+                        previous = self.baselines[key]
+                        if present and (type(actual) is not type(previous) or actual != previous):
+                            self.change_seen.add(key)
+                        check["change_observed"] = key in self.change_seen
+                        check["passed"] = check["passed"] and check["change_observed"]
+                        if not check["change_observed"]:
+                            check["reason"] = "change_not_observed"
                 if not present:
                     check["reason"] = "property_unavailable"
             except OperationError as error:
@@ -488,18 +604,91 @@ class _Execution:
         self.checks = checks
         return bool(checks) and all(c["passed"] for c in checks)
 
+    @staticmethod
+    def _assertion_key(assertion):
+        return json.dumps({key: assertion[key] for key in ("selector", "property")}, sort_keys=True, ensure_ascii=False)
+
+    def _baseline(self, snapshot, assertions):
+        for assertion in assertions:
+            if not assertion.get("require_change"):
+                continue
+            element = _unique(snapshot, assertion["selector"])
+            prop = assertion["property"]
+            present = ("name" in element or "label" in element) if prop == "name" else prop in element
+            if not present:
+                raise OperationError("변화 검증에 필요한 입력 전 속성을 읽지 못했습니다.", "change_baseline_unavailable")
+            self.baselines[self._assertion_key(assertion)] = copy.deepcopy(_name(element) if prop == "name" else element[prop])
+
+    def _observe_assertions(self, assertions):
+        selectors = [item["selector"] for item in assertions]
+        scoped = getattr(self.runtime, "observe_controls", None)
+        if not callable(scoped):
+            return self._observe(selectors)
+        started = time.monotonic()
+        available = True
+        try:
+            answer = scoped(dict(self.target), copy.deepcopy(selectors), timeout_ms=self._remaining())
+        except NotImplementedError:
+            available = False
+            return self._observe(selectors)
+        except Exception as error:
+            self.read_failed = True
+            raise OperationError(str(error)[:1000], getattr(error, "code", "observation_error")) from error
+        finally:
+            if available:
+                self.metrics["observations"] += 1
+                self.metrics["scoped_observations"] += 1
+                self.metrics["observation_ms"] += round((time.monotonic() - started) * 1000, 2)
+        # Native property snapshots never refresh Driver handles or the
+        # adjacent-step input cache, even if a provider includes token-like data.
+        self.snapshot = None
+        try:
+            self._remaining()
+            data = _payload(answer)
+            if answer.get("isError"):
+                raise OperationError("대상 속성 확인이 실패했습니다. 전체 창 재탐색으로 자동 전환하지 않습니다.", "scoped_observation_failed")
+            if (any(data.get(key) != value for key, value in self.target.items())
+                    or data.get("read_only") is not True or data.get("scoped_observation") is not True
+                    or data.get("scope_complete") is not True):
+                raise OperationError("속성 관찰의 대상 또는 확인 범위가 불완전합니다.", "scoped_observation_incomplete")
+            _elements(data)
+            return data
+        except Exception:
+            self.read_failed = True
+            raise
+
     def _verify(self, assertions, initial=None):
-        deadline = time.monotonic() + self.step.get("verification_timeout_ms", 1200) / 1000
-        for attempt in range(3):
-            snapshot = initial if attempt == 0 and initial is not None else self._observe([a["selector"] for a in assertions])
-            if self._evaluate(snapshot, assertions):
-                return True
-            if time.monotonic() >= deadline or attempt == 2:
-                break
-            self.runtime.check_active()
-            self.runtime.stop_event.wait(min(0.15, max(0, deadline - time.monotonic())))
-            self.runtime.check_active()
-        return False
+        timeout = self.step.get("verification_timeout_ms", 10000)
+        deadline = min(self.deadline, time.monotonic() + timeout / 1000)
+        self.observation_deadline = deadline if timeout else None  # zero means one bounded read
+        first = True
+        try:
+            while True:
+                self._remaining()
+                snapshot = initial if first and initial is not None else self._observe_assertions(assertions)
+                if timeout and time.monotonic() >= deadline:
+                    raise OperationError("완료 확인 제한 시간이 지난 뒤 도착한 관찰은 성공으로 판정하지 않았습니다.", "verification_timeout")
+                if first and self.baseline_at_start:
+                    self._baseline(snapshot, assertions)
+                if self._evaluate(snapshot, assertions):
+                    return True
+                ambiguous = next((check["reason"] for check in self.checks
+                                  if check.get("reason") in ("ambiguous_selector", "ambiguous_scope")), None)
+                if ambiguous:
+                    self.read_failed = True
+                    raise OperationError("완료 조건의 요소가 여러 개여서 판정할 수 없습니다. 추가 관찰이나 입력을 반복하지 않았습니다.", ambiguous)
+                first = False
+                if not timeout or time.monotonic() >= deadline:
+                    return False
+                self.runtime.stop_event.wait(min(self.step.get("poll_interval_ms", 150)/1000,
+                                                 max(0, deadline-time.monotonic())))
+                self.runtime.check_active()
+                if time.monotonic() >= deadline:
+                    if time.monotonic() >= self.deadline:
+                        self._remaining()
+                    return False
+        finally:
+            self.observation_deadline = None
 
     def _result(self, status, code, message):
         self.metrics["elapsed_ms"] = round((time.monotonic() - self.started) * 1000, 2)
@@ -521,19 +710,27 @@ class _Execution:
         try:
             self.runtime.check_active()
             if self.step["operation"] == "assert":
+                if any(check.get("require_change") for check in assertions) and not self.baseline_at_start:
+                    raise OperationError("이전 동작 전의 기준값이 없어 변화 여부를 재검증할 수 없습니다. 입력을 재실행하지 않았습니다.", "change_baseline_required")
                 passed = self._verify(assertions)
             else:
                 operation = self.step["operation"]
                 window_key = operation in ("press_key", "hotkey") and self.step.get("key_target") == "window"
                 selector = self.step.get("selector")
-                snapshot = self._observe([] if window_key else [selector])
+                selectors = [] if window_key else [selector]
+                selectors += [check["selector"] for check in assertions if check.get("require_change")]
+                if self.step.get("strategy") == "edit_commit":
+                    selectors.append(self.step["edit_selector"])
+                snapshot = self._observe(selectors)
+                self._baseline(snapshot, assertions)
+                requires_change = any(check.get("require_change") for check in assertions)
                 element = None if window_key else _unique(snapshot, selector)
                 if operation == "set_value":
                     if element.get("role") not in ("Edit", "Document", "TextBox") or element.get("read_only") is True or element.get("is_read_only") is True:
                         raise OperationError("set_value는 편집 가능한 입력칸에만 사용할 수 있습니다. 선택 상자는 select_option을 사용하세요.", "unsupported_control")
                     if "actions" in element and "set_value" not in element["actions"]:
                         raise OperationError("이 입력칸은 값 변경 기능을 제공하지 않습니다.", "unsupported_control")
-                    if element.get("value") == self.step["value"] and "value" in element:
+                    if element.get("value") == self.step["value"] and "value" in element and not requires_change:
                         passed = self._verify(assertions, snapshot)
                         return self._result("verified" if passed else "failed", "already_satisfied" if passed else "verification_failed", "현재 값과 완료 조건을 확인했습니다.")
                     self._mutate("set_value", element, snapshot, value=self.step["value"])
@@ -566,9 +763,14 @@ class _Execution:
                 else:
                     if element.get("role") != "ComboBox":
                         raise OperationError("select_option은 ComboBox 선택 상자에만 사용할 수 있습니다. 목록·탭·트리의 항목은 select_item과 해당 항목의 selector로 지정하세요.", "unsupported_control")
-                    if element.get("value") == self.step["value"] and "value" in element:
+                    if element.get("value") == self.step["value"] and "value" in element and not requires_change:
                         passed = self._verify(assertions, snapshot)
                         return self._result("verified" if passed else "failed", "already_satisfied" if passed else "verification_failed", "현재 선택값과 완료 조건을 확인했습니다.")
+                    if self.step.get("strategy") == "edit_commit":
+                        self._edit_commit(snapshot)
+                        passed = self._verify(assertions)
+                        return self._result("verified" if passed else "failed", "verified" if passed else "verification_failed",
+                                            "확정키 후 부모 선택값과 완료 조건을 확인했습니다." if passed else "입력·확정 후 부모 선택값을 확인하지 못했습니다.")
                     if "option_order" in self.step:
                         snapshot, expected_transition = self._select_known_order(snapshot, element)
                         if not expected_transition:
@@ -606,7 +808,7 @@ class _Execution:
             code = getattr(error, "code", "session_unavailable")
             # One read-only recovery attempt can document current conditions;
             # even if they match, an errored mutation stays unknown, never replayed.
-            if self.dispatched and not self.no_parent_recovery and not self.read_failed and code not in ("observation_error", "driver_timeout", "stopped", "session_unavailable"):
+            if self.dispatched and not self.no_parent_recovery and not self.read_failed and code not in ("observation_error", "driver_timeout", "stopped", "session_unavailable", "step_timeout", "verification_timeout"):
                 try:
                     snapshot = self._observe([a["selector"] for a in assertions])
                     self._evaluate(snapshot, assertions)

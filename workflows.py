@@ -5,6 +5,7 @@ import copy
 from contextlib import contextmanager, nullcontext
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -116,6 +117,8 @@ class WorkflowRunner:
     OPTIONAL_FIELDS = {"checkpoint"}
     def __init__(self, state_dir):
         self.root = Path(state_dir) / "workflows"
+        from repeat_profiles import RepeatProfiles
+        self.repeat_profiles = RepeatProfiles(state_dir)
 
     def _path(self, run_id):
         if not isinstance(run_id, str) or not re.fullmatch(r"[a-f0-9]{32}", run_id):
@@ -215,14 +218,50 @@ class WorkflowRunner:
                 else:
                     fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
-    def run(self, runtime, task, inputs, targets, *, resume_run_id=None, delivery_mode="background", acknowledge_checkpoint=None):
+    def run(self, runtime, task, inputs, targets, *, resume_run_id=None, delivery_mode="background", acknowledge_checkpoint=None, execution_mode="auto"):
         # Nested low-level calls use the same reentrant runtime lock. Emergency
         # stop never acquires this lock, so a composite operation stays cancellable.
         with getattr(runtime, "execution_lock", nullcontext()):
-            return self._run(runtime, task, inputs, targets, resume_run_id=resume_run_id, delivery_mode=delivery_mode,
-                             acknowledge_checkpoint=acknowledge_checkpoint)
+            if execution_mode not in {"auto", "standard", "fast"}:
+                raise WorkflowError("execution_mode는 auto, standard, fast 중 하나입니다.")
+            signature = self.repeat_profiles.signature(task, runtime.programs, delivery_mode)
+            profile = self.repeat_profiles.read(signature)
+            use_fast = execution_mode != "standard" and profile is not None and resume_run_id is None
+            previous_mode = getattr(runtime, "fast_verification_enabled", False)
+            runtime.fast_verification_enabled = use_fast
+            try:
+                metrics = {"measured_steps": 0}
+                answer = self._run(runtime, task, inputs, targets, resume_run_id=resume_run_id, delivery_mode=delivery_mode,
+                                   acknowledge_checkpoint=acknowledge_checkpoint, metrics=metrics)
+                answer["metrics"] = metrics
+                answer["execution"] = {"requested_mode": execution_mode, "mode": "fast" if use_fast else "standard",
+                    "prior_verified_runs": profile.get("successes", 0) if profile else 0,
+                    "profile_matched": profile is not None, "checks_skipped": False,
+                    "reason": "verified_recipe_reused" if use_fast else "resume_reobserves" if resume_run_id else
+                              "standard_requested" if execution_mode == "standard" else "first_run_or_changed_recipe",
+                    "fixed_delay_ms": sum(s.get("duration_ms", 0) for s in task.get("steps", []) if s.get("operation") == "delay")}
+                try:
+                    # Incomplete/uncertain work disables the optimization until
+                    # a later full verified run. It never triggers a replay.
+                    self.repeat_profiles.record(signature, answer)
+                except (OSError, ValueError):
+                    answer["execution"]["profile_saved"] = False
+                else:
+                    answer["execution"]["profile_saved"] = True
+                return answer
+            except Exception:
+                # Validation/binding failures before the persisted run also
+                # withdraw the optimization hint. Do not retain exception text
+                # or submitted input values in this performance profile.
+                try:
+                    self.repeat_profiles.record(signature, {"task_verified": False, "status": "rejected"})
+                except (OSError, ValueError):
+                    pass
+                raise
+            finally:
+                runtime.fast_verification_enabled = previous_mode
 
-    def _run(self, runtime, task, inputs, targets, *, resume_run_id=None, delivery_mode="background", acknowledge_checkpoint=None):
+    def _run(self, runtime, task, inputs, targets, *, resume_run_id=None, delivery_mode="background", acknowledge_checkpoint=None, metrics=None):
         from operations import Operations, verification_step
         if runtime.mode != "uia":
             raise WorkflowError("검증형 반복 작업은 현재 UIA 방식에서만 지원합니다.")
@@ -324,6 +363,17 @@ class WorkflowRunner:
             started = time.monotonic()
             latest = None
             stage = "resume_verification"
+            def measured(result):
+                observed = result.get("metrics", {})
+                if metrics is not None and isinstance(observed, dict) and observed:
+                    metrics["measured_steps"] += 1
+                    for key in ("tool_calls", "observations", "discovery_calls", "mutations", "observation_ms",
+                                "discovery_ms", "action_ms", "expanded_observations", "reused_observations",
+                                "focus_actions", "focus_ms", "scoped_observations", "elapsed_ms"):
+                        value = observed.get(key)
+                        if type(value) in (int, float) and math.isfinite(value) and value >= 0:
+                            metrics[key] = round(metrics.get(key, 0) + value, 2)
+                return result
             def save(status):
                 record.update(status=status, updated_at=utc_now(), duration_ms=round((time.monotonic()-started)*1000, 2))
                 atomic_json(path, record)
@@ -334,12 +384,16 @@ class WorkflowRunner:
                             "diagnostic": {"code": "image_action_uncertain", "automatic_replay": False,
                                            "message": "중단된 이미지 입력의 적용 여부를 자동 판단할 수 없습니다. 입력을 재실행하지 않았습니다."}}
                 if item["operation"] == "wait_for_image":
-                    return execute_image_step(runtime, {**operation_step(item), "timeout_ms": 0}, resolve(item))
+                    return measured(execute_image_step(runtime, {**operation_step(item), "timeout_ms": 0}, resolve(item)))
                 if item["operation"] in {"delay", "checkpoint"}:
                     return {"task_verified": True, "input_dispatched": False}
                 if item["operation"] == "wait_for_element":
-                    return execute_process_step(runtime, {**operation_step(item), "timeout_ms": 0}, resolve(item))
-                return engine.execute(verification_step(operation_step(item)), resolve(item), delivery_mode=delivery_mode)
+                    return measured(execute_process_step(runtime, {**operation_step(item), "timeout_ms": 0}, resolve(item)))
+                if item["operation"] == "wait_for_state":
+                    # A past change baseline is not persisted; assertions with
+                    # require_change deliberately stay unverified on resume.
+                    return measured(engine.execute({"operation": "assert", "expect": item["expect"]}, resolve(item), delivery_mode=delivery_mode))
+                return measured(engine.execute(verification_step(operation_step(item)), resolve(item), delivery_mode=delivery_mode))
             def check_prior(index):
                 for candidate in range(index-1, -1, -1):
                     # A successfully delivered image mutation intentionally
@@ -356,7 +410,7 @@ class WorkflowRunner:
                               "target_hash": digest({"session_id": runtime.id, **target})}
                 record["checkpoint"] = checkpoint
                 save("running")
-                captured = execute_process_step(runtime, operation_step(item), target)
+                captured = measured(execute_process_step(runtime, operation_step(item), target))
                 checkpoint["capture_available"] = captured.pop("checkpoint_ready", False) is True
                 images = captured.pop("checkpoint_content", [])
                 save("needs_review")
@@ -411,6 +465,7 @@ class WorkflowRunner:
                         engine = Operations(runtime)  # Never reuse a pre-wait observation for later input.
                     else:
                         latest = engine.execute(operation_step(item), target, delivery_mode=delivery_mode, reuse_verified=True)
+                    measured(latest)
                     if latest.get("task_verified") is not True and not (item["operation"] in IMAGE_MUTATIONS
                             and latest.get("verification_deferred") is True and latest.get("input_dispatched") is True):
                         save("needs_review")

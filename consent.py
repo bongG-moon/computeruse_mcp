@@ -107,10 +107,19 @@ class ConsentBroker:
         except (OSError, subprocess.TimeoutExpired):
             return False
 
-    def confirm(self, kind: str, title: str, details: str, stop_event: threading.Event) -> bool:
+    def confirm(self, kind: str, title: str, details: str, stop_event: threading.Event, *, request_deadline=None) -> bool:
         """Show a real dialog, then erase the sensitive exchange after child exit."""
-        while not self._confirm_lock.acquire(timeout=0.05):
-            if self._stopped(stop_event):
+        if request_deadline is not None and (type(request_deadline) not in (int, float) or not math.isfinite(request_deadline)):
+            self.last_error = "승인 요청의 제한 시간을 확인할 수 없습니다."
+            return False
+        def expired():
+            return request_deadline is not None and time.monotonic() >= request_deadline
+        if expired():
+            self.last_error = "단계 시간이 지나 승인을 시작하지 않았습니다."
+            return False
+        while not self._confirm_lock.acquire(timeout=min(.05, max(0, request_deadline-time.monotonic())) if request_deadline is not None else .05):
+            if self._stopped(stop_event) or expired():
+                if expired(): self.last_error = "단계 시간이 지나 승인 대기를 취소했습니다."
                 return False
         child = None
         request = response = None
@@ -118,19 +127,22 @@ class ConsentBroker:
         outcome = "stopped"
         nonce = uuid.uuid4().hex + uuid.uuid4().hex
         try:
-            if not self._stopped(stop_event):
+            if not self._stopped(stop_event) and not expired():
                 self.last_error = ""
                 duration = _timeout(self.config)
+                deadline = time.monotonic() + duration
+                if request_deadline is not None:
+                    deadline = min(deadline, request_deadline)
+                    duration = max(0, deadline-time.monotonic())
                 request = self.run_dir / "consent" / (nonce + ".request.json")
                 response = request.with_name(nonce + ".response.json")
                 _atomic_json(request, {"nonce": nonce, "kind": str(kind), "title": str(title),
                                        "details": str(details), "timeout_seconds": duration})
                 with self._children_lock:
-                    if not self._stopped(stop_event):
+                    if not self._stopped(stop_event) and time.monotonic() < deadline:
                         child = self._spawn_dialog(request, response)
                         self._children[id(child)] = child
                         self._pending_exchanges[id(child)] = (request, response)
-                deadline = time.monotonic() + duration
                 while child is not None and not self._stopped(stop_event):
                     if time.monotonic() >= deadline:
                         outcome = "timeout"
@@ -181,7 +193,7 @@ class ConsentBroker:
                 except OSError:
                     self.last_error = "승인 결과 기록을 저장하지 못했습니다."
             self._confirm_lock.release()
-        return accepted and not self._stopped(stop_event)
+        return accepted and not self._stopped(stop_event) and not expired()
 
     def close(self) -> None:
         self._closed.set()

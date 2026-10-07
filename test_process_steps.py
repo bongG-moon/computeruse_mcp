@@ -86,6 +86,30 @@ class StepTests(unittest.TestCase):
                 self.wait(runtime, timeout_ms=60000)
         self.assertEqual(len(runtime.calls), 1)
 
+    def test_element_wait_observation_receives_remaining_budget_and_rejects_late_success(self):
+        now = [1.0]
+        runtime = StepRuntime()
+        def late(name, args, *, timeout_ms):
+            self.assertEqual(timeout_ms, 30000)
+            now[0] += .301
+            return {"structuredContent": {**TARGET, "elements": [{"name": "준비", "role": "Button"}]}}
+        runtime.call_with_timeout = mock.Mock(side_effect=late)
+        with mock.patch("process_steps.time.monotonic", side_effect=lambda: now[0]):
+            result = self.wait(runtime)
+        self.assertFalse(result["task_verified"])
+        self.assertEqual(result["diagnostic"]["code"], "element_wait_timeout")
+        self.assertEqual(runtime.call_with_timeout.call_count, 1)
+
+    def test_element_wait_never_observes_again_after_last_interval_uses_budget(self):
+        now = [1.0]
+        runtime = StepRuntime([[]])
+        def advance(seconds):
+            now[0] += seconds
+        with mock.patch("process_steps.time.monotonic", side_effect=lambda: now[0]), mock.patch.object(runtime.stop_event, "wait", advance):
+            result = self.wait(runtime, timeout_ms=100)
+        self.assertEqual(result["diagnostic"]["code"], "element_wait_timeout")
+        self.assertEqual(len(runtime.calls), 1)
+
     def test_fixed_delay_is_cancellable_and_never_accesses_a_screen(self):
         runtime = StepRuntime()
         result = execute_process_step(runtime, {"operation": "delay", "duration_ms": 0}, TARGET)

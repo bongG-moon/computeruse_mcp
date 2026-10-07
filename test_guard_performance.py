@@ -106,6 +106,52 @@ class GuardPerformanceTests(unittest.TestCase):
         guard.call("verify_state", {**self.target, "expect": {}})
         self.assertEqual(guard.transport.timeouts, [7, 7])
 
+    def test_expired_approval_never_dispatches_input(self):
+        transport = TimedTransport(); guard = self.guard(transport)
+        guard.call("get_window_state", self.target)
+        clock = [10.0]
+        guard.approve = lambda *args, **kwargs: clock.__setitem__(0, 12.0)
+        with mock.patch("vendor.guard.time.monotonic", side_effect=lambda: clock[0]):
+            answer = guard.call("set_value", {**self.target, "element_token": "fresh", "value": "value"}, timeout_seconds=1)
+        self.assertTrue(answer["isError"])
+        self.assertFalse(answer["structuredContent"]["input_sent"])
+        self.assertEqual(guard.action_count, 0)
+        self.assertEqual(len(transport.calls), 1)
+        self.assertEqual(guard.observed_targets, set())
+
+    def test_waiting_approval_expires_with_step_budget_and_removes_dialog_request(self):
+        transport = TimedTransport(); guard = self.guard(transport, approval_mode="each", approval_timeout_seconds=300)
+        guard.call("get_window_state", self.target)
+        clock, waits = [10.0], []
+        def advance(seconds):
+            waits.append(seconds)
+            clock[0] += seconds
+        with mock.patch("vendor.guard.time.monotonic", side_effect=lambda: clock[0]), mock.patch("vendor.guard.time.sleep", side_effect=advance):
+            answer = guard.call("set_value", {**self.target, "element_token": "fresh", "value": "value"}, timeout_seconds=.12)
+        self.assertTrue(answer["isError"])
+        self.assertEqual(answer["structuredContent"]["error_code"], "step_timeout")
+        self.assertFalse(answer["structuredContent"]["input_sent"])
+        self.assertAlmostEqual(sum(waits), .12)
+        self.assertEqual(guard.action_count, 0)
+        self.assertEqual(len(transport.calls), 1)
+        self.assertFalse((Path(self.tmp.name) / "approval-request.json").exists())
+        self.assertFalse((Path(self.tmp.name) / "approval-response.json").exists())
+
+    def test_earlier_approval_preserves_only_remaining_driver_budget(self):
+        transport = TimedTransport(); guard = self.guard(transport, approval_mode="each")
+        guard.call("get_window_state", self.target)
+        clock = [10.0]
+        def approve_after_wait(seconds):
+            clock[0] += seconds
+            request = json.loads((Path(self.tmp.name) / "approval-request.json").read_text(encoding="utf-8"))
+            (Path(self.tmp.name) / "approval-response.json").write_text(json.dumps({"id": request["id"], "approved": True}), encoding="utf-8")
+        with mock.patch("vendor.guard.time.monotonic", side_effect=lambda: clock[0]), mock.patch("vendor.guard.time.sleep", side_effect=approve_after_wait):
+            answer = guard.call("set_value", {**self.target, "element_token": "fresh", "value": "value"}, timeout_seconds=.2)
+        self.assertFalse(answer.get("isError", False))
+        self.assertAlmostEqual(transport.timeouts[-1], .15)
+        self.assertEqual(guard.action_count, 1)
+        self.assertFalse((Path(self.tmp.name) / "approval-request.json").exists())
+
     def test_invalid_timeout_configuration_is_rejected(self):
         for value in (0, -1, True, "20", float("nan"), float("inf"), 1801, 10**1000):
             with self.subTest(value=value), self.assertRaises(GuardError):

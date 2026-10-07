@@ -72,7 +72,9 @@ def _read(path: Path) -> dict:
 def _code_fingerprint() -> str:
     files = ("install.py", "register.py", "settings.py", "diagnostics.py", "server.py",
              "consent.py", "vendor/guard.py", "vendor/windows.py", "learning_picker.py", "teaching_sessions.py",
-             "teaching_support.py", "process_editor.py", "image_targets.py", "image_steps.py")
+             "teaching_support.py", "process_editor.py", "image_targets.py", "image_steps.py", "program_launch.py",
+             "operations.py", "process_steps.py", "workflows.py", "session_runtime.py", "repeat_profiles.py", "scoped_controls.py", "result_files.py",
+             "Computer Use MCP 빠른 확인.exe")
     from teaching_support import TEACHING_HELPER_FILES
     files += TEACHING_HELPER_FILES
     return _digest({name: _hash(_path(APP_DIR / name)) for name in files})
@@ -135,7 +137,8 @@ def app_candidates(name: str) -> list[str]:
     return _candidates([_app_path(executable), *known[name]])
 
 
-def inspect_setup(config_path, *, driver=None, apps=(), app_exes=(), scope=None, project=None) -> dict:
+def inspect_setup(config_path, *, driver=None, apps=(), app_exes=(), scope=None, project=None,
+                  app_launch_uri=None, app_arguments=(), app_working_directory=None, app_control_exes=()) -> dict:
     config_path = _path(config_path)
     if config_path.name.lower() in RESERVED:
         raise SetupError("Claude 설정과 다른 전용 설정 파일 이름을 지정해 주세요.")
@@ -152,6 +155,12 @@ def inspect_setup(config_path, *, driver=None, apps=(), app_exes=(), scope=None,
     if scope == "local" and (project_path is None or not project_path.is_dir()):
         questions.append({"field": "project", "question": "사용할 작업 폴더의 전체 경로를 알려주세요."})
     programs = []
+    custom_exes = list(dict.fromkeys(app_exes))
+    has_profile = bool(app_launch_uri is not None or app_arguments or app_working_directory is not None or app_control_exes)
+    if has_profile and len(custom_exes) != 1:
+        raise SetupError("실행 주소·인자·시작 폴더·추가 조작 파일을 지정할 때는 --app-exe를 정확히 한 개 지정하세요.")
+    if app_launch_uri is not None and (app_arguments or app_working_directory is not None):
+        raise SetupError("주소 실행과 EXE 인자·시작 폴더는 함께 지정하지 않습니다.")
     for name in dict.fromkeys(apps):
         if name not in APPS:
             raise SetupError("지원하는 이름은 chrome, edge, notepad, excel입니다. 다른 프로그램은 --app-exe로 정확한 실행파일을 지정하세요.")
@@ -160,13 +169,26 @@ def inspect_setup(config_path, *, driver=None, apps=(), app_exes=(), scope=None,
             questions.append({"field": "app", "app": name, "question": APPS[name][0] + "의 실행파일을 선택해 주세요.", "candidates": matches})
         else:
             programs.append({"id": name, "name": APPS[name][0], "exe": matches[0], "enabled": True, "control_exes": [], "hints": "요청한 시험용 창만 사용합니다."})
-    for index, value in enumerate(dict.fromkeys(app_exes)):
+    for index, value in enumerate(custom_exes):
         path = _path(value)
         if not path.is_file() or path.suffix.lower() != ".exe":
             raise SetupError("사용할 프로그램의 실제 .exe 파일을 지정해 주세요.")
         if any(os.path.normcase(p["exe"]) == os.path.normcase(str(path)) for p in programs):
+            if has_profile:
+                raise SetupError("실행 방식을 지정할 프로그램은 --app 대신 --app-exe로만 등록하세요.")
             continue
         programs.append({"id": "app-" + str(index + 1), "name": path.stem, "exe": str(path), "enabled": True, "control_exes": [], "hints": "요청한 시험용 창만 사용합니다."})
+        if app_launch_uri is not None:
+            programs[-1]["launch"] = {"kind": "uri", "target": app_launch_uri}
+        elif app_arguments or app_working_directory is not None:
+            programs[-1]["launch"] = {"kind": "exe", "arguments": list(app_arguments)}
+            if app_working_directory is not None:
+                programs[-1]["launch"]["cwd"] = str(_path(app_working_directory))
+        for control_exe in app_control_exes:
+            control_path = _path(control_exe)
+            if not control_path.is_file() or control_path.suffix.lower() != ".exe":
+                raise SetupError("추가 조작 실행파일은 실제 .exe 파일을 지정하세요.")
+            programs[-1]["control_exes"].append(str(control_path))
     if not apps and not app_exes:
         questions.append({"field": "app", "question": "어떤 프로그램에서 사용할까요?", "choices": {key: value[0] for key, value in APPS.items()}})
     result = {"ok": not questions, "status": "input_required" if questions else "ready_to_prepare", "questions": questions,
@@ -245,9 +267,13 @@ def _check_plan_paths(payload: dict, config: dict) -> None:
     if str(driver) != config["driver"] or _hash(driver) != payload["driver_sha256"]:
         raise SetupError("Driver 위치 또는 파일이 달라졌습니다. 다시 준비하세요.")
     for program in config["programs"]:
-        app = _path(program["exe"])
-        if not app.is_file() or str(app) != program["exe"]:
-            raise SetupError("선택한 프로그램 위치가 달라졌습니다. 다시 준비하세요.")
+        for executable in [program["exe"], *program.get("control_exes", [])]:
+            app = _path(executable)
+            if not app.is_file() or str(app) != executable:
+                raise SetupError("선택한 프로그램 위치가 달라졌습니다. 다시 준비하세요.")
+        cwd = program.get("launch", {}).get("cwd")
+        if cwd and not _path(cwd).is_dir():
+            raise SetupError("등록한 시작 폴더가 없어졌습니다. 다시 준비하세요.")
     if payload.get("code_sha256") != _code_fingerprint():
         raise SetupError("배포 파일이 달라졌습니다. 현재 배포본으로 다시 준비하세요.")
 
@@ -267,7 +293,7 @@ def apply(plan_path, approval: str) -> dict:
     _check_plan_paths(payload, config)
     if config["mode"] != "uia" or config["approval"] != "client" or config["log_detail"] != "metadata" or config["max_minutes"] != 10 or config["max_actions"] != 120:
         raise SetupError("대화형 설치의 기본 권한·제한은 변경할 수 없습니다. 수동 설정에서 별도로 검토하세요.")
-    if not config["programs"] or not all(p["enabled"] and not p.get("control_exes") for p in config["programs"]):
+    if not config["programs"] or not all(p["enabled"] for p in config["programs"]):
         raise SetupError("명시한 실행파일만 허용할 수 있습니다.")
     driver = _path(config["driver"])
     if driver.name.lower() != "cua-driver.exe" or not payload["driver_sha256"] or _hash(driver) != payload["driver_sha256"]:
@@ -323,6 +349,10 @@ def main(argv=None) -> int:
         command.add_argument("--driver", type=Path)
         command.add_argument("--app", action="append", choices=tuple(APPS), default=[])
         command.add_argument("--app-exe", action="append", type=Path, default=[])
+        command.add_argument("--app-launch-uri", help="한 개의 --app-exe에 연결할 전용 protocol:// 또는 http(s):// 주소")
+        command.add_argument("--app-argument", action="append", default=[], help="한 개의 --app-exe에 쓸 인자. --app-argument=--flag 형태로 반복")
+        command.add_argument("--app-working-directory", type=Path)
+        command.add_argument("--app-control-exe", action="append", type=Path, default=[])
         command.add_argument("--scope", choices=tuple(SCOPES))
         command.add_argument("--project", type=Path)
     command = sub.add_parser("apply")
@@ -334,7 +364,9 @@ def main(argv=None) -> int:
             result = apply(args.plan, args.approve)
         else:
             method = prepare if args.action == "prepare" else inspect_setup
-            result = method(args.config, driver=args.driver, apps=args.app, app_exes=args.app_exe, scope=args.scope, project=args.project)
+            result = method(args.config, driver=args.driver, apps=args.app, app_exes=args.app_exe, scope=args.scope, project=args.project,
+                            app_launch_uri=args.app_launch_uri, app_arguments=args.app_argument,
+                            app_working_directory=args.app_working_directory, app_control_exes=args.app_control_exe)
     except (OSError, ValueError, KeyError, TypeError) as error:
         result = {"ok": False, "status": "setup_failed", "message": str(error), "retry_automatically": False}
     print(json.dumps(result, ensure_ascii=False, indent=2))

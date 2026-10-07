@@ -154,6 +154,9 @@ class ProgramEditor(tk.Toplevel):
         self.name = tk.StringVar(self, value=self.original.get("name", ""))
         self.exe = tk.StringVar(self, value=self.original.get("exe", ""))
         self.enabled = tk.BooleanVar(self, value=self.original.get("enabled", True))
+        launch = self.original.get("launch", {})
+        self.launch_uri = tk.StringVar(self, value=launch.get("target", ""))
+        self.working_directory = tk.StringVar(self, value=launch.get("cwd", ""))
         self.advanced_open = tk.BooleanVar(self, value=bool(self.original.get("control_exes")))
         colors, px = _PROGRAM_COLORS, self._px
         self.columnconfigure(0, weight=1)
@@ -216,7 +219,23 @@ class ProgramEditor(tk.Toplevel):
         self.hints.grid(row=2, column=0, sticky="ew")
         self.hints.insert("1.0", self.original.get("hints", ""))
 
-        advanced = self._card(2)
+        launching = self._card(2)
+        self._label(launching, "여는 방법  ·  선택", bold=True, background=colors["card"]).grid(row=0, column=0, sticky="w")
+        launch_help = self._label(launching,
+            "보통은 비워 두면 됩니다. 주소로 여는 프로그램은 실행 주소를, 바로가기에 인자가 있으면 한 줄에 하나씩 입력하세요. 위 실행파일은 실제 업무 창의 프로그램입니다.",
+            background=colors["card"], color=colors["muted"], size=9)
+        launch_help.grid(row=1, column=0, sticky="ew", pady=(px(6), px(10)))
+        self._wrap_with(launching, launch_help, inset=36)
+        self._label(launching, "실행 주소 (https:// 또는 전용 protocol://)", background=colors["card"]).grid(row=2, column=0, sticky="w")
+        self._entry(launching, self.launch_uri).grid(row=3, column=0, sticky="ew", pady=(px(6), px(10)))
+        self._label(launching, "EXE 실행 인자 — 한 줄에 한 개", background=colors["card"]).grid(row=4, column=0, sticky="w")
+        self.arguments = self._text(launching, height=2)
+        self.arguments.grid(row=5, column=0, sticky="ew", pady=(px(6), px(10)))
+        self.arguments.insert("1.0", "\n".join(launch.get("arguments", [])))
+        self._label(launching, "EXE 시작 폴더 — 비우면 실행파일 폴더", background=colors["card"]).grid(row=6, column=0, sticky="w")
+        self._entry(launching, self.working_directory).grid(row=7, column=0, sticky="ew", pady=(px(6), 0))
+
+        advanced = self._card(3)
         self.advanced_button = self._button(advanced, "", self.toggle_advanced)
         self.advanced_button.configure(anchor="w", highlightthickness=0, padx=0, pady=px(2))
         self.advanced_button.grid(row=0, column=0, sticky="ew")
@@ -471,6 +490,20 @@ class ProgramEditor(tk.Toplevel):
         trial = copy.deepcopy(self.master.config_value)
         trial["programs"] = [item]
         try:
+            uri = self.launch_uri.get().strip()
+            argument_text = self.arguments.get("1.0", "end-1c")
+            original_arguments = self.original.get("launch", {}).get("arguments", [])
+            arguments = (list(original_arguments) if argument_text == "\n".join(original_arguments) else
+                         argument_text.splitlines() if argument_text else [])
+            cwd = self.working_directory.get().strip().strip('"')
+            if uri and (arguments or cwd):
+                raise ValueError("실행 주소를 사용할 때는 EXE 인자와 시작 폴더를 비워주세요.")
+            if uri:
+                item["launch"] = {"kind": "uri", "target": uri}
+            elif arguments or cwd or "launch" in self.original:
+                item["launch"] = {"kind": "exe", "arguments": arguments}
+                if cwd:
+                    item["launch"]["cwd"] = cwd
             validate_config(trial)
         except ValueError as error:
             messagebox.showerror("등록 내용 확인", str(error), parent=self)

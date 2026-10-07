@@ -12,9 +12,9 @@ import uuid
 
 from settings import VERSION
 from closing import ClosureManager
-from program_launch import LaunchObservation, create_application
+from program_launch import LaunchObservation, create_program
 from vendor.guard import (Guard, GuardError, DriverTransport, COMMON_TOOLS, MODE_TOOLS,
-                          OBSERVATIONS, check_app, utc_now, atomic_json, journal_route)
+                          OBSERVATIONS, RequestDeadlineExceeded, check_app, utc_now, atomic_json, journal_route)
 
 
 SAFE_TOOLS = COMMON_TOOLS | MODE_TOOLS["uia"] | MODE_TOOLS["visual"]
@@ -40,8 +40,10 @@ class ConsentGuard(Guard):
         self.session_runtime = session
         super().__init__(policy, transport=transport)
 
-    def approve(self, name, args, call_id):
+    def approve(self, name, args, call_id, *, request_deadline=None):
         self.session_runtime.check_active()
+        if request_deadline is not None and time.monotonic() >= request_deadline:
+            raise RequestDeadlineExceeded("단계 시간이 지나 승인을 시작하지 않았습니다.")
         if self.session_runtime.config["approval"] != "each":
             return
         label = ACTION_LABELS.get(name, name)
@@ -49,7 +51,10 @@ class ConsentGuard(Guard):
         okay = self.session_runtime.confirm("action", "화면 조작 승인 — " + label,
             f"실행할 동작: {label}\n대상 실행파일: {target}\n"
             f"대상 창: PID {args.get('pid')} / 창 번호 {args.get('window_id')}\n\n"
-            f"상세 요청 ({name}):\n" + json.dumps(args, ensure_ascii=False, indent=2))
+            f"상세 요청 ({name}):\n" + json.dumps(args, ensure_ascii=False, indent=2),
+            **({"request_deadline": request_deadline} if request_deadline is not None else {}))
+        if request_deadline is not None and time.monotonic() >= request_deadline:
+            raise RequestDeadlineExceeded("단계 시간이 지나 승인이 취소되었습니다. 입력은 전달하지 않았습니다.")
         if not okay:
             raise GuardError("사용자가 조작을 거절했거나 승인이 취소되었습니다. 화면은 조작하지 않았습니다.")
         self.log("approval", request_id=call_id, tool=name, route=journal_route(name, args, self.policy["mode"]), success=True,
@@ -110,6 +115,8 @@ class SessionRuntime:
         self.created_at = utc_now()
         self.deadline = time.monotonic() + self.minutes * 60
         self._deadline_thread = None
+        self.fast_verification_enabled = False
+        self.scoped_reader = None
 
     def _check_not_stopped(self):
         if self.stop_event.is_set() or (self.run_dir / "stop.flag").exists():
@@ -124,14 +131,15 @@ class SessionRuntime:
         if self.state != "active":
             raise SessionError("먼저 computer_begin으로 화면 작업을 승인하고 시작하세요.")
 
-    def confirm(self, kind, title, details):
+    def confirm(self, kind, title, details, *, request_deadline=None):
         self._check_not_stopped()
         if self.config["approval"] == "client":
             return True
         broker = self.broker
         if broker is None:
             raise SessionError("로컬 승인 창을 시작하지 못했습니다.")
-        answer = broker.confirm(kind, title, details, self.stop_event)
+        answer = broker.confirm(kind, title, details, self.stop_event,
+            **({"request_deadline": request_deadline} if request_deadline is not None else {}))
         self._check_not_stopped()
         return answer is True
 
@@ -224,11 +232,20 @@ class SessionRuntime:
         return child is not None and child.poll() is not None
 
     def call(self, name, arguments):
+        return self._call(name, arguments)
+
+    def call_with_timeout(self, name, arguments, *, timeout_ms):
+        if type(timeout_ms) is not int or not 1 <= timeout_ms <= 120000:
+            raise SessionError("단계의 남은 실행 시간을 확인하세요.")
+        return self._call(name, arguments, timeout_seconds=timeout_ms / 1000)
+
+    def _call(self, name, arguments, timeout_seconds=None):
         with self.execution_lock:
             self.check_active()
             if name not in SAFE_TOOLS:
                 raise SessionError("허용되지 않은 화면 도구입니다.")
-            answer = self.guard.call(name, arguments)
+            answer = (self.guard.call(name, arguments) if timeout_seconds is None else
+                      self.guard.call(name, arguments, timeout_seconds=timeout_seconds))
             if self._driver_ended():
                 self.stop("Cua Driver 연결이 종료되어 화면 작업을 중지했습니다. 적용된 결과를 확인한 뒤 computer_begin으로 다시 시작하세요.")
                 answer.setdefault("structuredContent", {})["session_recovery"] = {
@@ -248,6 +265,16 @@ class SessionRuntime:
             # image and cannot become a checkpoint that the caller can approve.
             self.check_active()
             return answer
+
+    def observe_controls(self, target, selectors, *, timeout_ms=3000):
+        if not self.fast_verification_enabled or self.mode != "uia":
+            raise NotImplementedError("scoped_verification_not_enabled")
+        with self.execution_lock:
+            self.check_active()
+            if self.scoped_reader is None:
+                from scoped_controls import ScopedControls
+                self.scoped_reader = ScopedControls(self)
+            return self.scoped_reader.observe(target, selectors, timeout_ms=timeout_ms)
 
     def image_action(self, step, target):
         """Only saved, validated image recipe steps can reach the private guard."""
@@ -282,12 +309,13 @@ class SessionRuntime:
             observation.capture()
             with self.resource_lock:
                 self.check_active()
-                proc = create_application(executable, self.process_factory)
+                proc = create_program(app, self.process_factory)
                 self.guard.action_count += 1
                 self.guard.observed_targets.clear()
             result = observation.finish(proc)
-            result.update(program_id=program_id, working_directory=str(Path(executable).parent),
-                          runtime_environment_isolated=True)
+            uri_launch = app.get("launch", {}).get("kind") == "uri"
+            result.update(program_id=program_id, working_directory=None if uri_launch else app.get("launch", {}).get("cwd", str(Path(executable).parent)),
+                          runtime_environment_isolated=not uri_launch)
             call_id = uuid.uuid4().hex
             self.guard.log("result", request_id=call_id, tool="computer_launch", route="management",
                            pid=proc.pid, exe=executable, success=result["launch_status"] != "startup_failed",
@@ -339,7 +367,7 @@ class SessionRuntime:
                         cleanup_ok = False
                 except Exception:
                     cleanup_ok = False
-        for resource in (self.closures, broker, emergency):
+        for resource in (self.scoped_reader, self.closures, broker, emergency):
             if resource is not None:
                 try:
                     resource.close()

@@ -203,6 +203,46 @@ class HiddenProgramIntegrationTests(unittest.TestCase):
         self.assertEqual(self.app.config_value, self.config)
         self.assertEqual(setup.load_config(self.config_path), self.config)
 
+    def test_saved_uri_profile_survives_program_name_edit(self):
+        original = copy.deepcopy(self.config["programs"][0])
+        original["launch"] = {"kind": "uri", "target": "example-desk://workspace/menu?tab=1"}
+        dialog = setup.ProgramEditor(self.app, original)
+        self.assertEqual(dialog.launch_uri.get(), original["launch"]["target"])
+        dialog.name.set("내 업무 화면")
+        self.button(dialog, "저장").invoke()
+        self.assertEqual(dialog.result, {**original, "name": "내 업무 화면"})
+        self.assertEqual(setup.load_config(self.config_path), self.config)
+
+    def test_new_profile_exe_arguments_are_individual_lines(self):
+        dialog = setup.ProgramEditor(self.app)
+        dialog.name.set("인자가 있는 앱")
+        dialog.exe.set(str(self.root / "BusinessApp.exe"))
+        dialog.arguments.insert("1.0", "--from-shortcut\nvalue with spaces")
+        dialog.working_directory.set(str(self.root))
+        self.button(dialog, "저장").invoke()
+        self.assertEqual(dialog.result["launch"], {"kind": "exe", "arguments": ["--from-shortcut", "value with spaces"],
+                                                  "cwd": str(self.root)})
+
+    def test_uri_and_exe_arguments_conflict_stays_editable(self):
+        dialog = setup.ProgramEditor(self.app, copy.deepcopy(self.config["programs"][0]))
+        dialog.launch_uri.set("example-desk://workspace/menu")
+        dialog.arguments.insert("1.0", "--extra")
+        self.button(dialog, "저장").invoke()
+        self.assertIsNone(dialog.result)
+        self.assertTrue(dialog.winfo_exists())
+        self.errors.assert_called_once()
+        self.errors.reset_mock()
+        dialog.arguments.delete("1.0", "end")
+        self.button(dialog, "저장").invoke()
+        self.assertEqual(dialog.result["launch"], {"kind": "uri", "target": "example-desk://workspace/menu"})
+
+    def test_launch_controls_preserve_blank_argument_on_unchanged_edit(self):
+        original = copy.deepcopy(self.config["programs"][0])
+        original["launch"] = {"kind": "exe", "arguments": ["--value", ""]}
+        dialog = setup.ProgramEditor(self.app, original)
+        self.button(dialog, "저장").invoke()
+        self.assertEqual(dialog.result, original)
+
     def test_new_program_keeps_entered_extra_when_advanced_is_closed_before_save(self):
         dialog = setup.ProgramEditor(self.app)
         self.assertFalse(dialog.advanced_open.get())

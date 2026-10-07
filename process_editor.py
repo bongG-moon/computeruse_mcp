@@ -24,10 +24,24 @@ IMAGE_ACTIONS = {"click": "image_click", "double_click": "image_double_click", "
                  "set_value": "image_type_text", "press_key": "image_press_key", "hotkey": "image_hotkey",
                  "scroll": "image_scroll", "wait_for_element": "wait_for_image"}
 IMAGE_FALLBACK_ERRORS = {"picker_not_found", "picker_controls_not_exposed"}
+RECORDING_WARNINGS = {
+    "outside_target_not_recorded": "연결 범위 밖이나 새 팝업에서 수행한 동작은 기록되지 않았습니다.",
+    "uia_text_unavailable": "UIA 응답 지연으로 일부 입력값을 자동 기록하지 못했습니다.",
+    "uia_probe_unavailable": "시작 점검에서 UIA 응답을 확인하지 못해 이미지·수동 기록을 사용했습니다.",
+    "recording_timeout_partial": "제한 시간이 끝나 그때까지의 동작만 기록했습니다.",
+    "recording_hook_unavailable": "입력 후크를 설치하지 못했습니다.",
+    "recording_mouse_failed": "마우스 기록 오류 이후의 동작은 기록되지 않았습니다.",
+    "recording_keyboard_failed": "키보드 기록 오류 이후의 동작은 기록되지 않았습니다.",
+    "recording_progress_failed": "녹화 상태 전달 오류로 기록을 중지했습니다.",
+    "semantic_target_unverified": "일부 요소·최종값을 Driver와 대조하지 못했습니다. 해당 단계를 직접 확인하세요.",
+    "recording_event_limit": "기록 가능한 동작 수에 도달하여 이후 동작은 기록되지 않았습니다.",
+    "recording_final_value_unconfirmed": "마지막 입력의 최종값을 확정하지 못했습니다.",
+    "recording_method_unverified": "콤보 상자의 실제 입력·확정 방법을 확인하지 못했습니다. 자동 선택으로 대신하지 않고 직접 설정 단계로 남겼습니다."}
 ACTION_LABELS = {"click": "클릭", "double_click": "두 번 클릭", "right_click": "오른쪽 클릭",
     "set_value": "글자 입력", "press_key": "키 누르기", "hotkey": "단축키", "select_option": "목록 선택",
     "set_checked": "체크 변경", "wait_for_element": "요소가 나타날 때까지 대기", "delay": "고정 대기",
     "checkpoint": "화면 이미지 확인", "scroll": "스크롤"}
+ACTION_LABELS["wait_for_state"] = "완료 조건이 될 때까지 대기"
 ACTION_LABELS.update({mapped: ACTION_LABELS.get(action, "스크롤") + " (이미지)" for action, mapped in IMAGE_ACTIONS.items()})
 ACTION_LABELS["manual_entry"] = "기록 내용 확인 필요"
 MANUAL_REASONS = {"unknown_input": "입력할 내용을 직접 지정하세요.",
@@ -39,6 +53,8 @@ MANUAL_REASONS = {"unknown_input": "입력할 내용을 직접 지정하세요."
     "focus_target_requires_selection": "입력 위치가 바뀌어 대상을 확인하지 못했습니다. 이 단계를 삭제하고 입력 대상을 직접 선택하세요.",
     "image_occluded_requires_selection": "대상이 다른 창에 가려져 기록하지 못했습니다. 이 단계를 삭제하고 가림을 해제한 뒤 직접 추가하세요.",
     "template_low_detail": "구분할 수 있는 이미지가 부족합니다. 이 단계를 삭제하고 주변 문구를 포함해 이미지를 직접 선택하세요."}
+MANUAL_REASONS["semantic_target_unverified"] = "기록한 요소나 최종값을 재확인하지 못했습니다. 이 단계를 삭제하고 요소와 동작을 직접 추가하세요."
+MANUAL_REASONS["recording_method_unverified"] = "콤보 입력과 확정 방법을 확인하지 못했습니다. 이 단계를 삭제하고 검증한 입력·확정 동작을 직접 추가하세요."
 
 
 def task_view(task):
@@ -65,6 +81,9 @@ class ProcessDraft:
         self.steps = copy.deepcopy((task or {}).get("steps", []))
         self.variables = copy.deepcopy((task or {}).get("variables", {}))
         self.labels = [step.get("selector", {}).get("name", "저장한 이미지" if "image_target" in step else "저장된 요소") for step in self.steps]
+        review = (task or {}).get("recording_review", {})
+        self.recording_warnings = list(review.get("warning_codes", []))
+        self.recording_acknowledged = bool(review.get("acknowledged", False)) if self.recording_warnings else True
         if self.steps:
             validate_recipe(self.steps, self.variables, list({p["program_id"] for p in programs}))
             if any((s["program_id"], s.get("window_ref", "main")) not in self.targets for s in self.steps):
@@ -117,6 +136,8 @@ class ProcessDraft:
 
     def validate(self, steps=None, *, allow_pending=False):
         proposed = self.steps if steps is None else steps
+        if not allow_pending and self.recording_warnings and not self.recording_acknowledged:
+            raise OperationError("녹화 누락·오류 경고를 확인한 뒤 [누락 경고 확인]을 눌러야 저장할 수 있습니다.", "recording_review_required")
         if any(step.get("operation") == "manual_entry" for step in proposed):
             if not allow_pending:
                 raise OperationError("녹화 중 확인되지 않은 단계가 있습니다. 빨간색 단계의 안내에 따라 입력 내용을 지정하거나 직접 교체·삭제하세요.", "recording_input_required")
@@ -127,10 +148,39 @@ class ProcessDraft:
         if len(self.steps if steps is None else steps) > 30:
             raise OperationError("반복 작업은 확인 단계를 포함해 최대 30단계입니다.")
 
-    def recorded(self, events):
+    def recording_review(self):
+        return {"partial": bool(self.recording_warnings), "warning_codes": list(self.recording_warnings),
+                "acknowledged": self.recording_acknowledged,
+                "messages": [RECORDING_WARNINGS.get(code, "녹화 경고를 확인하세요.") for code in self.recording_warnings]}
+
+    def _semantic_step(self, event, target, snapshots):
+        native, after = event.get("native_target"), event.get("after")
+        if not isinstance(native, dict) or not isinstance(after, dict) or set(after) != {"property", "equals"}:
+            raise OperationError("녹화한 요소의 관찰 증거가 없습니다.")
+        snapshot = snapshots.get((target["program_id"], target.get("window_ref", "main")))
+        if not isinstance(snapshot, dict): raise OperationError("녹화 후 Driver 관찰이 없습니다.")
+        matched = match_picked_element(snapshot, native, {k: target[k] for k in ("pid", "window_id")})
+        element = _unique(snapshot, matched["expected_selector"])
+        action, prop = event.get("operation"), after.get("property")
+        if action not in suggested_operations(element): raise OperationError("Driver가 해당 요소 동작을 지원하지 않습니다.")
+        expected = event.get("checked") if action == "set_checked" else event.get("value")
+        if (action not in {"set_value", "select_option", "set_checked"} or prop != ("selected" if action == "set_checked" else "value")
+                or type(after["equals"]) is not type(expected) or after["equals"] != expected
+                or prop not in element or type(element[prop]) is not type(expected) or element[prop] != expected):
+            raise OperationError("기록한 최종값이 현재 Driver 관찰과 일치하지 않습니다.")
+        selector = stable_selector(snapshot, element)
+        step = {"operation": action, "program_id": target["program_id"], "window_ref": target.get("window_ref", "main"),
+                "selector": selector, "expect": [{"selector": copy.deepcopy(selector), "property": prop, "equals": expected}]}
+        step["checked" if action == "set_checked" else "value"] = expected
+        return step, _name(element) or selector.get("automation_id", "녹화한 요소")
+
+    def recorded(self, events, *, snapshots=None, warning_codes=()):
         from image_targets import validate_image_target
         if not isinstance(events, list) or not events or len(events) > 30:
-            raise OperationError("기록한 동작이 없거나 너무 많습니다.", "recording_invalid_events")
+            raise OperationError("기록한 동작이 없습니다. [기록 시작] 후 실제로 클릭·입력해야 합니다. 마우스를 올려 요소를 모으는 것은 동작 녹화가 아닙니다." if not events else "기록한 동작이 너무 많습니다.", "recording_invalid_events")
+        if not isinstance(warning_codes, (list, tuple)) or any(not isinstance(code, str) or code not in RECORDING_WARNINGS for code in warning_codes):
+            raise OperationError("녹화 경고 형식을 확인하지 못했습니다.", "recording_invalid_events")
+        warnings = list(dict.fromkeys([*self.recording_warnings, *warning_codes]))
         proposed, labels = copy.deepcopy(self.steps), list(self.labels)
         for event in events:
             if not isinstance(event, dict):
@@ -139,17 +189,35 @@ class ProcessDraft:
             if target is None:
                 raise OperationError("녹화에 연결하지 않은 프로그램의 동작이 포함되어 있습니다.", "target_mismatch")
             kind = event.get("operation")
-            if kind not in {*IMAGE_ACTIONS, "manual_entry"}:
+            if kind not in {*IMAGE_ACTIONS, "manual_entry", "select_option", "set_checked"}:
                 raise OperationError("지원하지 않는 녹화 동작입니다.", "recording_invalid_events")
+            semantic_failed = False
+            method_unverified = event.get("input_method") == "keyboard_unverified" or event.get("reason") == "recording_method_unverified"
+            if method_unverified and "recording_method_unverified" not in warnings:
+                warnings.append("recording_method_unverified")
+            if "native_target" in event:
+                try:
+                    if method_unverified:
+                        raise OperationError("녹화한 입력·확정 방법을 확인하지 못했습니다.", "recording_method_unverified")
+                    semantic, label = self._semantic_step(event, target, snapshots or {})
+                    proposed.append(semantic); labels.append(label)
+                    continue
+                except OperationError:
+                    semantic_failed = True
+                    if not method_unverified and "semantic_target_unverified" not in warnings: warnings.append("semantic_target_unverified")
             image = None
             if "template_png" in event:
                 image = validate_image_target({"format": "computer-image-target/v1", **{key: event[key] for key in
                     ("template_png", "width", "height", "anchor", "capture_window")}, "min_score": .94, "ambiguity_margin": .03,
                     **({"source_size": event["source_size"]} if "source_size" in event else {})})
             reason = event.get("reason", "unknown_input")
+            if semantic_failed or kind in {"select_option", "set_checked"}:
+                kind, reason = "manual_entry", "semantic_target_unverified"
+            if method_unverified:
+                kind, reason = "manual_entry", "recording_method_unverified"
             if image is None:
                 kind = "manual_entry"
-                if reason not in {"image_occluded_requires_selection", "focus_target_requires_selection", "protected_input", "drag_requires_manual_setup", "shortcut_requires_manual_setup"}:
+                if reason not in {"image_occluded_requires_selection", "focus_target_requires_selection", "protected_input", "drag_requires_manual_setup", "shortcut_requires_manual_setup", "semantic_target_unverified", "recording_method_unverified"}:
                     reason = "image_capture_required"
             step = {"operation": IMAGE_ACTIONS.get(kind, kind), "program_id": target["program_id"],
                     "window_ref": target.get("window_ref", "main")}
@@ -165,6 +233,8 @@ class ProcessDraft:
             proposed.append(self.checkpoint(target)); labels.append("현재 창")
         self.validate(proposed, allow_pending=True)
         self.steps, self.labels = proposed, labels
+        self.recording_warnings = warnings
+        if warnings: self.recording_acknowledged = False
 
     def resolve_input(self, payload):
         index = payload.get("index")
@@ -207,6 +277,8 @@ class ProcessDraft:
             step["duration_ms"] = self.milliseconds(payload.get("seconds", 1))
         elif action == "checkpoint":
             step["message"] = payload.get("value", "현재 화면을 확인하세요.")
+        elif action == "wait_for_state":
+            step["timeout_ms"] = self.milliseconds(payload.get("timeout_seconds", 20))
         else:
             selected = self.selection(payload.get("selection_id"), target)
             label = selected["label"]
@@ -285,7 +357,7 @@ class ProcessDraft:
             action = step["operation"]
             target = self.targets[(step["program_id"], step.get("window_ref", "main"))]
             detail = (str(step.get("duration_ms", 0)/1000) + "초" if action == "delay" else
-                      str(step.get("timeout_ms", 0)/1000) + "초 이내" if action in {"wait_for_element", "wait_for_image"} else
+                      str(step.get("timeout_ms", 0)/1000) + "초 이내" if action in {"wait_for_element", "wait_for_image", "wait_for_state"} else
                       str(step.get("message", step.get("value", step.get("key", "+".join(step.get("keys", [])))))))
             if step.get("expect"):
                 check = step["expect"][0]
@@ -429,10 +501,24 @@ class ProcessEditors:
             for target in draft.programs:
                 self.library._program(runtime, target["program_id"], {k: target[k] for k in ("pid", "window_id")})
             recorded = self._visual(job, "record", {"targets": draft.programs, "max_events": maximum_events}, min(600, job["args"].get("timeout_seconds", 600)))
+            snapshots = {}
             for target in draft.programs:
                 self.library._program(runtime, target["program_id"], {k: target[k] for k in ("pid", "window_id")})
-            draft.recorded(recorded.get("events"))
+                if any(isinstance(event, dict) and event.get("program_id") == target["program_id"] and event.get("window_ref", "main") == target.get("window_ref", "main") and "native_target" in event for event in recorded.get("events", [])):
+                    try:
+                        with runtime.execution_lock:
+                            self._check(job)
+                            snapshots[(target["program_id"], target.get("window_ref", "main"))], _ = self.library._observe(runtime, {k: target[k] for k in ("pid", "window_id")}, target["program_id"])
+                    except OperationError:
+                        self._check(job)  # Keep unresolved candidates manual; never bypass cancellation.
+            draft.recorded(recorded.get("events"), snapshots=snapshots, warning_codes=recorded.get("warnings", []))
             message = "녹화한 동작을 초안에 추가했습니다. 순서와 입력 내용을 검토한 뒤 저장하세요. 아직 재실행하지 않았습니다."
+            if draft.recording_warnings: message = "일부 동작이 빠졌거나 확인되지 않은 부분 기록입니다. [누락 경고 확인]과 각 단계를 검토하세요."
+        elif action == "ack_recording_warnings":
+            if payload != {"acknowledged": True} or not draft.recording_warnings:
+                raise OperationError("녹화 경고를 직접 확인한 뒤 확인 버튼을 누르세요.")
+            draft.recording_acknowledged = True
+            message = "누락 경고를 확인했습니다. 확인되지 않은 단계는 교체·삭제해야 저장할 수 있습니다."
         elif action == "resolve_input":
             draft.resolve_input(payload)
         elif action == "add_step":
@@ -453,10 +539,11 @@ class ProcessEditors:
             with self.lock:
                 self._check(job)
                 job["save_started"] = True
+            review = ({"recording_review": {key: draft.recording_review()[key] for key in ("partial", "warning_codes", "acknowledged")}} if draft.recording_warnings else {})
             saved = self.tasks.save({"name": name, "instructions": description or "저장한 단계 순서대로 실행합니다.",
                 "expected": "각 단계의 확인 조건을 통과하고 화면 확인 단계는 사용자가 확인합니다.",
                 "program_ids": list(dict.fromkeys(s["program_id"] for s in draft.steps)),
-                "steps": draft.steps, "variables": draft.variables})
+                "steps": draft.steps, "variables": draft.variables, **review})
             extra["saved_task"] = {"id": saved["id"], "name": saved["name"], "step_count": len(saved["steps"])}
             with self.lock:
                 job["result"] = {"status": "saved", "editor_visible": True, **extra,
@@ -465,7 +552,8 @@ class ProcessEditors:
             raise OperationError("지원하지 않는 편집 요청입니다.")
         with self.lock:
             job["summaries"] = draft.summaries()
-        return {"status": "ok", "message": "저장했습니다." if action == "save" else message, "steps": draft.summaries(), **extra}
+            if draft.recording_warnings: job["result"]["recording_review"] = draft.recording_review()
+        return {"status": "ok", "message": "저장했습니다." if action == "save" else message, "steps": draft.summaries(), "recording_review": draft.recording_review(), **extra}
 
     def _visual(self, job, mode, arguments, timeout):
         """Owned visible helper; bound scope, nonces, bounded reads and cleanup."""
@@ -478,6 +566,7 @@ class ProcessEditors:
         folder = Path(job["runtime"].run_dir) / "visual"
         request, response = (folder / (nonce[:16] + suffix) for suffix in (".req.json", ".res.json"))
         ready = Path(str(response) + ".ready.json")
+        progress = Path(str(response) + ".progress.json")
         child = None
         try:
             self._check_path(request); folder.mkdir(parents=True, exist_ok=True)
@@ -486,6 +575,7 @@ class ProcessEditors:
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0)
             started, visible = time.monotonic(), False
+            progress_modified, progress_at, ready_at = None, None, None
             while True:
                 self._check(job)
                 if not visible and ready.exists():
@@ -499,6 +589,15 @@ class ProcessEditors:
                     # acknowledge an invisible/foreign window, but allow the
                     # owned helper to publish its next visible-ready snapshot.
                     visible = _helper_visible(child.pid, shown["helper_window_id"])
+                    if visible: ready_at = time.monotonic()
+                if mode == "record" and visible and progress.exists():
+                    modified = progress.stat().st_mtime_ns
+                    if modified != progress_modified:
+                        update = self._recording_progress(self._read(progress, nonce, maximum_bytes=16384), child.pid)
+                        progress_modified, progress_at = modified, time.monotonic()
+                        with self.lock: job["result"]["recording"] = update
+                    elif progress_at is not None and time.monotonic() - progress_at > 5 and not response.exists():
+                        raise OperationError("녹화 상태 응답이 끊겨 기록 도구를 중지했습니다. 완료로 간주하지 마세요.", "recording_heartbeat_timeout")
                 if response.exists():
                     answer = self._read(response, nonce, maximum_bytes=16 * 1024 * 1024)
                     if answer.get("status") in {"cancelled", "timeout"}:
@@ -507,23 +606,52 @@ class ProcessEditors:
                             or answer.get("human_confirmed") is not True):
                         raise OperationError("이미지·녹화 결과를 확정하지 못했습니다: " + str(answer.get("code", "visual_invalid_response"))[:100],
                                              "visual_invalid_response")
+                    if mode == "record" and progress_at is None:
+                        raise OperationError("녹화 진행 상태를 한 번도 확인하지 못했습니다. 전체 배포 파일을 갱신하세요.", "recording_progress_missing")
                     return answer
                 if child.poll() is not None:
                     raise OperationError("이미지·녹화 창이 결과 없이 종료되었습니다.", "visual_helper_closed")
                 elapsed = time.monotonic() - started
                 if not visible and elapsed > 8:
                     raise OperationError("이미지·녹화 창을 표시하지 못했습니다.", "visual_helper_start_timeout")
+                if mode == "record" and ready_at is not None and progress_at is None and time.monotonic() - ready_at > 5:
+                    raise OperationError("녹화 창은 표시됐지만 시작 점검 상태를 받지 못했습니다.", "recording_progress_missing")
                 if elapsed > timeout + 5:
                     raise OperationError("이미지·녹화 대기 시간이 지났습니다.", "visual_timeout")
                 job["cancel"].event.wait(.05)
+        except Exception as error:
+            if mode == "record":
+                with self.lock:
+                    previous = job["result"].get("recording", {})
+                    job["result"]["recording"] = {**previous, "state": "cancelled" if getattr(error, "code", "") == "visual_cancelled" else "failed", "diagnostic_code": getattr(error, "code", "recording_failed"), "task_verified": False}
+            raise
         finally:
             try:
                 _end_helper(child)
             finally:
-                for path in (request, response, ready):
+                for path in (request, response, ready, progress):
                     try:
                         self._check_path(path); path.unlink(missing_ok=True)
                     except (OSError, OperationError): pass
+
+    @staticmethod
+    def _recording_progress(value, pid):
+        states = {"checking", "ready", "recording", "paused", "outside_target", "review", "failed"}
+        if (type(value.get("helper_pid")) is not int or value.get("helper_pid") != pid or not isinstance(value.get("state"), str) or value.get("state") not in states
+                or any(type(value.get(k)) is not int or not 0 <= value[k] <= 15 for k in ("event_count", "manual_count", "max_events"))
+                or not 1 <= value["max_events"] <= 15 or value["manual_count"] > value["event_count"] or value["event_count"] > value["max_events"]
+                or not isinstance(value.get("warning_codes"), list) or len(value["warning_codes"]) > 30
+                or any(not isinstance(code, str) or code not in RECORDING_WARNINGS for code in value["warning_codes"])):
+            raise OperationError("녹화 진행 응답을 확인하지 못했습니다.", "recording_invalid_progress")
+        probe = value.get("probe")
+        if not isinstance(probe, dict) or set(probe) != {"hooks", "uia"} or any(not isinstance(v, str) or v not in {"checking", "available", "unavailable", "timeout"} for v in probe.values()):
+            raise OperationError("녹화 시작 점검 결과를 확인하지 못했습니다.", "recording_invalid_progress")
+        result = {key: copy.deepcopy(value[key]) for key in ("state", "event_count", "manual_count", "max_events", "warning_codes", "probe")}
+        last = value.get("last_event")
+        if isinstance(last, dict) and last.get("operation") in {*IMAGE_ACTIONS, "manual_entry", "select_option", "set_checked"}:
+            result["last_event"] = {"operation": last["operation"], "recognition": "uia_candidate" if last.get("recognition") == "uia_candidate" else "image_or_manual"}
+        result.update(hover_is_action=False, task_verified=False)
+        return result
 
     @staticmethod
     def _check_path(path):
@@ -606,7 +734,7 @@ class ProcessEditors:
             folder.mkdir(parents=True, exist_ok=True)
             timeout = job["args"].get("timeout_seconds", 600)
             self._write(request, {"nonce": nonce, "timeout_seconds": timeout, "programs": job["draft"].programs,
-                                 "draft": {"name": job["name"], "description": job["description"], "steps": job["summaries"]}})
+                                 "draft": {"name": job["name"], "description": job["description"], "steps": job["summaries"], "recording_review": job["draft"].recording_review()}})
             child = subprocess.Popen([str(helper), "--edit", str(request), str(response)], cwd=str(helper.parent),
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 close_fds=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0)

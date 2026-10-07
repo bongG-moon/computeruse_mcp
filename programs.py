@@ -60,22 +60,26 @@ def inspect_programs(config_path) -> dict:
             "screen_accessed": False, "driver_started": False}
 
 
-def _entry(config, *, exe, name, program_id=None, hints="", control_exes=()):
+def _entry(config, *, exe, name, program_id=None, hints="", control_exes=(), launch=None):
     path = _plain_file(exe, executable=True)
     canonical = check_app(str(path))
     controls = [_plain_file(item, executable=True) for item in control_exes]
     canonical_controls = [check_app(str(item)) for item in controls]
     if canonical in canonical_controls or len(canonical_controls) != len(set(canonical_controls)):
         raise ProgramError("추가 조작 실행파일은 기본 실행파일과 다르고 서로 중복되지 않아야 합니다.")
-    matches = [item for item in config["programs"] if item.get("exe") and check_app(item["exe"]) == canonical]
+    matches = [item for item in config["programs"] if item.get("exe") and check_app(item["exe"]) == canonical
+               and (launch is None or item.get("launch") == launch)]
     if len(matches) > 1:
         raise ProgramError("같은 실행파일이 여러 항목에 등록되어 있습니다. 설정에서 중복을 먼저 확인하세요.")
     existing = matches[0] if matches else None
+    identity = canonical if launch is None else canonical + json.dumps(launch, ensure_ascii=False, sort_keys=True)
     selected_id = program_id if program_id is not None else (
-        existing["id"] if existing else "app-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12])
+        existing["id"] if existing else "app-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12])
     proposed = {"id": selected_id, "name": name.strip() if isinstance(name, str) else name,
                 "exe": str(path), "enabled": True, "control_exes": [str(item) for item in controls],
                 "hints": hints}
+    if launch is not None:
+        proposed["launch"] = copy.deepcopy(launch)
     # Reuse all normal name/id/app/hints limits without changing existing data.
     validate_config({**config, "programs": [proposed]})
     if existing:
@@ -89,9 +93,9 @@ def _entry(config, *, exe, name, program_id=None, hints="", control_exes=()):
     return proposed, False
 
 
-def preview_add(config_path, *, exe, name, program_id=None, hints="", control_exes=()) -> dict:
+def preview_add(config_path, *, exe, name, program_id=None, hints="", control_exes=(), launch=None) -> dict:
     path, original, config, digest = _read(config_path)
-    entry, exists = _entry(config, exe=exe, name=name, program_id=program_id, hints=hints, control_exes=control_exes)
+    entry, exists = _entry(config, exe=exe, name=name, program_id=program_id, hints=hints, control_exes=control_exes, launch=launch)
     if not exists:
         validate_config({**original, "programs": [*original["programs"], entry]})
     return {"ok": True, "status": "already_present" if exists else "ready_to_add",
@@ -154,10 +158,10 @@ def _replace_if_unchanged(path, original_hash, updated, entry):
     return hashlib.sha256(data).hexdigest()
 
 
-def add_program(config_path, *, expected_config_sha256, exe, name, program_id=None, hints="", control_exes=()) -> dict:
+def add_program(config_path, *, expected_config_sha256, exe, name, program_id=None, hints="", control_exes=(), launch=None) -> dict:
     if not isinstance(expected_config_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_config_sha256):
         raise ProgramError("preview-add가 반환한 설정 SHA256을 그대로 지정하세요.")
-    options = dict(exe=exe, name=name, program_id=program_id, hints=hints, control_exes=control_exes)
+    options = dict(exe=exe, name=name, program_id=program_id, hints=hints, control_exes=control_exes, launch=launch)
     # Reject malformed requests before creating even a lock file.
     preview = preview_add(config_path, **options)
     path = Path(preview["config_path"])
@@ -192,6 +196,9 @@ def main(argv=None) -> int:
             command.add_argument("--id", dest="program_id")
             command.add_argument("--hints", default="")
             command.add_argument("--control-exe", action="append", type=Path, default=[])
+            command.add_argument("--launch-uri", help="Windows에 전달할 전용 protocol:// 또는 http(s):// 주소")
+            command.add_argument("--argument", action="append", default=[], help="실행 인자 한 개. --argument=--flag 형태로 반복")
+            command.add_argument("--working-directory", type=Path, help="EXE 실행 시 시작 폴더")
         if action == "add":
             command.add_argument("--expected-config-sha256", required=True)
     args = parser.parse_args(argv)
@@ -199,8 +206,14 @@ def main(argv=None) -> int:
         if args.action in {"inspect", "list"}:
             result = inspect_programs(args.config)
         else:
+            if args.launch_uri and (args.argument or args.working_directory):
+                raise ProgramError("주소 실행과 EXE 인자·시작 폴더는 함께 지정하지 않습니다.")
+            launch = ({"kind": "uri", "target": args.launch_uri} if args.launch_uri else
+                      {"kind": "exe", "arguments": args.argument} if args.argument or args.working_directory else None)
+            if args.working_directory:
+                launch["cwd"] = str(args.working_directory)
             options = dict(exe=args.exe, name=args.name, program_id=args.program_id,
-                           hints=args.hints, control_exes=args.control_exe)
+                           hints=args.hints, control_exes=args.control_exe, launch=launch)
             if args.action == "add":
                 result = add_program(args.config, expected_config_sha256=args.expected_config_sha256, **options)
             else:

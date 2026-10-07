@@ -114,6 +114,106 @@ class DraftTests(unittest.TestCase):
             ProcessDraft([self.program], original)
 
 
+class RecordingSemanticTests(unittest.TestCase):
+    def setUp(self):
+        self.program = {"program_id": "editor", **TARGET, "label": "시험 앱"}
+        self.draft = ProcessDraft([self.program])
+
+    def event(self, operation="set_value", value="final"):
+        role, actions, prop = {"set_value": ("Edit", ["set_value"], "value"),
+                               "select_option": ("ComboBox", ["select", "expand"], "value"),
+                               "set_checked": ("CheckBox", ["toggle"], "selected")}[operation]
+        native = native_choice(); native["element"].update(role=role)
+        event = {**image_choice(), "program_id": "editor", "operation": operation,
+                 "native_target": native, "after": {"property": prop, "equals": value},
+                 "checked" if operation == "set_checked" else "value": value}
+        snapshot = {**TARGET, "elements": [{"element_index": 1, "role": role, "automation_id": "applicant",
+                     "name": "신청자", "actions": actions, prop: value, "bounds": native["bounds"]}]}
+        return event, {("editor", "main"): snapshot}
+
+    def test_verified_edit_combo_and_checkbox_become_semantic_steps_with_expected_final_state(self):
+        for operation, value in (("set_value", "final"), ("select_option", "A"), ("set_checked", True)):
+            event, snapshots = self.event(operation, value)
+            self.draft.recorded([event], snapshots=snapshots)
+            step = self.draft.steps[-1]
+            self.assertEqual(step["operation"], operation)
+            self.assertEqual(step["expect"][0]["equals"], value)
+            self.assertEqual(step["selector"]["automation_id"], "applicant")
+            for forbidden in ("native_target", "point", "pid", "window_id", "template_png"):
+                self.assertNotIn(forbidden, step)
+        self.assertEqual(len(self.draft.steps), 3)
+        self.draft.validate()
+
+    def test_missing_stale_ambiguous_unsupported_or_protected_semantics_never_replay_recorded_value(self):
+        for failure in ("missing", "stale", "ambiguous", "unsupported", "protected"):
+            draft = ProcessDraft([self.program]); event, snapshots = self.event(value="SENSITIVE_RECORDED_VALUE")
+            element = snapshots[("editor", "main")]["elements"][0]
+            if failure == "missing": snapshots = {}
+            elif failure == "stale": element["value"] = "different"
+            elif failure == "ambiguous": snapshots[("editor", "main")]["elements"].append({**element, "element_index": 2})
+            elif failure == "unsupported": element["actions"] = []
+            elif failure == "protected": element["is_password"] = True
+            with self.subTest(failure=failure):
+                draft.recorded([event], snapshots=snapshots)
+                self.assertEqual(draft.steps[0]["operation"], "manual_entry")
+                self.assertNotIn("SENSITIVE_RECORDED_VALUE", json.dumps(draft.steps))
+                self.assertIn("semantic_target_unverified", draft.recording_warnings)
+                with self.assertRaises(OperationError): draft.validate()
+
+    def test_plain_click_keeps_image_and_checkpoint_without_inventing_a_postcondition(self):
+        self.draft.recorded([{**image_choice(), "program_id": "editor", "operation": "click"}])
+        self.assertEqual([s["operation"] for s in self.draft.steps], ["image_click", "checkpoint"])
+        self.assertNotIn("expect", self.draft.steps[0])
+
+    def test_typed_combo_final_value_does_not_invent_the_successful_input_method(self):
+        event, snapshots = self.event("select_option", "typed result")
+        event["input_method"] = "keyboard_unverified"
+        self.draft.recorded([event], snapshots=snapshots)
+        self.assertEqual(self.draft.steps[0]["operation"], "manual_entry")
+        self.assertEqual(self.draft.steps[0]["manual_reason"], "recording_method_unverified")
+        self.assertNotIn("typed result", json.dumps(self.draft.steps))
+        self.assertEqual(self.draft.recording_warnings, ["recording_method_unverified"])
+        self.draft.recording_acknowledged = True
+        with self.assertRaises(OperationError): self.draft.validate()
+
+    def test_partial_recording_warnings_require_explicit_review_and_survive_reopen(self):
+        self.draft.recorded([{**image_choice(), "program_id": "editor", "operation": "click"}],
+                            warning_codes=["outside_target_not_recorded", "uia_text_unavailable"])
+        with self.assertRaises(OperationError) as failure: self.draft.validate()
+        self.assertEqual(failure.exception.code, "recording_review_required")
+        self.draft.recording_acknowledged = True; self.draft.validate()
+        review = {k: self.draft.recording_review()[k] for k in ("partial", "warning_codes", "acknowledged")}
+        reopened = ProcessDraft([self.program], {"steps": self.draft.steps, "recording_review": review})
+        self.assertEqual(reopened.recording_warnings, self.draft.recording_warnings)
+        self.assertTrue(reopened.recording_review()["partial"])
+
+    def test_zero_actions_is_not_successful_hover_recording(self):
+        with self.assertRaises(OperationError) as failure: self.draft.recorded([])
+        self.assertEqual(failure.exception.code, "recording_invalid_events")
+        self.assertIn("마우스", str(failure.exception))
+
+    def test_wait_for_state_uses_an_explicit_selected_expectation_without_action_target(self):
+        event, snapshots = self.event()
+        selection = self.draft.remember(self.program, snapshots[("editor", "main")], event["native_target"])
+        self.draft.add({**TARGET, "program_id": "editor", "action": "wait_for_state", "timeout_seconds": 2.5,
+                        "expect": {"selection_id": selection["selection_id"], "property": "value", "equals": "done"}})
+        self.assertEqual(self.draft.steps[0]["timeout_ms"], 2500)
+        self.assertEqual(self.draft.steps[0]["operation"], "wait_for_state")
+        self.assertNotIn("selector", self.draft.steps[0])
+
+    def test_progress_is_owned_bounded_and_redacts_unknown_values(self):
+        progress = {"helper_pid": 888, "state": "recording", "event_count": 2, "manual_count": 1, "max_events": 15,
+                    "warning_codes": [], "probe": {"hooks": "available", "uia": "available"},
+                    "last_event": {"operation": "click", "recognition": "uia_candidate", "value": "SECRET"}, "value": "SECRET"}
+        clean = ProcessEditors._recording_progress(progress, 888)
+        self.assertFalse(clean["hover_is_action"])
+        self.assertNotIn("SECRET", json.dumps(clean))
+        for invalid in ({"helper_pid": 777}, {"state": {}}, {"event_count": 35}, {"manual_count": 3},
+                        {"warning_codes": ["untrusted_warning"]}, {"probe": {"hooks": "available"}}):
+            with self.subTest(invalid=invalid), self.assertRaises(OperationError):
+                ProcessEditors._recording_progress({**progress, **invalid}, 888)
+
+
 class ImageDraftTests(unittest.TestCase):
     def setUp(self):
         DraftTests.setUp(self)
@@ -647,6 +747,43 @@ class EditorIPCTests(unittest.TestCase):
             result = self.editors._visual(job, "pick", TARGET, 30)
         self.assertGreaterEqual(len(checks), 2)
         self.assertTrue(result["human_confirmed"]); self.assertTrue(child.terminated)
+        self.status(answer, cancel=True); self.terminal(answer)
+
+    def test_recording_progress_is_reported_and_owned_files_are_cleaned(self):
+        self.context(); answer = self.start(); job = self.editors.jobs[answer["editor_id"]]
+        child = Child(); child.pid = 888
+        def spawn(args, **kwargs):
+            request = json.loads(Path(args[2]).read_text(encoding="utf-8"))
+            atomic_json(Path(args[3]+".ready.json"), {"nonce": request["nonce"], "status": "ready", "helper_pid": 888, "helper_window_id": 9998})
+            atomic_json(Path(args[3]+".progress.json"), {"nonce": request["nonce"], "helper_pid": 888,
+                "state": "review", "event_count": 1, "manual_count": 0, "max_events": 15,
+                "warning_codes": ["outside_target_not_recorded"], "probe": {"hooks": "available", "uia": "available"}})
+            atomic_json(Path(args[3]), {"nonce": request["nonce"], "status": "recorded", "human_confirmed": True,
+                "events": [{**image_choice(), "program_id": "editor", "operation": "click"}], "warnings": ["outside_target_not_recorded"]})
+            return child
+        with mock.patch("process_editor.subprocess.Popen", side_effect=spawn):
+            result = self.editors._visual(job, "record", {"targets": [TARGET]}, 30)
+        self.assertEqual(result["status"], "recorded")
+        self.assertEqual(job["result"]["recording"]["event_count"], 1)
+        self.assertFalse(job["result"]["recording"]["task_verified"])
+        self.assertEqual(list((self.runtime.run_dir / "visual").iterdir()), [])
+        self.assertTrue(child.terminated)
+        self.status(answer, cancel=True); self.terminal(answer)
+
+    def test_recording_result_without_heartbeat_is_not_accepted(self):
+        self.context(); answer = self.start(); job = self.editors.jobs[answer["editor_id"]]
+        child = Child(); child.pid = 888
+        def spawn(args, **kwargs):
+            request = json.loads(Path(args[2]).read_text(encoding="utf-8"))
+            atomic_json(Path(args[3]+".ready.json"), {"nonce": request["nonce"], "status": "ready", "helper_pid": 888, "helper_window_id": 9998})
+            atomic_json(Path(args[3]), {"nonce": request["nonce"], "status": "recorded", "human_confirmed": True, "events": []})
+            return child
+        with mock.patch("process_editor.subprocess.Popen", side_effect=spawn), self.assertRaises(OperationError) as failure:
+            self.editors._visual(job, "record", {"targets": [TARGET]}, 30)
+        self.assertEqual(failure.exception.code, "recording_progress_missing")
+        self.assertEqual(job["result"]["recording"]["state"], "failed")
+        self.assertEqual(list((self.runtime.run_dir / "visual").iterdir()), [])
+        self.assertTrue(child.terminated)
         self.status(answer, cancel=True); self.terminal(answer)
 
     def test_cancel_during_accepted_store_write_is_responsive_and_reports_saved_result(self):

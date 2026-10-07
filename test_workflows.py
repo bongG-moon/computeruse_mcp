@@ -161,6 +161,23 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(answer["pending_step"], 0)
                 self.assertEqual(len(engine.calls), 1)
 
+    def test_metrics_include_all_steps_and_do_not_persist_values_or_invalid_numbers(self):
+        engine = ScriptedOperations([
+            {"task_verified": True, "metrics": {"tool_calls": 3, "observations": 2, "elapsed_ms": 70.5,
+                "action_ms": float("nan"), "input": "do-not-keep"}},
+            {"task_verified": True, "metrics": {"tool_calls": 2, "observations": 1, "elapsed_ms": 21,
+                "action_ms": 10, "scoped_observations": 1, "focus_actions": True}}])
+        answer = self.run_recipe(engine)
+        self.assertEqual(answer["metrics"], {"measured_steps": 2, "tool_calls": 5, "observations": 3,
+            "elapsed_ms": 91.5, "action_ms": 10, "scoped_observations": 1})
+        self.assertNotIn("metrics", self.checkpoint(answer["run_id"]))
+
+    def test_failed_step_metrics_are_included_without_measuring_unattempted_steps(self):
+        engine = ScriptedOperations([{"task_verified": False, "metrics": {"observations": 2, "elapsed_ms": 100}}])
+        answer = self.run_recipe(engine)
+        self.assertEqual(answer["metrics"], {"measured_steps": 1, "observations": 2, "elapsed_ms": 100})
+        self.assertEqual(answer["completed_steps"], 0)
+
     def test_resume_verifies_uncertain_step_without_replaying_it(self):
         initial = self.run_recipe(ScriptedOperations([{"task_verified": False}]))
         engine = ScriptedOperations()
@@ -190,6 +207,81 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(answer["completed_steps"], 2)
         self.assertEqual([entry[0]["operation"] for entry in engine.calls], ["assert"])
         self.assertEqual(engine.reuse_flags, [False])
+
+    def state_wait_task(self, *, require_change=False, checkpoint=False):
+        task = copy.deepcopy(self.task)
+        task["steps"] = [{"program_id": "editor", "operation": "wait_for_state", "timeout_ms": 500,
+            "poll_interval_ms": 100, "expect": [{"selector": {"name": "첫 입력칸", "role": "Edit"},
+                "property": "value", "equals": "준비", "require_change": require_change}]}]
+        if checkpoint:
+            task["steps"].append({"program_id": "editor", "operation": "checkpoint", "message": "상태 확인"})
+        return task
+
+    def test_completed_state_wait_resume_uses_fresh_assert_without_input(self):
+        runtime = GuardedUIRuntime(self.tmp.name)
+        runtime.values[(100, 200)] = {"첫 입력칸": "준비"}
+        task = self.state_wait_task()
+        first = self.runner.run(runtime, task, {}, self.target)
+        self.assertTrue(first["task_verified"])
+        previous_calls = len(runtime.calls)
+        resumed = self.runner.run(runtime, task, {}, self.target, resume_run_id=first["run_id"])
+        self.assertTrue(resumed["task_verified"])
+        self.assertEqual(resumed["execution"]["mode"], "standard")
+        self.assertEqual([name for name, _ in runtime.calls[previous_calls:]], ["get_window_state"])
+        self.assertFalse(resumed["last_result"]["input_dispatched"])
+
+    def test_checkpoint_after_state_wait_can_resume_with_fresh_property_proof(self):
+        runtime = GuardedUIRuntime(self.tmp.name)
+        runtime.values[(100, 200)] = {"첫 입력칸": "준비"}
+        runtime.capture_checkpoint = mock.Mock(return_value={"structuredContent": {"pid": 100, "window_id": 200},
+            "content": [{"type": "image", "data": "synthetic", "mimeType": "image/png"}]})
+        task = self.state_wait_task(checkpoint=True)
+        first = self.runner.run(runtime, task, {}, self.target)
+        self.assertEqual(first["status"], "needs_review")
+        resumed = self.runner.run(runtime, task, {}, self.target, resume_run_id=first["run_id"],
+                                  acknowledge_checkpoint=first["checkpoint"]["id"])
+        self.assertTrue(resumed["task_verified"])
+        self.assertEqual(resumed["completed_steps"], 2)
+        self.assertTrue(all(name == "get_window_state" for name, _ in runtime.calls))
+        self.assertEqual(runtime.capture_checkpoint.call_count, 1)
+
+    def test_completed_change_wait_cannot_recreate_baseline_when_resuming_checkpoint(self):
+        runtime = GuardedUIRuntime(self.tmp.name)
+        runtime.values[(100, 200)] = {"첫 입력칸": "대기"}
+        runtime.capture_checkpoint = mock.Mock(return_value={"structuredContent": {"pid": 100, "window_id": 200},
+            "content": [{"type": "image", "data": "synthetic", "mimeType": "image/png"}]})
+        original = runtime.call
+        def advance_state(name, arguments):
+            result = original(name, arguments)
+            runtime.values[(100, 200)]["첫 입력칸"] = "준비"
+            return result
+        runtime.call = advance_state
+        task = self.state_wait_task(require_change=True, checkpoint=True)
+        first = self.runner.run(runtime, task, {}, self.target)
+        self.assertEqual(first["status"], "needs_review")
+        self.assertEqual(first["completed_steps"], 1)
+        calls = len(runtime.calls)
+        resumed = self.runner.run(runtime, task, {}, self.target, resume_run_id=first["run_id"],
+                                  acknowledge_checkpoint=first["checkpoint"]["id"])
+        self.assertFalse(resumed["task_verified"])
+        self.assertEqual(resumed["status"], "needs_review")
+        self.assertEqual(resumed["last_result"]["diagnostic"]["code"], "change_baseline_required")
+        self.assertFalse(resumed["last_result"]["input_dispatched"])
+        self.assertEqual(len(runtime.calls), calls)
+        self.assertEqual(runtime.capture_checkpoint.call_count, 1)
+
+    def test_pending_property_wait_can_resume_without_replaying_input(self):
+        runtime = GuardedUIRuntime(self.tmp.name)
+        runtime.values[(100, 200)] = {"첫 입력칸": "대기"}
+        task = self.state_wait_task()
+        task["steps"][0]["timeout_ms"] = 0
+        first = self.runner.run(runtime, task, {}, self.target)
+        self.assertFalse(first["task_verified"])
+        self.assertEqual(first["pending_step"], 0)
+        runtime.values[(100, 200)]["첫 입력칸"] = "준비"
+        resumed = self.runner.run(runtime, task, {}, self.target, resume_run_id=first["run_id"])
+        self.assertTrue(resumed["task_verified"])
+        self.assertTrue(all(name == "get_window_state" for name, _ in runtime.calls))
 
     def test_real_operations_reuse_verified_observation_under_reentrant_runtime_lock(self):
         self.runtime = GuardedUIRuntime(self.tmp.name)

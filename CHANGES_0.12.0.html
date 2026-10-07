@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Computer Use MCP 0.12.0 — 개선사항과 적용 방법</title>
+<style>
+:root{font-family:'Malgun Gothic',sans-serif;color:#223247;background:#f3f6fa}*{box-sizing:border-box}body{margin:0;line-height:1.8}main{max-width:1080px;margin:auto;padding:36px 24px 72px}header{background:#153453;color:white;padding:36px;border-radius:22px}header p{color:#d9e6f4}h1{font-size:32px;line-height:1.4;margin:12px 0}h2{font-size:23px;margin:0 0 16px}h3{font-size:18px;margin:20px 0 8px}section{background:white;border:1px solid #dce5f0;border-radius:18px;padding:28px;margin:22px 0}p{margin:10px 0}a{color:#1456bd}header a{color:#c5e0ff}table{border-collapse:collapse;width:100%;font-size:15px}td,th{border-bottom:1px solid #dce5f0;padding:14px 12px;text-align:left;vertical-align:top}th{background:#edf3fa}th:first-child{width:22%}.prompt{background:#f0f5ff;border-left:4px solid #2968ea;padding:16px 20px;border-radius:5px;white-space:pre-wrap}.note{background:#fff5df;border-radius:10px;padding:14px 18px}.muted{color:#54687e;font-size:14px}code{font-family:Consolas,monospace;background:#edf2f7;padding:2px 5px;overflow-wrap:anywhere}.table{overflow:auto}li{margin:10px 0}@media(max-width:680px){main{padding:16px}header,section{padding:20px}h1{font-size:26px}table{min-width:650px}}@media print{body{background:white}main{padding:0}header{background:#fff;color:#183b60;border:1px solid #ddd}header p{color:#334}section{break-inside:avoid}a{color:inherit}}
+</style></head><body><main>
+<header><p>독립 Computer Use MCP · 0.12.0 · 2026년 10월 7일</p><h1>한 번 확인한 업무는 재사용하고,<br>불확실한 동작은 구분합니다.</h1><p>보내주신 운영 대화에서 드러난 인식·녹화·검증 문제와 반복 실행 속도 개선을 합쳐 반영했습니다. 기존 앱이나 하네스에 화면 메뉴를 추가한 변경은 아닙니다.</p><a href="PROCESS_GUIDE.html">프로세스 만들기 안내</a> · <a href="README.html">처음 연결하기</a> · <a href="VALIDATION.html">검증 결과와 범위</a></header>
+<section><h2>무엇을 고쳤나요?</h2><div class="table"><table><thead><tr><th>겪었던 문제</th><th>이번에 반영한 동작</th><th>사용할 때 달라지는 점</th></tr></thead><tbody>
+<tr><td>매번 파일 탐색·전체 요소 분석을 반복</td><td>등록 프로그램과 현재 창을 먼저 확인하고, 저장한 요소·프로세스를 우선 사용하도록 MCP 안내를 정리했습니다.</td><td>한 번 성공한 작업은 이름으로 다시 실행합니다. 새 PowerShell 추적 스크립트를 계속 만들 필요를 줄입니다.</td></tr>
+<tr><td>직접 열면 되는데 자동 실행은 실패</td><td>EXE의 실행 인자·시작 폴더, Windows에 전달할 전용 주소를 프로그램별로 저장합니다.</td><td>평소 실행 방법을 등록할 수 있습니다. 주소 전달 성공과 실제 업무 창 준비 완료는 구분합니다.</td></tr>
+<tr><td>녹화가 시작됐는지 모르고 오래 기다림</td><td>입력 기록 기능과 요소 읽기 준비를 확인하고 시작합니다. 녹화 상태·기록 수·수동 확인 수를 갱신하고 응답이 끊기면 오류로 알립니다.</td><td>마우스를 올려놓은 것만으로는 동작이 기록됐다고 하지 않습니다. 대상 창 밖에서 발생한 누락도 표시합니다.</td></tr>
+<tr><td>조건을 골랐는데 선택값은 기록되지 않음</td><td>지원하는 입력·선택·체크 동작의 최종값을 현재 요소와 대조한 뒤 완료 조건과 함께 저장합니다.</td><td>값이나 입력 방법이 불확실하면 수동 단계로 남깁니다. 복잡한 콤보는 별도로 검증한 입력 후 Enter/Tab 확정 방법을 지정할 수 있습니다.</td></tr>
+<tr><td>오래된 상태 문구·그림 무늬로 조회 성공 판정</td><td>이전 상태와 달라졌는지 확인하는 완료 조건과, 지정한 조건이 충족될 때까지 기다리는 단계를 추가했습니다.</td><td>클릭 전달과 실제 결과 확인을 구분합니다. 조회 카운터·새 결과 식별자 등 해당 업무에 맞는 완료 기준이 필요합니다.</td></tr>
+<tr><td>엑셀 결과 확인에 파일 탐색·Excel 실행 반복</td><td>알려진 내보내기 폴더에서 기준 파일 상태를 기록하고, 새로 생성되거나 내용이 바뀐 CSV/XLSX의 지정 열을 읽습니다.</td><td>전체 디스크를 뒤지거나 Excel COM을 시작하지 않고 행 수·일치 건수를 확인합니다. 필드와 결과 열의 대응은 정확히 지정해야 합니다.</td></tr>
+<tr><td>성공했던 작업도 다시 실행하면 느림</td><td>확인된 작업에 빠른 반복 실행을 자동 적용합니다. 현재 필요한 속성만 묶어서 읽고 단계별 시간·호출 수를 제공합니다.</td><td>같은 작업 구성에서는 입력값만 바꿔 실행할 수 있습니다. 실제 값 검증, 창 소유 확인, 사람의 화면 확인 단계는 유지합니다.</td></tr>
+</tbody></table></div></section>
+<section><h2>처음 적용할 때는 이렇게 하세요</h2><ol>
+<li><strong>새 ZIP 전체를 새 폴더에 압축 해제합니다.</strong> EXE 한 개만 옮기면 필요한 도우미와 Python 파일이 빠질 수 있습니다. Driver 포함판과 별도 준비판 중 환경에 맞는 것을 사용합니다.</li>
+<li>Claude Code에 새 폴더의 <code>INSTALL.md</code>를 읽고 기존 연결을 갱신해 달라고 요청합니다. 기존 설정 경로·등록 범위·저장한 작업을 유지하도록 아래 문장을 사용할 수 있습니다.</li>
+<li>연결을 다시 열고 <code>computer_status</code>의 버전이 <strong>0.12.0</strong>이고 실행 폴더가 새 폴더인지 확인합니다. 이미 켜진 MCP는 파일만 바꿔도 자동으로 새 코드가 되지 않습니다.</li>
+<li>실제 운영 데이터에 적용하기 전에, 해당 프로그램의 작은 시험 작업을 한 번 실행해 저장합니다. 그다음부터 저장한 이름으로 반복합니다.</li>
+</ol><div class="prompt">이 새 폴더의 INSTALL.md를 읽고 기존 Computer Use MCP 연결을 0.12.0으로 갱신해 줘. 기존 설정 파일과 저장한 작업을 유지하고 다른 MCP·모델 설정은 바꾸지 마. 연결을 다시 연 뒤 버전과 실행 폴더를 확인해 줘.</div>
+<p class="muted">설치 계획을 만드는 prepare는 화면 업무를 할 때마다 실행하는 단계가 아닙니다. 기존 연결에 프로그램만 추가할 때는 프로그램 추가 화면 또는 전용 도우미를 사용합니다.</p></section>
+<section><h2>채팅에서 요청하는 예시</h2><h3>내가 하는 동작을 녹화해서 저장</h3><div class="prompt">지금 등록한 프로그램의 이 창에서 내가 하는 작업을 녹화해 줘. 시작할 준비가 됐는지 먼저 확인하고, 기록한 동작 수를 보여 줘. 녹화를 끝내면 입력값과 확인하지 못한 단계를 함께 검토한 뒤 ‘월간 조회’로 저장하고 싶어.</div>
+<p>프로세스 편집기에서 <strong>동작 녹화 → 시작 → 직접 작업 → 끝내기</strong> 순서로 진행합니다. 기록은 영상 파일이 아닌 동작 초안입니다. 새 팝업·다른 창 이동은 기록에서 빠질 수 있으며 경고를 검토해야 저장할 수 있습니다. 사용자 이름·일반 입력값은 저장 작업에 포함될 수 있으므로 저장 전 내용을 확인하세요.</p>
+<h3>저장한 업무를 빠르게 반복</h3><div class="prompt">저장한 ‘월간 조회’를 이번 조건으로 실행해 줘. 이전에 확인한 순서를 재사용하고 execution_mode는 auto로 해 줘. 조건값과 이번 조회 결과는 확인하되, 오류가 나면 같은 입력을 반복하지 말고 실패한 단계만 알려줘.</div>
+<p>첫 실행은 일반 검증입니다. 성공한 같은 작업 구성의 다음 실행에는 빠른 확인을 사용합니다. 프로그램 실행파일·설정·작업 구성·MCP 버전이 바뀌거나 실행에 실패하면 일반 검증으로 돌아갑니다. 느린 이유를 확인하려면 <code>execution</code>과 <code>metrics</code>를 요약해 달라고 요청할 수 있습니다.</p>
+<h3>조회가 실제로 끝난 뒤 다음 단계로 이동</h3><div class="prompt">조회 버튼을 누른 뒤 결과 번호가 이전과 달라지고 완료 상태가 될 때까지 기다려 줘. 완료되면 바로 다음 단계로 가고, 정해진 시간 안에 확인되지 않으면 멈춰 줘. 예전 조회 시간 표시만으로 성공이라고 판단하지 마.</div>
+<p>값 변경을 확인할 속성과 실제 완료 기준은 해당 화면에서 먼저 정해야 합니다. 단순한 버튼 존재·목록에 W 항목이 있다는 사실·줄무늬 픽셀은 새 데이터 확인의 근거가 되지 않습니다.</p>
+<h3>저장한 결과 파일 확인</h3><div class="prompt">내보내기 폴더는 [정확한 폴더]야. 내보내기 전에 기준 파일 상태를 기록해 줘. 내보내기 후 [정확한 파일명]의 [시트 이름], [헤더 행 번호]에서 [정확한 열 이름]이 모두 W인지 확인해 줘. 다른 이름의 화면 필드와 결과 열이 같은 의미라고 추측하지 마.</div>
+</section>
+<section><h2>빨라지는 범위와 남아 있는 제한</h2><p>작업 순서와 조건을 저장하면 매번 모델이 처음부터 탐색하는 시간을 줄일 수 있습니다. 빠른 확인 도우미는 요청한 요소의 현재 속성만 읽으며, 입력에 쓸 오래된 좌표나 Driver 핸들을 재사용하지 않습니다.</p><p>프로그램 자체의 로딩 시간, 사내 서버 조회 시간, 모델의 응답 시간은 이 변경만으로 줄일 수 없습니다. 이미지 단계의 사람 확인이나 새로 나타난 팝업 판단도 자동 생략하지 않습니다.</p><div class="note"><strong>현재 모든 프로그램의 조건 설정을 완전 자동 녹화하는 기능은 아닙니다.</strong> UIA가 불완전한 커스텀 그리드, 지원하지 않는 입력 방식, 새 팝업은 이미지 선택 또는 수동 확인이 필요할 수 있습니다. 기본 이미지 검색은 저장한 그림과 현재 화면을 비교하는 방식이며 OCR이나 전체 화면을 이해하는 모델을 새로 추가한 것은 아닙니다.</div>
+<p>파일 검증은 지정한 CSV/XLSX 내용이 조건과 일치하는지 확인합니다. 이것만으로 화면의 조회가 맞았다는 결론까지 내리지는 않습니다. 수식이 있는 검증 열·외부 연결·지나치게 큰 파일은 거절합니다. XLSX 내부 XML 한 개 128 MiB, 합계 256 MiB, 데이터 10만 행·500만 셀 등의 제한이 있습니다. 압축된 파일 크기만 작다고 항상 읽을 수 있는 것은 아닙니다.</p><p>이번 개선은 MCP와 동봉 안내에 적용했습니다. 연결한 채팅 앱이 별도 PowerShell 도구로 직접 스크립트를 만들거나 지원하지 않는 이미지 표시를 하는 것까지 강제로 막지는 못합니다. 사내 LLM의 도구 선택과 결과 설명은 운영 환경에서 별도 확인해야 합니다.</p></section>
+<section><h2>확인한 결과</h2><p>독립 Windows 시험 창에서 녹화 시작·상태·최종값 대조·누락 경고, 프로세스 저장·재연결·재생, 일반 실행과 빠른 반복 실행을 검증했습니다. 자동 검사 수와 측정값, 시험 범위는 <a href="VALIDATION.html#validation-0120">0.12.0 검증 기록</a>에서 확인할 수 있습니다.</p><p class="muted">사내 LLM 연결, 제공하신 운영 프로그램·URL, 운영 데이터는 사용하지 않았습니다. 이 PC의 합성 시험 결과를 모든 프로그램의 성공이나 운영 환경의 속도 보장으로 확대하지 않습니다.</p></section>
+</main></body></html>

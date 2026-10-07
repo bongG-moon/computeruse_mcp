@@ -306,8 +306,8 @@ internal static class VisualTools
         internal SessionForm(Dictionary<string, object> data, string response, int maximum) {
             NonceValue = Str(data, "nonce", ""); Response = response; int seconds = Num(data, "timeout_seconds", 180);
             if (seconds < 10 || seconds > maximum) throw new InvalidOperationException("invalid_timeout"); Deadline = DateTime.UtcNow.AddSeconds(seconds);
-            KeyPreview = true; KeyDown += delegate(object s, KeyEventArgs e) { if (e.KeyCode == Keys.Escape) { e.Handled = true; Finish("cancelled", null); } };
-            Clock.Interval = 80; Clock.Tick += delegate { if (DateTime.UtcNow > Deadline) Finish("cancelled", new Dictionary<string, object> { { "code", "timeout" } }); };
+            KeyPreview = true; KeyDown += delegate(object s, KeyEventArgs e) { if (e.KeyCode == Keys.Escape) { e.Handled = true; Escape(); } };
+            Clock.Interval = 80; Clock.Tick += delegate { if (DateTime.UtcNow > Deadline) TimedOut(); };
             Shown += delegate { Ready(); Clock.Start(); };
             VisibleChanged += delegate { if (Visible) Ready(); };
             FormClosing += delegate { if (!Done) Finish("cancelled", null); }; FormClosed += delegate { Clock.Stop(); Clock.Dispose(); };
@@ -316,6 +316,8 @@ internal static class VisualTools
             if (Done) return; Done = true; Clock.Stop(); if (value == null) value = new Dictionary<string, object>(); value["nonce"] = NonceValue; value["status"] = status;
             Write(Response, value); Close();
         }
+        internal virtual void Escape() { Finish("cancelled", null); }
+        internal virtual void TimedOut() { Finish("cancelled", new Dictionary<string, object> { { "code", "timeout" } }); }
         void Ready() {
             if (Done || !Visible || !IsHandleCreated) return;
             Write(Response + ".ready.json", new Dictionary<string, object> { { "nonce", NonceValue }, { "status", "ready" }, { "helper_pid", Process.GetCurrentProcess().Id }, { "helper_window_id", Handle.ToInt64() } });
@@ -380,14 +382,19 @@ internal static class VisualTools
             internal Target Target; internal string Operation, Reason; internal Bitmap Crop; internal Point Anchor, ScreenPoint; internal Size FrameSize;
             internal int Wheel; internal string Key; internal string[] Keys; internal Dictionary<string, object> Baseline;
             internal Dictionary<string, object> Saved; internal int Index = -1;
+            internal SemanticSample Semantic;
         }
+        sealed class SemanticSample { internal AutomationElement Element; internal Dictionary<string, object> Native; internal string Identity, Role, Property; internal object Value; internal bool Enabled; }
         readonly List<Target> targets = new List<Target>(); readonly List<Dictionary<string, object>> events = new List<Dictionary<string, object>>();
         readonly Queue<Pending> pending = new Queue<Pending>(); readonly List<string> warnings = new List<string>(); readonly int maximum;
         readonly Label info = new Label(); readonly ListBox list = new ListBox(); readonly Button start = Button("기록 시작"), pause = Button("일시정지"), stop = Button("기록 마치고 검토");
         Hook mouseProc, keyProc; IntPtr mouseHook, keyHook; bool recording, textBusy, uiaStalled, outside; int generation, injected;
-        DateTime frameAt, dirtyAt, lastSample, workerStarted; Target frameTarget; Rectangle frameBounds; Bitmap frame; List<Rectangle> frameOccluders = new List<Rectangle>();
+        string recordState = "checking", hookProbe = "checking", uiaProbe = "checking"; DateTime heartbeatAt, probeAt;
+        volatile bool probeDone, probeGood; bool probeSettled;
+        DateTime frameAt, dirtyAt, lastSample, workerStarted, typingConfirmedAt; Target frameTarget; Rectangle frameBounds; Bitmap frame; List<Rectangle> frameOccluders = new List<Rectangle>();
         Dictionary<string, object> lastImage, focusedState; Target lastImageTarget, focusedTarget; DateTime focusedAt; Point lastImagePoint;
         Pending mouseDown, typing; Point mouseStart; readonly object stateLock = new object(); Dictionary<string, object> completedState; Target completedTarget; int completedGeneration; bool workerCompleted;
+        SemanticSample hovered, completedHover, tracked, completedTracked; Target hoverTarget, trackedTarget; DateTime hoverAt, trackedAt; Dictionary<string, object> trackedEvent; int trackedIndex; bool trackedKeyboard;
         internal Recorder(Dictionary<string, object> data, string response) : base(data, response, 1800) {
             maximum = Num(data, "max_events", 15); if (maximum < 1 || maximum > 15) throw new InvalidOperationException("invalid_event_limit");
             object values; if (!data.TryGetValue("targets", out values) || !(values is IEnumerable)) throw new InvalidOperationException("targets_required");
@@ -398,26 +405,54 @@ internal static class VisualTools
             info.Dock = DockStyle.Fill; info.Text = "기록 시작 후 선택한 프로그램을 직접 조작하세요.\n클릭·키 동작을 기록하고 마지막에 검토합니다.\n암호와 알 수 없는 입력칸의 글자는 저장하지 않습니다.\n다른 창에서는 기록이 자동으로 멈춥니다. Esc: 기록 일시정지";
             list.Dock = DockStyle.Fill; var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill }; Button cancel = Button("취소"); buttons.Controls.Add(start); buttons.Controls.Add(pause); buttons.Controls.Add(stop); buttons.Controls.Add(cancel);
             layout.Controls.Add(info, 0, 0); layout.Controls.Add(list, 0, 1); layout.Controls.Add(buttons, 0, 2); Controls.Add(layout);
-            pause.Enabled = false; stop.Enabled = false;
-            start.Click += delegate { InstallHooks(); recording = true; generation++; outside = false; start.Enabled = false; pause.Enabled = true; stop.Enabled = true; info.Text = ActiveText(); };
+            start.Enabled = pause.Enabled = stop.Enabled = false;
+            start.Click += delegate { try { InstallHooks(); recording = true; generation++; outside = false; recordState = "recording"; start.Enabled = false; pause.Enabled = true; stop.Enabled = true; info.Text = ActiveText(); Heartbeat(true); } catch { Failure("recording_hook_unavailable"); } };
             pause.Click += delegate { Drain(); Pause(); };
-            stop.Click += delegate { Drain(); Pause(); Finish("recorded", new Dictionary<string, object> { { "events", events }, { "human_confirmed", true }, { "review_required", true }, { "warnings", warnings }, { "injected_events", injected } }); };
+            stop.Click += delegate { CompleteRecording(); };
             cancel.Click += delegate { Finish("cancelled", null); };
             Clock.Tick += Tick; FormClosed += delegate { UninstallHooks(); if (frame != null) frame.Dispose(); while (pending.Count > 0) { Pending p = pending.Dequeue(); if (p.Crop != null) p.Crop.Dispose(); } focusedState = null; };
             Shown += delegate {
                 Rectangle screen = Screen.FromHandle(targets[0].Hwnd).WorkingArea;
                 Point[] positions = { new Point(screen.Right - Width - 12, screen.Top + 12), new Point(screen.Left + 12, screen.Top + 12), new Point(screen.Right - Width - 12, screen.Bottom - Height - 12), new Point(screen.Left + 12, screen.Bottom - Height - 12) };
                 Point selected = positions[0]; foreach (Point p in positions) { bool covered = false; Rectangle candidate = new Rectangle(p, Size); foreach (Target t in targets) if (candidate.IntersectsWith(t.Bounds())) covered = true; if (!covered) { selected = p; break; } } DesktopLocation = selected;
+                StartProbe();
             };
         }
+        internal override void Escape() { Drain(); Pause(); }
+        internal override void TimedOut() { Warn("recording_timeout_partial"); CompleteRecording(); }
+        void Warn(string code) { if (!warnings.Contains(code)) warnings.Add(code); }
+        void Failure(string code) { recording = false; generation++; Warn(code); Drain(); FinalizePendingInput(); recordState = "failed"; start.Enabled = false; pause.Enabled = false; stop.Enabled = events.Count > 0; info.Text = "기록 오류로 중지했습니다. 지금까지 기록한 부분만 검토할 수 있습니다.\n" + code; Heartbeat(true); }
+        void CompleteRecording() {
+            Drain(); Pause(); recordState = "review"; Heartbeat(true);
+            Finish("recorded", new Dictionary<string, object> { { "events", events }, { "human_confirmed", true }, { "review_required", true }, { "warnings", warnings }, { "partial", warnings.Count > 0 }, { "injected_events", injected } });
+        }
+        void FinalizePendingInput() {
+            if (typing != null && typing.Saved != null && dirtyAt > typingConfirmedAt && typing.Reason != "protected_input" && typing.Reason != "recording_method_unverified") {
+                typing.Saved["operation"] = "manual_entry"; typing.Saved["reason"] = "existing_text_requires_review"; typing.Saved.Remove("value"); Warn("recording_final_value_unconfirmed");
+            }
+        }
+        void StartProbe() {
+            info.Text = "기록 시작 전 점검 중 · 입력 후크와 UIA 응답을 확인합니다.\n버튼 위에 마우스만 올리는 동작은 기록하지 않습니다.";
+            try { InstallHooks(); hookProbe = "available"; } catch { hookProbe = "unavailable"; Failure("recording_hook_unavailable"); return; }
+            probeAt = DateTime.UtcNow; Heartbeat(true);
+            Thread probe = new Thread(delegate() { try { foreach (Target target in targets) { var root = AutomationElement.FromHandle(target.Hwnd); if (root == null || root.Current.ProcessId != target.Pid) return; } probeGood = true; } catch { } finally { probeDone = true; } });
+            probe.IsBackground = true; probe.SetApartmentState(ApartmentState.MTA); probe.Start();
+        }
+        void Heartbeat(bool force) {
+            if (Done || (!force && DateTime.UtcNow.Subtract(heartbeatAt).TotalMilliseconds < 250)) return;
+            int manual = 0; foreach (var item in events) if (Str(item, "operation", "") == "manual_entry") manual++;
+            var value = new Dictionary<string, object> { { "nonce", NonceValue }, { "helper_pid", Process.GetCurrentProcess().Id }, { "state", recordState }, { "event_count", events.Count }, { "manual_count", manual }, { "max_events", maximum }, { "warning_codes", warnings }, { "probe", new Dictionary<string, object> { { "hooks", hookProbe }, { "uia", uiaProbe } } } };
+            if (events.Count > 0) value["last_event"] = new Dictionary<string, object> { { "operation", Str(events[events.Count - 1], "operation", "") }, { "recognition", events[events.Count - 1].ContainsKey("native_target") ? "uia_candidate" : "image_or_manual" } };
+            try { Write(Response + ".progress.json", value); heartbeatAt = DateTime.UtcNow; } catch { recording = false; recordState = "failed"; Warn("recording_progress_failed"); info.Text = "기록 상태를 전달하지 못해 중지했습니다. 지금까지의 내용을 검토하세요."; start.Enabled = pause.Enabled = false; stop.Enabled = events.Count > 0; }
+        }
         string ActiveText() { return "● 기록 중 · 선택한 프로그램을 직접 조작하세요.\n버튼 위에서 잠깐 멈춘 뒤 클릭하면 더 정확하게 기록됩니다.\n알 수 없는 입력·드래그는 ‘직접 설정 필요’로 남깁니다.\n[기록 마치고 검토]에서 내용을 확인한 뒤 저장합니다."; }
-        void Pause() { recording = false; generation++; start.Enabled = events.Count < maximum; pause.Enabled = false; info.Text = "일시정지 · 지금까지의 동작은 아래 목록에서 확인할 수 있습니다.\n다시 시작하거나 기록을 마치고 편집 창에서 검토하세요."; if (frame != null) { frame.Dispose(); frame = null; } }
+        void Pause() { recording = false; generation++; FinalizePendingInput(); tracked = hovered = null; trackedEvent = null; trackedTarget = hoverTarget = null; typing = null; focusedState = null; lastImage = null; lastImageTarget = null; recordState = "paused"; start.Enabled = probeSettled && hookProbe == "available" && events.Count < maximum; pause.Enabled = false; info.Text = "일시정지 · " + events.Count + "/" + maximum + "개 동작을 기록했습니다.\n다시 시작할 때 입력 대상을 클릭하거나 기록을 마치고 검토하세요."; if (frame != null) { frame.Dispose(); frame = null; } Heartbeat(true); }
         void InstallHooks() { if (mouseHook != IntPtr.Zero) return; mouseProc = MouseHook; keyProc = KeyHook; IntPtr module = GetModuleHandle(null); mouseHook = SetWindowsHookEx(14, mouseProc, module, 0); keyHook = SetWindowsHookEx(13, keyProc, module, 0); if (mouseHook == IntPtr.Zero || keyHook == IntPtr.Zero) { UninstallHooks(); throw new InvalidOperationException("recording_hook_unavailable"); } }
         void UninstallHooks() { recording = false; if (mouseHook != IntPtr.Zero) UnhookWindowsHookEx(mouseHook); if (keyHook != IntPtr.Zero) UnhookWindowsHookEx(keyHook); mouseHook = keyHook = IntPtr.Zero; }
         Target Current() { foreach (Target t in targets) if (t.Foreground()) return t; return null; }
         Dictionary<string, object> Event(Target t, string operation) { return new Dictionary<string, object> { { "operation", operation }, { "program_id", t.Program }, { "window_ref", t.Window }, { "verification", "manual_required" } }; }
         void Queue(Pending p) {
-            if (events.Count + pending.Count >= maximum) { if (p.Crop != null) p.Crop.Dispose(); recording = false; BeginInvoke((Action)delegate { Drain(); Pause(); info.Text = "기록 가능한 " + maximum.ToString() + "단계에 도달했습니다. [기록 마치고 검토]를 눌러 확인하세요."; }); return; }
+            if (events.Count + pending.Count >= maximum) { if (p.Crop != null) p.Crop.Dispose(); Warn("recording_event_limit"); recording = false; BeginInvoke((Action)delegate { Drain(); Pause(); info.Text = "기록 가능한 " + maximum.ToString() + "단계에 도달했습니다. 이후 동작은 기록하지 않습니다. [기록 마치고 검토]를 눌러 확인하세요."; }); return; }
             pending.Enqueue(p);
         }
         bool FocusMatches(Target target) {
@@ -429,6 +464,10 @@ internal static class VisualTools
         // matching and file writes run outside the low-level input callback.
         Pending CaptureClick(Target target, POINT point, string operation) {
             var item = new Pending { Target = target, Operation = operation, ScreenPoint = new Point(point.X, point.Y) };
+            if (operation == "click" && hovered != null && hoverTarget == target && DateTime.UtcNow.Subtract(hoverAt).TotalMilliseconds <= 600) {
+                var bounds = Map(hovered.Native, "bounds");
+                if (bounds != null && new Rectangle((int)Real(bounds, "x", 0), (int)Real(bounds, "y", 0), (int)Real(bounds, "width", 0), (int)Real(bounds, "height", 0)).Contains(point.X, point.Y)) item.Semantic = hovered;
+            }
             if (frame == null || frameTarget != target || DateTime.UtcNow.Subtract(frameAt).TotalMilliseconds > 250 || frameBounds != target.Bounds() || !target.Contains(point)) { item.Operation = "manual_entry"; item.Reason = "image_capture_required"; return item; }
             int x = point.X - frameBounds.X, y = point.Y - frameBounds.Y, w = Math.Min(160, frame.Width), h = Math.Min(96, frame.Height);
             Rectangle r = new Rectangle(Math.Max(0, Math.Min(frame.Width - w, x - w / 2)), Math.Max(0, Math.Min(frame.Height - h, y - h / 2)), w, h);
@@ -457,7 +496,7 @@ internal static class VisualTools
                         } mouseDown = null;
                     }
                 }
-            } catch { recording = false; BeginInvoke((Action)delegate { Pause(); info.Text = "기록 오류로 일시정지했습니다. 지금까지의 동작을 검토하세요."; }); }
+            } catch { recording = false; BeginInvoke((Action)delegate { Failure("recording_mouse_failed"); }); }
             return CallNextHookEx(mouseHook, code, message, data);
         }
         IntPtr KeyHook(int code, IntPtr message, IntPtr data) {
@@ -467,6 +506,10 @@ internal static class VisualTools
                         if ((key.flags & 16) != 0) injected++; Keys value = (Keys)key.code;
                         if (value == Keys.Escape) BeginInvoke((Action)delegate { Drain(); Pause(); });
                         else if (value != Keys.ControlKey && value != Keys.ShiftKey && value != Keys.Menu && value != Keys.LWin && value != Keys.RWin && value != Keys.LControlKey && value != Keys.RControlKey && value != Keys.LShiftKey && value != Keys.RShiftKey && value != Keys.LMenu && value != Keys.RMenu) {
+                            // A final ComboBox value does not prove how its child Edit
+                            // committed it. Never silently replace keyboard+commit with
+                            // a different generic selection strategy.
+                            if (tracked != null && trackedTarget == target && tracked.Role == "ComboBox") trackedKeyboard = true;
                             bool ctrl = (GetAsyncKeyState(0x11) & 0x8000) != 0, alt = (GetAsyncKeyState(0x12) & 0x8000) != 0, shift = (GetAsyncKeyState(0x10) & 0x8000) != 0;
                             if (ctrl && !alt && !shift && (value == Keys.A || value == Keys.Z || value == Keys.Y)) { typing = null; bool valid = FocusMatches(target); Queue(new Pending { Target = target, Operation = valid ? "hotkey" : "manual_entry", Reason = valid ? null : "focus_target_requires_selection", Keys = new string[] { "CTRL", value.ToString().ToUpperInvariant() } }); }
                             else if (!ctrl && !alt && !shift && (value == Keys.Enter || value == Keys.Tab || value == Keys.Up || value == Keys.Down || value == Keys.Left || value == Keys.Right || value == Keys.Home || value == Keys.End || value == Keys.PageDown || value == Keys.PageUp)) { typing = null; bool valid = FocusMatches(target); Queue(new Pending { Target = target, Operation = valid ? "press_key" : "manual_entry", Reason = valid ? null : "focus_target_requires_selection", Key = value.ToString().ToUpperInvariant() }); }
@@ -480,7 +523,7 @@ internal static class VisualTools
                         }
                     }
                 }
-            } catch { recording = false; }
+            } catch { recording = false; BeginInvoke((Action)delegate { Failure("recording_keyboard_failed"); }); }
             return CallNextHookEx(keyHook, code, message, data);
         }
         DateTime lastClickTime; Dictionary<string, object> lastClickEvent; int lastClickIndex; Target lastClickTarget; Point lastClickAnchor;
@@ -508,22 +551,31 @@ internal static class VisualTools
                 if (Str(item, "operation", "") == "manual_entry") label = "직접 설정 필요 · " + Str(item, "reason", "unknown_input");
                 else if (p.Operation == "click") label = "클릭"; else if (p.Operation == "right_click") label = "오른쪽 클릭"; else if (p.Operation == "press_key") label = "키 " + p.Key; else if (p.Operation == "hotkey") label = "단축키 " + String.Join("+", p.Keys);
                 p.Saved = item; p.Index = events.Count; events.Add(item); list.Items.Add((events.Count).ToString() + "  " + label); list.TopIndex = Math.Max(0, list.Items.Count - 1);
+                if (p.Semantic != null && p.Operation == "click") { tracked = p.Semantic; trackedTarget = p.Target; trackedEvent = item; trackedIndex = p.Index; trackedAt = DateTime.UtcNow; trackedKeyboard = false; }
+                if (trackedKeyboard && trackedTarget == p.Target && (p.Key != null || p.Keys != null || p.Operation == "manual_entry")) {
+                    item["operation"] = "manual_entry"; item["reason"] = "recording_method_unverified"; item.Remove("key"); item.Remove("keys"); item.Remove("value"); p.Reason = "recording_method_unverified";
+                    list.Items[p.Index] = (p.Index + 1).ToString() + "  콤보 입력·확정 방법 · 직접 설정 필요";
+                }
                 if (p.Operation == "click") { lastClickEvent = item; lastClickIndex = events.Count - 1; lastClickTarget = p.Target; lastClickTime = DateTime.UtcNow; lastClickAnchor = p.ScreenPoint; }
                 // Replaying a key begins with focusing its image target. Once
                 // a key can move focus, that old image is no longer a valid
                 // target for subsequent input. Require another human selection.
                 if (p.Key != null || (p.Keys != null && (p.Keys.Length != 2 || p.Keys[1] != "A"))) { lastImage = null; lastImageTarget = null; focusedState = null; }
             }
-            if (events.Count >= maximum && recording) { Pause(); info.Text = "기록 가능한 " + maximum.ToString() + "단계에 도달했습니다. [기록 마치고 검토]를 눌러 확인하세요."; }
+            if (events.Count >= maximum && recording) { Warn("recording_event_limit"); Pause(); info.Text = "기록 가능한 " + maximum.ToString() + "단계에 도달했습니다. 이후 동작은 기록하지 않습니다. [기록 마치고 검토]를 눌러 확인하세요."; }
         }
         void Sample(Target target) {
             textBusy = true; workerStarted = DateTime.UtcNow; int version = generation;
+            SemanticSample observeTracked = trackedTarget == target ? tracked : null;
             Thread worker = new Thread(delegate() {
                 Dictionary<string, object> state = null;
+                SemanticSample hover = null, changed = null;
                 try {
                     if (target.Foreground()) {
+                        POINT cursor; if (GetCursorPos(out cursor) && target.Contains(cursor)) hover = ReadSemantic(AutomationElement.FromPoint(new System.Windows.Point(cursor.X, cursor.Y)), target, cursor, true);
+                        if (observeTracked != null) { var pt = Map(observeTracked.Native, "point"); changed = ReadSemantic(observeTracked.Element, target, new POINT { X = (int)Real(pt, "x", 0), Y = (int)Real(pt, "y", 0) }, false); }
                         AutomationElement e = AutomationElement.FocusedElement;
-                        if (e != null && e.Current.ProcessId == target.Pid && e.Current.IsPassword) state = new Dictionary<string, object> { { "protected", true } };
+                        if (e != null && e.Current.ProcessId == target.Pid && ProtectedOrUnowned(e, target)) state = new Dictionary<string, object> { { "protected", true } };
                         else if (e != null && e.Current.ProcessId == target.Pid && e.Current.ControlType == ControlType.Edit && e.Current.IsEnabled) {
                             object raw;
                             if (e.TryGetCurrentPattern(ValuePattern.Pattern, out raw)) { ValuePattern p = (ValuePattern)raw;
@@ -532,34 +584,133 @@ internal static class VisualTools
                         }
                     }
                 } catch { }
-                lock (stateLock) { completedState = state; completedTarget = target; completedGeneration = version; workerCompleted = true; }
+                lock (stateLock) { completedState = state; completedHover = hover; completedTracked = changed; completedTarget = target; completedGeneration = version; workerCompleted = true; }
             }); worker.IsBackground = true; worker.SetApartmentState(ApartmentState.MTA); worker.Start();
         }
+        SemanticSample ReadSemantic(AutomationElement leaf, Target target, POINT point, bool normalizeComposite) {
+            if (leaf == null || leaf.Current.ProcessId != target.Pid || leaf.Current.IsPassword) return null;
+            var chain = new List<AutomationElement>(); AutomationElement next = leaf; bool owned = false;
+            for (int i = 0; i < 17 && next != null; i++) {
+                if (next.Current.ProcessId != target.Pid || next.Current.IsPassword) return null;
+                chain.Add(next);
+                if (next.Current.NativeWindowHandle == target.Hwnd.ToInt64()) { owned = true; break; }
+                next = TreeWalker.ControlViewWalker.GetParent(next);
+            }
+            if (!owned) return null;
+            int chosen = 0;
+            if (normalizeComposite) {
+                // A ComboBox often exposes an Edit/Text child at the click.
+                // It is its owning ComboBox's final selection we must observe.
+                for (int i = 0; i < Math.Min(5, chain.Count); i++) if (chain[i].Current.ControlType == ControlType.ComboBox) { chosen = i; break; }
+                if (chosen == 0 && leaf.Current.ControlType == ControlType.Text)
+                    for (int i = 1; i < Math.Min(4, chain.Count); i++) if (chain[i].Current.ControlType == ControlType.Button || chain[i].Current.ControlType == ControlType.CheckBox) { chosen = i; break; }
+            }
+            AutomationElement e = chain[chosen]; string role = e.Current.ControlType.ProgrammaticName.Replace("ControlType.", "");
+            if (role != "Edit" && role != "ComboBox" && role != "CheckBox" && role != "Button") return null;
+            System.Windows.Rect b = e.Current.BoundingRectangle;
+            if (b.IsEmpty || !b.Contains(point.X, point.Y) || !e.Current.IsEnabled) return null;
+            var ancestors = new List<Dictionary<string, object>>();
+            for (int i = chosen + 1; i < chain.Count; i++) ancestors.Add(SemanticIdentity(chain[i]));
+            Rectangle window = target.Bounds();
+            var native = new Dictionary<string, object> { { "status", "selected" }, { "pid", target.Pid }, { "window_id", target.Hwnd.ToInt64() }, { "element", SemanticIdentity(e) }, { "ancestors", ancestors },
+                { "point", new Dictionary<string, object> { { "x", point.X }, { "y", point.Y } } },
+                { "bounds", new Dictionary<string, object> { { "x", b.X }, { "y", b.Y }, { "width", b.Width }, { "height", b.Height } } },
+                { "window_bounds", new Dictionary<string, object> { { "x", window.X }, { "y", window.Y }, { "width", window.Width }, { "height", window.Height } } } };
+            var sample = new SemanticSample { Element = e, Native = native, Role = role, Enabled = e.Current.IsEnabled, Identity = String.Join(",", Array.ConvertAll(e.GetRuntimeId(), delegate(int n) { return n.ToString(); })) };
+            object raw;
+            if (e.TryGetCurrentPattern(TogglePattern.Pattern, out raw)) {
+                ToggleState state = ((TogglePattern)raw).Current.ToggleState;
+                if (state != ToggleState.Indeterminate) { sample.Property = "selected"; sample.Value = state == ToggleState.On; }
+            } else if (role == "ComboBox") {
+                if (e.TryGetCurrentPattern(SelectionPattern.Pattern, out raw)) {
+                    AutomationElement[] selection = ((SelectionPattern)raw).Current.GetSelection();
+                    if (selection.Length == 1 && selection[0].Current.ProcessId == target.Pid && !selection[0].Current.IsPassword) { string value = selection[0].Current.Name; if (!String.IsNullOrEmpty(value) && value.Length <= 2000) { sample.Property = "value"; sample.Value = value; } }
+                }
+                if (sample.Property == null && e.TryGetCurrentPattern(ValuePattern.Pattern, out raw)) {
+                    string value = ((ValuePattern)raw).Current.Value; if (value != null && value.Length <= 2000) { sample.Property = "value"; sample.Value = value; }
+                }
+            } else if (role == "Edit" && e.TryGetCurrentPattern(ValuePattern.Pattern, out raw) && !((ValuePattern)raw).Current.IsReadOnly) {
+                string value = ((ValuePattern)raw).Current.Value; if (value != null && value.Length <= 2000) { sample.Property = "value"; sample.Value = value; }
+            }
+            return sample;
+        }
+        bool ProtectedOrUnowned(AutomationElement element, Target target) {
+            for (int level = 0; level < 17 && element != null; level++) {
+                if (element.Current.ProcessId != target.Pid || element.Current.IsPassword) return true;
+                if (element.Current.NativeWindowHandle == target.Hwnd.ToInt64()) return false;
+                element = TreeWalker.ControlViewWalker.GetParent(element);
+            }
+            return true;
+        }
+        Dictionary<string, object> SemanticIdentity(AutomationElement element) {
+            if (element.Current.IsPassword) throw new InvalidOperationException("protected_input");
+            string name = element.Current.Name ?? "", id = element.Current.AutomationId ?? "";
+            if (name.Length > 1000 || id.Length > 1000) throw new InvalidOperationException("identity_too_large");
+            return new Dictionary<string, object> { { "role", element.Current.ControlType.ProgrammaticName.Replace("ControlType.", "") }, { "name", name }, { "automation_id", id }, { "is_password", false } };
+        }
         void Tick(object sender, EventArgs args) {
-            Drain(); if (!recording) return; Target current = Current();
-            if (current == null) { if (!outside) { outside = true; info.Text = "선택한 창 밖이라 기록 일시정지\n등록한 프로그램 창으로 돌아오면 자동으로 기록을 계속합니다.\n새 팝업이나 새 창은 따로 선택해야 합니다."; if (GetForegroundWindow() != Handle && !warnings.Contains("outside_target_not_recorded")) warnings.Add("outside_target_not_recorded"); } if (frame != null) { frame.Dispose(); frame = null; } }
+            if (Done) return;
+            if (!probeSettled && hookProbe == "available" && (probeDone || DateTime.UtcNow.Subtract(probeAt).TotalMilliseconds > 1500)) {
+                probeSettled = true; uiaProbe = probeGood ? "available" : probeDone ? "unavailable" : "timeout"; uiaStalled = !probeGood;
+                if (!probeGood) Warn("uia_probe_unavailable"); recordState = "ready"; start.Enabled = true;
+                info.Text = "시작 점검 완료 · 입력 후크 사용 가능 / UIA " + (probeGood ? "응답 확인" : "응답 확인 안 됨: 이미지·수동 기록 사용") + "\n[기록 시작]을 눌러 직접 조작하세요. 마우스만 올리는 것은 기록이 아닙니다.\n최대 " + maximum + "개 동작 / 화면 확인 포함 30단계";
+            }
+            Drain(); Heartbeat(false); if (!recording) return; Target current = Current();
+            if (trackedKeyboard && trackedEvent != null) {
+                trackedEvent["operation"] = "manual_entry"; trackedEvent["reason"] = "recording_method_unverified"; trackedEvent["input_method"] = "keyboard_unverified";
+                trackedEvent.Remove("value"); trackedEvent.Remove("native_target"); trackedEvent.Remove("after"); Warn("recording_method_unverified");
+                list.Items[trackedIndex] = (trackedIndex + 1).ToString() + "  콤보 입력·확정 방법 · 직접 설정 필요";
+            }
+            if (current == null) { if (GetForegroundWindow() != Handle) Warn("outside_target_not_recorded"); if (!outside) { outside = true; recordState = "outside_target"; info.Text = "선택한 창 밖이라 기록 일시정지\n등록한 프로그램 창으로 돌아오면 자동으로 기록을 계속합니다.\n새 팝업이나 새 창은 기록되지 않습니다. 누락 경고를 검토하세요."; Heartbeat(true); } if (frame != null) { frame.Dispose(); frame = null; } }
             else {
-                if (outside) { outside = false; info.Text = ActiveText(); }
+                if (outside) { outside = false; recordState = "recording"; info.Text = ActiveText(); Heartbeat(true); }
                 try { List<Rectangle> occluders = Occluders(current); Bitmap next = Capture(current, true); occluders.AddRange(Occluders(current)); if (frame != null) frame.Dispose(); frame = next; frameBounds = current.Bounds(); frameTarget = current; frameOccluders = occluders; frameAt = DateTime.UtcNow; } catch { if (frame != null) { frame.Dispose(); frame = null; } }
             }
             lock (stateLock) {
                 if (workerCompleted) {
                     workerCompleted = false; textBusy = false;
                     if (completedGeneration == generation && completedTarget == current) {
+                        hovered = completedHover; hoverTarget = current; hoverAt = DateTime.UtcNow;
+                        if (tracked != null && !trackedKeyboard && trackedTarget == current && trackedEvent != null && completedTracked != null && tracked.Identity == completedTracked.Identity
+                            && DateTime.UtcNow.Subtract(trackedAt).TotalMilliseconds >= 350 && DateTime.UtcNow.Subtract(dirtyAt).TotalMilliseconds >= 400 && workerStarted >= dirtyAt
+                            && !Object.Equals(tracked.Value, completedTracked.Value) && completedTracked.Property != null) {
+                            string op = completedTracked.Role == "ComboBox" ? "select_option" : completedTracked.Property == "selected" ? "set_checked" : "set_value";
+                            // Only an observed changed property becomes a semantic action.
+                            // The parent independently checks this identity against Driver.
+                            trackedEvent["operation"] = op; trackedEvent["native_target"] = completedTracked.Native;
+                            trackedEvent["after"] = new Dictionary<string, object> { { "property", completedTracked.Property }, { "equals", completedTracked.Value } };
+                            trackedEvent[op == "set_checked" ? "checked" : "value"] = completedTracked.Value; trackedEvent.Remove("reason");
+                            list.Items[trackedIndex] = (trackedIndex + 1).ToString() + "  " + (op == "select_option" ? "목록 선택값 확인" : op == "set_checked" ? "체크 상태 확인" : "입력값 확인") + " · 저장 전 Driver 대조 필요";
+                            // Text keys belong to the same clicked Edit/ComboBox; avoid replaying both the click-change and a duplicate text placeholder.
+                            if (typing != null && typing.Saved != null && typing.Target == current && typing.Saved != trackedEvent && typing.Index == events.Count - 1
+                                && typing.Reason != "protected_input" && completedState != null && Str(completedState, "identity", "") == tracked.Identity) {
+                                events.RemoveAt(typing.Index); list.Items.RemoveAt(typing.Index); typing = null;
+                                // CTRL+A only prepared this exact Edit replacement.
+                                // Keeping it after the final-value step would select
+                                // the new value a second time and add a stale image.
+                                if (events.Count == trackedIndex + 2) {
+                                    var preparation = events[events.Count - 1]; object rawKeys;
+                                    if (Str(preparation, "operation", "") == "hotkey" && preparation.TryGetValue("keys", out rawKeys)) {
+                                        string[] keys = rawKeys as string[];
+                                        if (keys != null && keys.Length == 2 && keys[0] == "CTRL" && keys[1] == "A") { events.RemoveAt(events.Count - 1); list.Items.RemoveAt(list.Items.Count - 1); }
+                                    }
+                                }
+                            }
+                        }
                         focusedState = completedState; focusedTarget = completedTarget; focusedAt = DateTime.UtcNow;
                         if (typing != null && typing.Target == current && typing.Saved != null && completedState != null && Str(completedState, "protected", "False") == "True") {
                             typing.Reason = "protected_input"; typing.Baseline = null; typing.Saved["operation"] = "manual_entry"; typing.Saved["reason"] = "protected_input"; typing.Saved.Remove("value"); list.Items[typing.Index] = (typing.Index + 1).ToString() + "  암호 입력 · 기록하지 않았습니다";
                         }
-                        if (typing != null && typing.Target == current && typing.Saved != null && typing.Baseline != null && completedState != null && DateTime.UtcNow.Subtract(dirtyAt).TotalMilliseconds >= 400 && typing.Reason != "shortcut_requires_manual_setup") {
+                        if (typing != null && typing.Target == current && typing.Saved != null && typing.Baseline != null && completedState != null && DateTime.UtcNow.Subtract(dirtyAt).TotalMilliseconds >= 400 && workerStarted >= dirtyAt && typing.Reason != "shortcut_requires_manual_setup" && typing.Reason != "recording_method_unverified") {
                             string before = Str(typing.Baseline, "value", ""), after = Str(completedState, "value", "");
                             if (Str(typing.Baseline, "identity", "before") == Str(completedState, "identity", "after") && before.Length == 0 && after != before) {
-                                typing.Saved["operation"] = "set_value"; typing.Saved["value"] = after; typing.Saved["input_role"] = "Edit"; typing.Saved.Remove("reason"); list.Items[typing.Index] = (typing.Index + 1).ToString() + "  글자 입력 · 저장 전 내용을 확인하세요";
+                                typing.Saved["operation"] = "set_value"; typing.Saved["value"] = after; typing.Saved["input_role"] = "Edit"; typing.Saved.Remove("reason"); typingConfirmedAt = DateTime.UtcNow; list.Items[typing.Index] = (typing.Index + 1).ToString() + "  글자 입력 · 저장 전 내용을 확인하세요";
                             } else if (before.Length > 0) typing.Saved["reason"] = "existing_text_requires_review";
                         }
                     }
                 }
             }
-            if (textBusy && DateTime.UtcNow.Subtract(workerStarted).TotalMilliseconds > 1200) { uiaStalled = true; if (!warnings.Contains("uia_text_unavailable")) warnings.Add("uia_text_unavailable"); }
+            if (textBusy && !uiaStalled && DateTime.UtcNow.Subtract(workerStarted).TotalMilliseconds > 1200) { uiaStalled = true; Warn("uia_text_unavailable"); info.Text = "UIA 응답이 늦어 요소·입력값 기록을 중단했습니다.\n클릭 이미지는 계속 기록하지만 최종값은 직접 검토해야 합니다.\n[기록 마치고 검토]에서 누락 경고를 확인하세요."; Heartbeat(true); }
             if (!textBusy && !uiaStalled && current != null && DateTime.UtcNow.Subtract(lastSample).TotalMilliseconds >= 300) { lastSample = DateTime.UtcNow; Sample(current); }
         }
     }

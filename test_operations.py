@@ -2,6 +2,7 @@ import copy
 import json
 import threading
 import unittest
+from unittest import mock
 
 from operations import OperationError, Operations, _payload, _unique, validate_step, validate_selector, verification_step
 
@@ -306,10 +307,14 @@ class OperationsTests(unittest.TestCase):
         self.assertFalse(result["checks"][1]["passed"])
 
     def test_polling_is_bounded_and_never_repeats_mutation(self):
-        runtime = Runtime([snapshot(element()) for _ in range(4)])
-        result = Operations(runtime).execute(dict(self.write(), verification_timeout_ms=5000), TARGET)
+        runtime = Runtime([snapshot(element()) for _ in range(8)])
+        now = [1.0]
+        def advance(seconds):
+            now[0] += seconds
+        with mock.patch("operations.time.monotonic", side_effect=lambda: now[0]), mock.patch.object(runtime.stop_event, "wait", advance):
+            result = Operations(runtime).execute(dict(self.write(), verification_timeout_ms=500), TARGET)
         self.assertEqual(result["status"], "failed")
-        self.assertEqual(sum(n == "get_window_state" for n, _ in runtime.calls), 4)
+        self.assertEqual(sum(n == "get_window_state" for n, _ in runtime.calls), 5)
         self.assertEqual(sum(n == "set_value" for n, _ in runtime.calls), 1)
 
     def test_pre_dispatch_refusal_is_not_input_sent(self):

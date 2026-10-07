@@ -10,8 +10,9 @@ import uuid
 
 from vendor.guard import check_app, normalize_exe, GuardError
 from vendor.windows import discover
+from program_launch import validate_launch_profile
 
-VERSION = "0.11.1"
+VERSION = "0.12.0"
 PROGRAM_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 
 
@@ -92,8 +93,10 @@ def validate_config(value: dict) -> dict:
         hints = app.get("hints", "")
         if not isinstance(hints, str) or len(hints) > 10000:
             raise ValueError("프로그램 사용법은 10,000자 이하로 입력해주세요.")
-        if set(app) - {"id", "name", "exe", "control_exes", "hints", "enabled"}:
-            raise ValueError("프로그램 설정에 지원하지 않는 항목이 있습니다. 실행 인자는 등록하지 않습니다.")
+        if set(app) - {"id", "name", "exe", "control_exes", "hints", "enabled", "launch"}:
+            raise ValueError("프로그램 설정에 지원하지 않는 항목이 있습니다. 실행 방식은 launch 항목에 지정하세요.")
+        if "launch" in app:
+            app["launch"] = validate_launch_profile(app["launch"])
         app["control_exes"] = extra
         app["hints"] = hints
     return config

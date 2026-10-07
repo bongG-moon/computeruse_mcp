@@ -106,6 +106,7 @@ def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elemen
         raise OperationError("관찰된 창이 요청한 창과 다릅니다.", "target_mismatch")
     inspection = {"mode": runtime.mode, "control_count": 0, "controls": [], "controls_omitted": 0,
                   "scope": "one_current_window", "capability_scope": "observed_controls_only",
+                  "execution_verified": False,
                   "task_verified": False, "input_dispatched": False}
     if not uia:
         image_count = sum(c.get("type") == "image" for c in answer.get("content", []))
@@ -148,12 +149,18 @@ def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elemen
             item["selector"] = control_selector(snapshot, element)
             item["selector_unique"] = item["selector"] is not None
             item["suggested_operations"] = suggested_operations(element) if item["selector_unique"] else []
+            item["capability_evidence"] = "observed_uia_properties_and_patterns"
+            item["execution_verified"] = False
             for key in ("name", "value", "automation_id"):
                 if isinstance(item.get(key), str) and len(item[key]) > 16000:
                     item[key + "_truncated"] = True
                     item[key] = item[key][:16000]
             controls.append(item)
         inspection.update(status="uia_observation" if controls else "no_accessible_controls",
+                          observation_scope={"kind": "driver_window_tree", "max_depth": max_depth,
+                                             "max_elements": max_elements},
+                          filter_scope="returned_controls_after_window_observation",
+                          filters_reduce_uia_traversal=False,
                           control_count=candidate_count, controls=controls,
                           observed_control_count=all_candidates, offset=offset,
                           next_offset=offset+len(controls) if offset+len(controls) < candidate_count else None,
