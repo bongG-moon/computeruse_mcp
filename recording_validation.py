@@ -43,7 +43,12 @@ class RecordingFixture : Form {
   check.Name="record_check";check.AccessibleName="Recording checkbox";check.Text="Include completed";check.SetBounds(30,235,300,35);
   AddLabel("Protected input",390,25);password.Name="record_password";password.AccessibleName="Recording protected input";password.UseSystemPasswordChar=true;password.SetBounds(390,55,320,30);
   var popup=new Button{Text="Open owned popup",Name="record_popup"};popup.SetBounds(30,330,260,40);
-  popup.Click+=delegate {var dialog=new Form{Text="Synthetic recording popup",ClientSize=new Size(300,150),StartPosition=FormStartPosition.CenterParent};dialog.Controls.Add(new Label{Text="This popup is outside the exact recording window",Dock=DockStyle.Fill});dialog.Show(this);};
+  popup.Click+=delegate {var dialog=new Form{Text="Synthetic recording popup",ClientSize=new Size(340,190),StartPosition=FormStartPosition.CenterParent};
+   var entry=new TextBox{Name="popup_entry",AccessibleName="Popup entry"};entry.SetBounds(25,30,280,30);dialog.Controls.Add(entry);
+   var choose=new Button{Text="Select value",Name="popup_choose"};choose.SetBounds(25,95,280,45);choose.Click+=delegate{edit.Text="POPUP";dialog.Close();};dialog.Controls.Add(choose);dialog.Show(this);};
+  var other=new Button{Text="Open unrelated window",Name="record_other"};other.SetBounds(390,330,300,40);
+  other.Click+=delegate{var unrelated=new Form{Text="Synthetic unrelated window",ClientSize=new Size(300,150)};unrelated.Show();};
+  Controls.Add(other);
   Controls.AddRange(new Control[]{edit,password,combo,typed,check,popup});
   edit.TextChanged+=delegate{Save();};combo.SelectedIndexChanged+=delegate{Save();};typed.TextChanged+=delegate{Save();};check.CheckedChanged+=delegate{Save();};Shown+=delegate{Save();};
  }
@@ -105,6 +110,15 @@ def run(folder, driver=DRIVER, bundle=None):
             try: native.user.SetForegroundWindow(hwnd)
             finally:
                 if attached: native.user.AttachThreadInput(own_thread, other, False)
+            if native.user.GetForegroundWindow() != hwnd:
+                # Foreground locking can reject SetForegroundWindow from a
+                # background validation process. Click only our retained
+                # synthetic fixture's verified caption, never an arbitrary app.
+                bounds = wintypes.RECT(); assert native.user.GetWindowRect(hwnd, ctypes.byref(bounds))
+                caption = wintypes.POINT(bounds.left + 45, bounds.top + 12)
+                assert native.pid(hwnd) == target["pid"] and native.user.GetAncestor(native.user.WindowFromPoint(caption), 2) == hwnd
+                assert native.user.SetCursorPos(caption.x, caption.y)
+                native.user.mouse_event(2, 0, 0, 0, 0); native.user.mouse_event(4, 0, 0, 0, 0)
             wait(lambda: native.user.GetForegroundWindow() == hwnd)
         time.sleep(.4)
 
@@ -159,6 +173,17 @@ def run(folder, driver=DRIVER, bundle=None):
     def snapshot(target):
         return call("get_window_state", {**target, "include_accessibility_tree": True, "include_screenshot": False})
 
+    def bind_popup(owner, title, classname):
+        from closing import NativeClosureProbe
+        from recording_windows import execute_window_wait
+        import threading
+        class WindowRuntime:
+            stop_event=threading.Event()
+            def check_active(self): pass
+            def create_transition_probe(self, exact): return NativeClosureProbe(**exact)
+        return execute_window_wait(WindowRuntime(), {"operation":"wait_for_window","program_id":"recording","window_ref":"popup_1","owner_ref":"main",
+            "title":title,"class_name":classname,"timeout_ms":0}, {("recording","main"):owner})
+
     try:
         title = "Synthetic recording acceptance " + uuid.uuid4().hex[:8]
         fixture = subprocess.Popen([str(exe), title, str(receipt)], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)); children.append(fixture)
@@ -199,22 +224,68 @@ def run(folder, driver=DRIVER, bundle=None):
         assert any(s.get("manual_reason") == "recording_method_unverified" for s in draft.steps)
         report["scenarios"]["typed_combo_does_not_invent_input_method"] = {"passed":True,"manual_required":True}
 
+        recording = start_record("owned-dropdown", target)
+        click(target,330,159)
+        dropdown=wait(lambda:next((w for w in native.windows(fixture.pid) if w["visible"] and w["class"]=="ComboLBox"),None))
+        bound=bind_popup(target,dropdown["text"],dropdown["class"])
+        assert bound["task_verified"] and bound["target"]=={"pid":fixture.pid,"window_id":dropdown["hwnd"]},bound
+        assert native.pid(dropdown["hwnd"])==fixture.pid
+        # Read the actual Beta item rectangle, not a list-height approximation
+        # that can race native dropdown layout/DPI changes.
+        item_rect=wintypes.RECT()
+        assert native.user.SendMessageW(dropdown["hwnd"],0x0198,1,ctypes.addressof(item_rect)) != -1
+        item_point=wintypes.POINT((item_rect.left+item_rect.right)//2,(item_rect.top+item_rect.bottom)//2)
+        assert native.user.ClientToScreen(dropdown["hwnd"],ctypes.byref(item_point))
+        native.user.SetCursorPos(item_point.x,item_point.y);time.sleep(.9)
+        assert native.user.GetAncestor(native.user.WindowFromPoint(item_point),2)==dropdown["hwnd"]
+        native.user.mouse_event(2,0,0,0,0);native.user.mouse_event(4,0,0,0,0)
+        wait(lambda:read(receipt)["selection"]=="Beta");time.sleep(1.1)
+        result=finish(recording)
+        assert any(w["window_id"]==dropdown["hwnd"] and w["class_name"]=="ComboLBox" for w in result["windows"]),result
+        assert any(e.get("window_ref","main")!="main" for e in result["events"]),result
+        assert not any(e["operation"]=="select_option" for e in result["events"]),result
+        draft=ProcessDraft([program]);draft.recorded(result["events"],windows=result["windows"],warning_codes=result["warnings"])
+        assert any(s["operation"]=="wait_for_window" and s["title"]=="" for s in draft.steps)
+        (folder/"dropdown-draft.json").write_text(json.dumps({"steps":draft.steps,"summaries":draft.summaries()},ensure_ascii=False,indent=2),encoding="utf-8")
+        report["scenarios"]["owned_dropdown_item_click"]={"passed":True,"selection":"Beta","popup_click_recorded":True,
+            "related_dropdown_bound_without_input":True,"did_not_replace_open_click_with_generic_selection":True}
+
         recording = start_record("protected-popup",target); progress=recording[2]
         click(target,450,68); time.sleep(.7)
         for code in (0x53,0x45,0x43,0x52,0x45,0x54):key(target,code)
         time.sleep(.9); progress(); click(target,140,350)
         popup=wait(lambda:next((w for w in native.windows(fixture.pid) if w["visible"] and w["text"]=="Synthetic recording popup"),None))
-        activate({"pid":fixture.pid,"window_id":popup["hwnd"]})
-        wait(lambda:progress()["state"]=="outside_target")
-        assert native.pid(popup["hwnd"])==fixture.pid; native.user.PostMessageW(popup["hwnd"],0x10,0,0)
+        popup_target={"pid":fixture.pid,"window_id":popup["hwnd"]}
+        activate(popup_target); wait(lambda:progress()["state"]=="recording")
+        # Real native same-process/owner binding is checked while the popup is
+        # alive, before the recorded final button closes it.
+        bound=bind_popup(target,popup["text"],popup["class"])
+        assert bound["task_verified"] and bound["target"]==popup_target and bound["input_dispatched"] is False, bound
+        click(popup_target,80,45);time.sleep(.7)
+        for code in (0x56,0x41,0x4C,0x55,0x45):key(popup_target,code)
+        time.sleep(.9);progress();click(popup_target,100,115)
+        wait(lambda:not native.user.IsWindow(popup["hwnd"]))
         activate(target); wait(lambda:progress()["state"]=="recording")
+        click(target,500,350)
+        unrelated=wait(lambda:next((w for w in native.windows(fixture.pid) if w["visible"] and w["text"]=="Synthetic unrelated window"),None))
+        rejected=bind_popup(target,unrelated["text"],unrelated["class"])
+        assert not rejected["task_verified"] and rejected["diagnostic"]["code"]=="recording_window_missing",rejected
+        activate({"pid":fixture.pid,"window_id":unrelated["hwnd"]});wait(lambda:progress()["state"]=="outside_target")
+        assert native.pid(unrelated["hwnd"])==fixture.pid;native.user.PostMessageW(unrelated["hwnd"],0x10,0,0)
+        activate(target);wait(lambda:progress()["state"]=="recording")
         result=finish(recording)
         assert "secret" not in json.dumps(result).lower()
         assert any(e.get("reason")=="protected_input" for e in result["events"]), result
         assert "outside_target_not_recorded" in result["warnings"]
-        draft=ProcessDraft([program]);draft.recorded(result["events"],warning_codes=result["warnings"])
+        assert any(w["window_id"]==popup["hwnd"] for w in result["windows"]), result
+        assert any(e.get("window_ref","main")!="main" for e in result["events"]), result
+        assert not any(w["window_id"]==unrelated["hwnd"] for w in result["windows"]), result
+        draft=ProcessDraft([program]);draft.recorded(result["events"],warning_codes=result["warnings"],windows=result["windows"])
         assert draft.recording_review()["partial"] and not draft.recording_review()["acknowledged"]
-        report["scenarios"]["protected_input_and_popup_omission"]={"passed":True,"password_not_stored":True,"partial_review_required":True}
+        assert any(s["operation"]=="wait_for_window" for s in draft.steps),draft.summaries()
+        (folder/"popup-draft.json").write_text(json.dumps({"steps":draft.steps,"summaries":draft.summaries()},ensure_ascii=False,indent=2),encoding="utf-8")
+        report["scenarios"]["protected_input_owned_popup_and_unrelated_window"]={"passed":True,"password_not_stored":True,"partial_review_required":True,
+            "owned_popup_recorded":True,"related_popup_bound_without_input":True,"unrelated_same_process_window_excluded":True}
         report["passed"] = True
     except Exception as exc:
         report["error"]={"type":type(exc).__name__,"message":str(exc)[:5000]}

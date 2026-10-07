@@ -117,6 +117,12 @@ class SessionRuntime:
         self._deadline_thread = None
         self.fast_verification_enabled = False
         self.scoped_reader = None
+        self.progress_callback = None
+
+    def report_progress(self, stage, **fields):
+        callback = getattr(self, "progress_callback", None)
+        if callable(callback):
+            callback(stage, **fields)
 
     def _check_not_stopped(self):
         if self.stop_event.is_set() or (self.run_dir / "stop.flag").exists():
@@ -244,6 +250,7 @@ class SessionRuntime:
             self.check_active()
             if name not in SAFE_TOOLS:
                 raise SessionError("허용되지 않은 화면 도구입니다.")
+            self.report_progress("observing" if name in {"get_window_state", "list_apps", "list_windows", "zoom"} else "verifying" if name == "verify_state" else "acting")
             answer = (self.guard.call(name, arguments) if timeout_seconds is None else
                       self.guard.call(name, arguments, timeout_seconds=timeout_seconds))
             if self._driver_ended():
@@ -258,6 +265,7 @@ class SessionRuntime:
         """Explicit saved screenshot step; never enables visual session inputs."""
         with self.execution_lock:
             self.check_active()
+            self.report_progress("observing")
             answer = self.guard.capture_checkpoint(target)
             if self._driver_ended():
                 self.stop("Cua Driver 연결이 종료되어 화면 확인을 중지했습니다. computer_begin으로 다시 시작하세요.")
@@ -271,6 +279,30 @@ class SessionRuntime:
             raise NotImplementedError("scoped_verification_not_enabled")
         with self.execution_lock:
             self.check_active()
+            if self.scoped_reader is None:
+                from scoped_controls import ScopedControls
+                self.scoped_reader = ScopedControls(self)
+            return self.scoped_reader.observe(target, selectors, timeout_ms=timeout_ms)
+
+    def inspect_controls(self, target, *, within, max_depth=12, max_elements=600, timeout_ms=3000):
+        if self.mode != "uia":
+            raise NotImplementedError("scoped_inspection_requires_uia")
+        with self.execution_lock:
+            self.check_active()
+            self.report_progress("searching")
+            if self.scoped_reader is None:
+                from scoped_controls import ScopedControls
+                self.scoped_reader = ScopedControls(self)
+            return self.scoped_reader.inspect(target, within=within, max_depth=max_depth,
+                                               max_elements=max_elements, timeout_ms=timeout_ms)
+
+    def observe_completion_controls(self, target, selectors, *, timeout_ms=3000):
+        """Fresh read-only completion properties, including non-actionable labels."""
+        if self.mode != "uia":
+            raise NotImplementedError("completion_properties_require_uia")
+        with self.execution_lock:
+            self.check_active()
+            self.report_progress("verifying")
             if self.scoped_reader is None:
                 from scoped_controls import ScopedControls
                 self.scoped_reader = ScopedControls(self)

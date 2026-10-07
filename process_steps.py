@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import math
+import re
 import time
 
 from operations import Operations, OperationError, _elements, _limited, _payload, _unique, validate_selector, validate_assertions
@@ -17,7 +18,7 @@ def validate_process_step(step):
     operation = step["operation"]
     allowed = {"operation"} | ({"duration_ms"} if operation == "delay" else
         {"selector", "timeout_ms", "poll_interval_ms"} if operation == "wait_for_element" else
-        {"expect", "timeout_ms", "poll_interval_ms"} if operation == "wait_for_state" else {"message"})
+        {"expect", "timeout_ms", "poll_interval_ms"} if operation == "wait_for_state" else {"message", "return_from", "opened_from"})
     if set(step) - allowed:
         raise OperationError("이 프로세스 단계에 지원하지 않는 설정이 있습니다.")
     if operation == "delay":
@@ -34,6 +35,11 @@ def validate_process_step(step):
         if type(interval) is not int or not 100 <= interval <= 2000:
             raise OperationError("요소 확인 간격 poll_interval_ms는 100~2000ms로 지정하세요.")
     else:
+        if "return_from" in step and "opened_from" in step:
+            raise OperationError("화면 확인은 팝업 열기와 원래 창 복귀 중 하나만 지정하세요.")
+        for key in ("return_from", "opened_from"):
+            if key in step and (not isinstance(step[key], str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", step[key])):
+                raise OperationError("화면 확인에서 연결할 원래 창 또는 팝업 창 이름을 확인하세요.")
         message = step.get("message")
         if not isinstance(message, str) or not message.strip() or len(message) > 2000 or "\x00" in message:
             raise OperationError("화면 확인 단계에는 1~2000자의 확인 내용 message가 필요합니다.")
@@ -65,7 +71,11 @@ def execute_process_step(runtime, step, target):
     runtime.check_active()
     started, observations = time.monotonic(), 0
     operation = step["operation"]
+    def report(stage):
+        callback = getattr(runtime, "report_progress", None)
+        if callable(callback): callback(stage)
     if operation == "wait_for_state":
+        report("waiting")
         return Operations(runtime).wait_for_state(step["expect"], target,
             timeout_ms=step["timeout_ms"], poll_interval_ms=step.get("poll_interval_ms", 250))
     def result(passed, code, message, **extra):
@@ -74,12 +84,14 @@ def execute_process_step(runtime, step, target):
                 "diagnostic": {"code": code, "message": message, "automatic_replay": False},
                 "metrics": {"elapsed_ms": round((time.monotonic()-started)*1000, 2), "observations": observations}, **extra}
     if operation == "delay":
+        report("waiting")
         deadline = started + step["duration_ms"]/1000
         while time.monotonic() < deadline:
             _pause(runtime, min(.1, deadline-time.monotonic()))
         runtime.check_active()
         return result(True, "delay_completed", "지정한 고정 대기를 완료했습니다. 화면 변경을 확인한 것은 아닙니다.")
     if operation == "checkpoint":
+        report("observing")
         capture = getattr(runtime, "capture_checkpoint", None)
         if not callable(capture):
             return result(False, "checkpoint_unavailable", "이 실행 환경에서 명시적 화면 확인을 지원하지 않습니다.")
@@ -97,6 +109,7 @@ def execute_process_step(runtime, step, target):
         if (not 1 <= len(images) <= 2 or any(not isinstance(item.get("data"), str) or not item["data"]
                 or len(item["data"]) > 16*1024*1024 or item.get("mimeType") not in {"image/png", "image/jpeg", "image/webp"} for item in images)):
             return result(False, "checkpoint_image_missing", "확인 가능한 화면 이미지가 반환되지 않았습니다.")
+        report("needs_review")
         return result(False, "checkpoint_review_required", "화면 이미지를 확인한 뒤 이 체크포인트를 명시적으로 승인해야 이어갑니다.",
                       checkpoint_content=[{key: copy.deepcopy(image[key]) for key in ("type", "data", "mimeType")} for image in images],
                       checkpoint_ready=True, image_verified=False)
@@ -134,4 +147,5 @@ def execute_process_step(runtime, step, target):
                 return result(False, error.code, str(error))
         if time.monotonic() >= deadline:
             return result(False, "element_wait_timeout", "제한 시간 안에 지정한 요소가 나타나지 않았습니다.")
+        report("waiting")
         _pause(runtime, min(step.get("poll_interval_ms", 250)/1000, deadline-time.monotonic()))

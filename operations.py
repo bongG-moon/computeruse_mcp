@@ -259,7 +259,9 @@ def _find(snapshot, selector):
             raise OperationError("within에 해당하는 부모 영역이 여러 개입니다. 부모 선택 기준을 더 구체적으로 지정하세요.", "ambiguous_scope")
         if not ancestors:
             return []
-        found = [e for e in found if _descendant(e, ancestors[0], _elements(snapshot))]
+        elements = _elements(snapshot)
+        parents = {e.get("element_index"): e for e in elements if type(e.get("element_index")) is int}
+        found = [e for e in found if _descendant(e, ancestors[0], elements, parents)]
     return found
 
 
@@ -271,11 +273,12 @@ def _unique(snapshot, selector):
     return found[0]
 
 
-def _descendant(element, ancestor, elements):
+def _descendant(element, ancestor, elements, parents=None):
     ancestor_index = ancestor.get("element_index")
     if type(ancestor_index) is not int:
         return False
-    parents = {e.get("element_index"): e for e in elements if type(e.get("element_index")) is int}
+    if parents is None:
+        parents = {e.get("element_index"): e for e in elements if type(e.get("element_index")) is int}
     seen = set()
     parent = element.get("parent_index")
     while type(parent) is int and parent not in seen:
@@ -374,6 +377,11 @@ class _Execution:
         self.action_evidence = []
         self.action_acknowledgement_error = None
 
+    def _progress(self, stage):
+        report = getattr(self.runtime, "report_progress", None)
+        if callable(report):
+            report(stage, op=self.step["operation"])
+
     def _remaining(self):
         self.runtime.check_active()
         now = time.monotonic()
@@ -386,6 +394,7 @@ class _Execution:
         return max(1, math.floor((self.deadline - now) * 1000 + 1e-6))
 
     def _call(self, name, args, mutation=False):
+        self._progress("acting" if mutation else "searching" if name == "list_windows" else "verifying" if self.dispatched else "observing")
         remaining = self._remaining()
         began = time.monotonic()
         self.metrics["tool_calls"] += 1
@@ -645,6 +654,7 @@ class _Execution:
             self.baselines[self._assertion_key(assertion)] = copy.deepcopy(_name(element) if prop == "name" else element[prop])
 
     def _observe_assertions(self, assertions):
+        self._progress("verifying")
         selectors = [item["selector"] for item in assertions]
         scoped = getattr(self.runtime, "observe_controls", None)
         if not callable(scoped):
@@ -726,6 +736,7 @@ class _Execution:
                 first = False
                 if not timeout or time.monotonic() >= deadline:
                     return False
+                self._progress("waiting")
                 self.runtime.stop_event.wait(min(self.step.get("poll_interval_ms", 150)/1000,
                                                  max(0, deadline-time.monotonic())))
                 self.runtime.check_active()
@@ -738,6 +749,7 @@ class _Execution:
 
     def _recover_transition(self, assertions, verification_deadline):
         """One bounded read-only transition attempt; never invokes mutation."""
+        self._progress("transition")
         self.no_parent_recovery = True
         self.transition = {"state": "needs_target", "from_target": dict(self.original_target),
                            "automatic_replay": False, "candidates": []}

@@ -90,6 +90,24 @@ class ScopedControls:
         selectors = [validate_selector(s) for s in selectors]
         if not isinstance(target, dict) or set(target) != {"pid", "window_id"}:
             raise OperationError("현재 프로그램과 창을 지정하세요.")
+        return self._query(target, {"selectors": selectors}, timeout_ms=timeout_ms, max_elements=80)
+
+    def inspect(self, target, *, within, max_depth=12, max_elements=600, timeout_ms=3000):
+        """Resolve one exact region, then read only its bounded subtree."""
+        within = validate_selector(within, allow_within=False)
+        for name, value, ceiling in (("max_depth", max_depth, 32), ("max_elements", max_elements, 5000)):
+            if type(value) is not int or not 1 <= value <= ceiling:
+                raise OperationError(f"{name}는 1~{ceiling} 범위의 정수여야 합니다.")
+        if type(timeout_ms) is not int or not 1 <= timeout_ms <= 120000:
+            raise OperationError("영역 관찰 제한 시간을 확인하세요.")
+        if (not isinstance(target, dict) or set(target) != {"pid", "window_id"}
+                or any(type(v) is not int or v < 1 for v in target.values())):
+            raise OperationError("현재 프로그램과 창을 지정하세요.")
+        return self._query(target, {"operation": "inspect", "within": within,
+                                   "max_depth": max_depth, "max_elements": max_elements},
+                           timeout_ms=timeout_ms, max_elements=max_elements, inspection=True)
+
+    def _query(self, target, payload, *, timeout_ms, max_elements, inspection=False):
         runtime = self.runtime
         guard = runtime.guard
         started = time.monotonic()
@@ -104,7 +122,7 @@ class ScopedControls:
             process = self.process
             request_id = uuid.uuid4().hex
             try:
-                process.stdin.write(json.dumps({"id": request_id, **target, "selectors": selectors}, ensure_ascii=False) + "\n")
+                process.stdin.write(json.dumps({"id": request_id, **target, **payload}, ensure_ascii=False) + "\n")
                 process.stdin.flush()
                 while True:
                     check()
@@ -119,20 +137,33 @@ class ScopedControls:
                     if not isinstance(value, dict) or value.get("id") != request_id:
                         raise OperationError("빠른 확인 응답의 식별자가 다릅니다.", "scoped_response_invalid")
                     if value.get("ok") is not True:
-                        raise OperationError("현재 요소 속성을 확인하지 못했습니다.", str(value.get("code", "scoped_read_failed")))
+                        code = str(value.get("code", "scoped_read_failed"))
+                        message = {"ambiguous_selector": "같은 선택 기준에 맞는 요소가 여러 개입니다. 이름 또는 automation_id로 범위를 더 구체적으로 지정하세요.",
+                                   "selector_not_found": "현재 창에서 지정한 영역을 찾지 못했습니다. 새 화면에서 영역 이름을 확인하세요.",
+                                   "scope_identity_changed": "읽는 동안 선택한 영역이 바뀌었습니다. 입력하지 말고 현재 화면을 다시 읽으세요.",
+                                   "target_mismatch": "현재 창의 프로그램 또는 식별자가 달라 관찰을 중단했습니다.",
+                                   "scope_lookup_limit": "창의 식별 요소가 관찰 한도를 초과했습니다. 복잡한 영역을 접거나 별도 창으로 열어 확인하세요."}.get(code,
+                                   "현재 요소 속성을 확인하지 못했습니다. 같은 입력을 반복하지 말고 관찰 진단을 확인하세요.")
+                        raise OperationError(message, code)
                     data = value.get("data")
                     if (not isinstance(data, dict) or any(data.get(k) != v for k, v in target.items())
                             or data.get("scope_complete") is not True or data.get("read_only") is not True
                             or data.get("scoped_observation") is not True or not isinstance(data.get("elements"), list)
-                            or len(data["elements"]) > 80):
+                            or len(data["elements"]) > max_elements):
                         raise OperationError("빠른 확인 결과의 범위를 검증하지 못했습니다.", "scoped_response_invalid")
+                    if inspection and (data.get("scoped_inspection") is not True
+                            or data.get("within") != payload["within"] or type(data.get("truncated")) is not bool):
+                        raise OperationError("선택 영역의 관찰 범위를 확인하지 못했습니다.", "scoped_response_invalid")
                     for element in data["elements"]:
                         if (not isinstance(element, dict) or element.get("verification_only") is not True
                                 or any(k in element for k in ("element_token", "snapshot_id", "actions"))):
                             raise OperationError("빠른 확인 결과에 입력 권한이 포함되었습니다.", "scoped_response_invalid")
                     check()
                     data["metrics"] = {"observation_ms": round((time.monotonic()-started)*1000, 2),
-                                       "queried_controls": len(selectors), "source": "native_scoped_properties"}
+                                       "source": "native_selected_subtree" if inspection else "native_scoped_properties",
+                                       **({"visited_controls": len(data["elements"]), "property_reads_subtree_only": True,
+                                           "lookup_scope": "whole_window_identity_metadata"}
+                                          if inspection else {"queried_controls": len(payload["selectors"])})}
                     return {"structuredContent": data, "content": []}
             except BaseException:
                 self.close()

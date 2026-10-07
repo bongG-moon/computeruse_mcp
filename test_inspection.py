@@ -155,5 +155,190 @@ class InspectionTests(unittest.TestCase):
             self.assertTrue(all(name == "get_window_state" for name, _ in runtime.calls))
 
 
+class AdaptiveInspectionTests(unittest.TestCase):
+    target = {"pid": 11, "window_id": 22}
+    image = {"type": "image", "mimeType": "image/png", "data": "synthetic"}
+
+    def runtime(self, elements=None):
+        runtime = Runtime(elements=elements)
+        runtime.captures = []
+        def capture(target):
+            runtime.captures.append(copy.deepcopy(target))
+            return {"structuredContent": dict(target), "content": [copy.deepcopy(self.image)]}
+        runtime.capture_checkpoint = capture
+        return runtime
+
+    def test_default_auto_adds_readonly_image_for_empty_accessibility(self):
+        runtime = self.runtime()
+        result = inspect_window(runtime, self.target)
+        info = result["structuredContent"]["inspection"]
+        self.assertEqual(info["status"], "combined_observation")
+        self.assertEqual(info["observed_modalities"], ["uia", "visual"])
+        self.assertEqual(result["content"][1], self.image)
+        self.assertEqual(runtime.captures, [self.target])
+        self.assertEqual(runtime.mode, "uia")
+        self.assertFalse(info["input_dispatched"])
+        self.assertFalse(info["image_delivery"]["client_rendering_verified"])
+        self.assertFalse(info["image_delivery"]["model_image_understanding_verified"])
+
+    def test_structure_only_can_be_complemented_without_calling_it_actionable(self):
+        runtime = self.runtime([{"label": "부모", "role": "Pane"}, {"label": "안내", "role": "Text"}])
+        result = inspect_window(runtime, self.target)["structuredContent"]["inspection"]
+        self.assertEqual(result["uia_evidence"], "structure_only")
+        self.assertEqual(result["image_capture"]["reason"], "weak_accessibility")
+        self.assertTrue(result["input_mode_unchanged"])
+
+    def test_system_titlebar_buttons_do_not_count_as_accessible_app_content(self):
+        runtime = self.runtime([{"element_index": 1, "name": "Any app title", "role": "TitleBar"},
+                                {"element_index": 2, "parent_index": 1, "name": "Localized close", "role": "Button", "actions": ["invoke"]}])
+        info = inspect_window(runtime, self.target)["structuredContent"]["inspection"]
+        self.assertEqual(info["uia_evidence"], "structure_only")
+        self.assertEqual(info["status"], "combined_observation")
+        self.assertEqual(runtime.captures, [self.target])
+
+    def test_healthy_uia_does_not_capture_unnecessarily_even_search_has_no_match(self):
+        runtime = self.runtime([{"name": "조회", "role": "Button", "actions": ["invoke"]}])
+        result = inspect_window(runtime, self.target, search="다른 버튼")["structuredContent"]["inspection"]
+        self.assertEqual(runtime.captures, [])
+        self.assertEqual(result["control_count"], 0)
+        self.assertEqual(result["uia_evidence"], "actionable_controls_observed")
+
+    def test_explicit_uia_never_captures_and_both_keeps_both(self):
+        runtime = self.runtime([{"label": "조회", "role": "Button", "actions": ["invoke"]}])
+        self.assertEqual(inspect_window(runtime, self.target, observation="both")["content"][1], self.image)
+        self.assertEqual(runtime.captures, [self.target])
+        runtime = self.runtime()
+        result = inspect_window(runtime, self.target, observation="uia")["structuredContent"]["inspection"]
+        self.assertEqual(result["status"], "no_accessible_controls")
+        self.assertEqual(runtime.captures, [])
+
+    def test_combined_read_does_not_return_input_handles_invalidated_by_checkpoint(self):
+        runtime = self.runtime([{"element_index": 4, "parent_index": 0, "name": "Query", "role": "Button", "actions": ["invoke"]}])
+        runtime.answer["structuredContent"]["snapshot_id"] = "before-checkpoint"
+        result = inspect_window(runtime, self.target, observation="both")["structuredContent"]
+        self.assertNotIn("snapshot_id", result)
+        self.assertTrue(result["inspection"]["input_requires_fresh_observation"])
+        control = result["inspection"]["controls"][0]
+        self.assertNotIn("element_index", control)
+        self.assertTrue(control["input_requires_fresh_observation"])
+        self.assertEqual(control["selector"], {"name": "Query", "role": "Button"})
+
+    def test_explicit_visual_on_uia_reads_only_image_without_mode_change(self):
+        runtime = self.runtime()
+        answer = inspect_window(runtime, self.target, observation="visual")
+        self.assertEqual(runtime.calls, [])
+        self.assertEqual(runtime.captures, [self.target])
+        self.assertEqual(runtime.mode, "uia")
+        self.assertEqual(answer["structuredContent"]["inspection"]["status"], "visual_observation")
+        self.assertFalse(answer["isError"])
+
+    def test_uia_error_never_triggers_image_fallback(self):
+        for code in ("driver_timeout", "target_denied", "target_unavailable"):
+            runtime = self.runtime()
+            runtime.answer = {"isError": True, "structuredContent": {"error_code": code}}
+            self.assertEqual(inspect_window(runtime, self.target, observation="both"), runtime.answer)
+            self.assertEqual(runtime.captures, [])
+
+    def test_different_capture_window_is_rejected_and_no_pixels_returned(self):
+        runtime = self.runtime()
+        runtime.capture_checkpoint = lambda target: {"structuredContent": {**target, "window_id": 99}, "content": [self.image]}
+        with self.assertRaises(OperationError) as raised:
+            inspect_window(runtime, self.target)
+        self.assertEqual(raised.exception.code, "target_mismatch")
+
+    def test_minimized_or_occluded_capture_has_actionable_diagnostic_without_refocus(self):
+        runtime = self.runtime()
+        runtime.capture_checkpoint = lambda target: {"isError": True, "structuredContent": {"error_code": "checkpoint_requires_foreground"}}
+        result = inspect_window(runtime, self.target)
+        info = result["structuredContent"]["inspection"]
+        self.assertEqual(info["image_capture"]["diagnostic_code"], "checkpoint_requires_foreground")
+        self.assertIn("맨 앞으로", info["next_step"])
+        self.assertEqual([name for name, args in runtime.calls], ["get_window_state"])
+        self.assertFalse(result["isError"])
+        self.assertFalse(any(item["type"] == "image" for item in result["content"]))
+        self.assertTrue(inspect_window(runtime, self.target, observation="visual")["isError"])
+
+    def test_stop_during_capture_does_not_return_image(self):
+        runtime = self.runtime()
+        def capture(target):
+            runtime.check_active = lambda: (_ for _ in ()).throw(RuntimeError("stopped"))
+            return {"structuredContent": dict(target), "content": [self.image]}
+        runtime.capture_checkpoint = capture
+        with self.assertRaisesRegex(RuntimeError, "stopped"):
+            inspect_window(runtime, self.target)
+
+    def test_visual_session_never_reads_uia_by_adding_an_option(self):
+        for observation in ("both", "uia", "not-a-mode"):
+            runtime = Runtime(mode="visual")
+            with self.assertRaises(OperationError):
+                inspect_window(runtime, self.target, observation=observation)
+            self.assertEqual(runtime.calls, [])
+
+
+class NativeScopedInspectionTests(unittest.TestCase):
+    target = {"pid": 11, "window_id": 22}
+    within = {"name": "조건", "role": "Group"}
+
+    def runtime(self, *, truncated=False):
+        runtime = Runtime()
+        runtime.scoped_calls = []
+        snapshot = {**self.target, "read_only": True, "scoped_observation": True, "scoped_inspection": True,
+                    "scope_complete": True, "within": self.within, "truncated": truncated,
+                    "elements": [{"element_index": 0, "parent_index": -1, "name": "조건", "role": "Group", "verification_only": True},
+                                 {"element_index": 1, "parent_index": 0, "name": "종류", "role": "Edit", "value": "W", "verification_only": True, "observed_patterns": ["set_value"]}]}
+        def inspect(target, **kwargs):
+            runtime.scoped_calls.append((target, kwargs))
+            return {"structuredContent": copy.deepcopy(snapshot), "content": []}
+        runtime.inspect_controls = inspect
+        return runtime, snapshot
+
+    def test_within_reads_native_subtree_before_control_filtering_without_driver_walk(self):
+        runtime, _ = self.runtime()
+        info = inspect_window(runtime, self.target, within=self.within, search="종류")["structuredContent"]["inspection"]
+        self.assertEqual(runtime.calls, [])
+        self.assertEqual(len(runtime.scoped_calls), 1)
+        self.assertEqual(runtime.scoped_calls[0][1]["timeout_ms"], 6000)
+        self.assertFalse(info["filters_reduce_uia_traversal"])
+        self.assertTrue(info["filters_reduce_uia_property_reads"])
+        self.assertEqual(info["scope_lookup"], "whole_window_identity_metadata")
+        self.assertEqual(info["observation_scope"]["kind"], "native_selected_subtree")
+        self.assertEqual(info["controls"][0]["selector"], {"name": "종류", "role": "Edit", "within": self.within})
+        self.assertTrue(info["controls"][0]["input_requires_fresh_observation"])
+        self.assertNotIn("element_index", info["controls"][0])
+        self.assertNotIn("snapshot_id", info["controls"][0])
+        self.assertEqual(info["controls"][0]["suggested_operations"], ["assert", "set_value"])
+
+    def test_partial_subtree_never_claims_uniqueness(self):
+        runtime, _ = self.runtime(truncated=True)
+        info = inspect_window(runtime, self.target, within=self.within)["structuredContent"]["inspection"]
+        self.assertTrue(info["traversal_may_be_limited"])
+        self.assertIsNone(info["controls"][0]["selector"])
+        self.assertEqual(info["controls"][0]["suggested_operations"], [])
+
+    def test_duplicate_scope_timeout_permission_errors_do_not_expand_or_capture(self):
+        for code in ("ambiguous_selector", "scoped_observation_timeout", "target_mismatch", "target_denied"):
+            runtime, _ = self.runtime()
+            runtime.inspect_controls = lambda *args, **kwargs: (_ for _ in ()).throw(OperationError("refused", code))
+            with self.assertRaises(OperationError) as raised:
+                inspect_window(runtime, self.target, within=self.within, observation="both")
+            self.assertEqual(raised.exception.code, code)
+            self.assertEqual(runtime.calls, [])
+
+    def test_helper_absent_falls_back_explicitly_to_driver(self):
+        runtime = Runtime([{"name": "조건", "role": "Group", "element_index": 1}, {"name": "값", "role": "Edit", "element_index": 2, "parent_index": 1}])
+        runtime.inspect_controls = lambda *args, **kwargs: (_ for _ in ()).throw(NotImplementedError())
+        info = inspect_window(runtime, self.target, within=self.within)["structuredContent"]["inspection"]
+        self.assertEqual(info["scope_fallback"], "scoped_helper_unavailable")
+        self.assertFalse(info["filters_reduce_uia_traversal"])
+        self.assertEqual(len(runtime.calls), 1)
+
+    def test_forged_or_unscoped_native_result_refused(self):
+        runtime, snapshot = self.runtime()
+        snapshot["within"] = {"name": "other"}
+        with self.assertRaises(OperationError) as raised:
+            inspect_window(runtime, self.target, within=self.within)
+        self.assertEqual(raised.exception.code, "scoped_response_invalid")
+
+
 if __name__ == "__main__":
     unittest.main()

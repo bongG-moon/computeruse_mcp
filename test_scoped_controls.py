@@ -145,4 +145,52 @@ class ScopedTests(unittest.TestCase):
         self.assertIsNone(reader.process)
 
 
+class ScopedSubtreeTests(unittest.TestCase):
+    runtime = ScopedTests.runtime
+    reader = ScopedTests.reader
+
+    def scoped_reader(self, transform=lambda value: value):
+        within = {"name": "conditions"}
+        def convert(answer):
+            answer["data"].update(scoped_inspection=True, within=within, truncated=False)
+            return transform(answer)
+        return self.reader(convert)
+
+    def test_subtree_request_is_bounded_and_keeps_no_input_handles(self):
+        reader, process = self.scoped_reader()
+        with mock.patch("scoped_controls.validate_arguments") as validate:
+            answer = reader.inspect({"pid": 10, "window_id": 20}, within={"name": "conditions"}, max_elements=100, max_depth=3)
+        self.assertGreaterEqual(validate.call_count, 2)
+        self.assertEqual(answer["structuredContent"]["metrics"]["source"], "native_selected_subtree")
+        self.assertEqual(answer["structuredContent"]["metrics"]["visited_controls"], 1)
+        self.assertFalse(process.terminate.called)
+
+    def test_subtree_response_boundary_and_truncation_must_be_explicit(self):
+        for transform in (lambda a: {**a, "data": {**a["data"], "within": {"name": "wrong"}}},
+                          lambda a: {**a, "data": {**a["data"], "scoped_inspection": False}},
+                          lambda a: {**a, "data": {**a["data"], "truncated": "no"}}):
+            reader, process = self.scoped_reader(transform)
+            with mock.patch("scoped_controls.validate_arguments"), self.assertRaises(OperationError) as raised:
+                reader.inspect({"pid": 10, "window_id": 20}, within={"name": "conditions"})
+            self.assertEqual(raised.exception.code, "scoped_response_invalid")
+            self.assertTrue(process.terminate.called)
+
+    def test_subtree_validation_precedes_process_start(self):
+        for kwargs in ({"within": {"role": "Group"}}, {"within": {"name": "a", "within": {"name": "b"}}},
+                       {"within": {"name": "a"}, "max_depth": 33}, {"within": {"name": "a"}, "max_elements": 5001},
+                       {"within": {"name": "a"}, "timeout_ms": 0}):
+            reader = ScopedControls(self.runtime(), factory=mock.Mock())
+            with self.assertRaises(OperationError):
+                reader.inspect({"pid": 10, "window_id": 20}, **kwargs)
+            reader.factory.assert_not_called()
+
+    def test_subtree_truncated_data_stays_readonly_and_never_becomes_selector_query(self):
+        reader, process = self.scoped_reader(lambda a: {**a, "data": {**a["data"], "truncated": True}})
+        with mock.patch("scoped_controls.validate_arguments"):
+            answer = reader.inspect({"pid": 10, "window_id": 20}, within={"name": "conditions"})
+        self.assertTrue(answer["structuredContent"]["truncated"])
+        self.assertTrue(answer["structuredContent"]["read_only"])
+        self.assertTrue(answer["structuredContent"]["scoped_inspection"])
+
+
 if __name__ == "__main__": unittest.main()

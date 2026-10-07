@@ -16,6 +16,7 @@ from learning_picker import _run_helper, _helper_visible, _end_helper, match_pic
 from operations import OperationError, _name, _unique
 from teaching_sessions import _Cancellation
 from workflows import validate_recipe, WINDOW_REF
+from recording_windows import validate_window_wait
 
 
 HELPER_NAME = "Computer Use MCP 프로세스 만들기.exe"
@@ -25,7 +26,9 @@ IMAGE_ACTIONS = {"click": "image_click", "double_click": "image_double_click", "
                  "scroll": "image_scroll", "wait_for_element": "wait_for_image"}
 IMAGE_FALLBACK_ERRORS = {"picker_not_found", "picker_controls_not_exposed"}
 RECORDING_WARNINGS = {
-    "outside_target_not_recorded": "연결 범위 밖이나 새 팝업에서 수행한 동작은 기록되지 않았습니다.",
+    "outside_target_not_recorded": "다른 프로그램이나 소유 관계가 확인되지 않은 창의 동작은 기록되지 않았습니다.",
+    "recording_window_ambiguous": "같은 제목·종류의 팝업이 여러 개라 해당 창의 동작은 기록하지 않았습니다.",
+    "recording_window_limit": "추가 팝업 5개 한도에 도달해 이후 창은 기록하지 않았습니다.",
     "uia_text_unavailable": "UIA 응답 지연으로 일부 입력값을 자동 기록하지 못했습니다.",
     "uia_probe_unavailable": "시작 점검에서 UIA 응답을 확인하지 못해 이미지·수동 기록을 사용했습니다.",
     "recording_timeout_partial": "제한 시간이 끝나 그때까지의 동작만 기록했습니다.",
@@ -42,6 +45,7 @@ ACTION_LABELS = {"click": "클릭", "double_click": "두 번 클릭", "right_cli
     "set_checked": "체크 변경", "wait_for_element": "요소가 나타날 때까지 대기", "delay": "고정 대기",
     "checkpoint": "화면 이미지 확인", "scroll": "스크롤"}
 ACTION_LABELS["wait_for_state"] = "완료 조건이 될 때까지 대기"
+ACTION_LABELS["wait_for_window"] = "관련 팝업 연결"
 ACTION_LABELS.update({mapped: ACTION_LABELS.get(action, "스크롤") + " (이미지)" for action, mapped in IMAGE_ACTIONS.items()})
 ACTION_LABELS["manual_entry"] = "기록 내용 확인 필요"
 MANUAL_REASONS = {"unknown_input": "입력할 내용을 직접 지정하세요.",
@@ -86,13 +90,22 @@ class ProcessDraft:
         self.recording_acknowledged = bool(review.get("acknowledged", False)) if self.recording_warnings else True
         if self.steps:
             validate_recipe(self.steps, self.variables, list({p["program_id"] for p in programs}))
+            for step in self.steps:
+                if step["operation"] == "wait_for_window":
+                    key = (step["program_id"], step["window_ref"])
+                    owner = self.targets.get((step["program_id"], step["owner_ref"]))
+                    if key not in self.targets and owner is not None:
+                        target = {"program_id": step["program_id"], "window_ref": step["window_ref"], "pid": owner["pid"],
+                                  "window_id": 0, "label": (step["title"] or step["class_name"]) + " · 실행 시 팝업 연결"}
+                        self.targets[key] = target
+                        self.programs.append(target)
             if any((s["program_id"], s.get("window_ref", "main")) not in self.targets for s in self.steps):
                 raise OperationError("기존 프로세스의 프로그램과 창을 모두 연결하세요.", "missing_target")
 
     def target(self, payload):
         key = (payload.get("program_id"), payload.get("window_ref", "main"))
         target = self.targets.get(key)
-        if target is None or any(payload.get(k) != target[k] for k in ("pid", "window_id")):
+        if target is None or target["window_id"] <= 0 or any(payload.get(k) != target[k] for k in ("pid", "window_id")):
             raise OperationError("편집 창에 연결한 정확한 프로그램과 창을 선택하세요.", "target_mismatch")
         return target
 
@@ -174,7 +187,7 @@ class ProcessDraft:
         step["checked" if action == "set_checked" else "value"] = expected
         return step, _name(element) or selector.get("automation_id", "녹화한 요소")
 
-    def recorded(self, events, *, snapshots=None, warning_codes=()):
+    def recorded(self, events, *, snapshots=None, warning_codes=(), windows=()):
         from image_targets import validate_image_target
         if not isinstance(events, list) or not events or len(events) > 30:
             raise OperationError("기록한 동작이 없습니다. [기록 시작] 후 실제로 클릭·입력해야 합니다. 마우스를 올려 요소를 모으는 것은 동작 녹화가 아닙니다." if not events else "기록한 동작이 너무 많습니다.", "recording_invalid_events")
@@ -182,12 +195,34 @@ class ProcessDraft:
             raise OperationError("녹화 경고 형식을 확인하지 못했습니다.", "recording_invalid_events")
         warnings = list(dict.fromkeys([*self.recording_warnings, *warning_codes]))
         proposed, labels = copy.deepcopy(self.steps), list(self.labels)
-        for event in events:
+        discovered = self.recorded_windows(windows)
+        targets = {**self.targets, **{key: value[0] for key, value in discovered.items()}}
+        connected = {(step["program_id"], step.get("window_ref", "main")) for step in proposed if step["operation"] == "wait_for_window"}
+        last_event = {(event.get("program_id"), event.get("window_ref", "main")): index for index, event in enumerate(events) if isinstance(event, dict)}
+        closed = {(row["program_id"], row["window_ref"]): row["owner_ref"] for row in windows if row.get("closed") is True}
+        for event_index, event in enumerate(events):
             if not isinstance(event, dict):
                 raise OperationError("녹화 응답의 형식을 확인하지 못했습니다.", "recording_invalid_events")
-            target = self.targets.get((event.get("program_id"), event.get("window_ref", "main")))
+            binding_key = (event.get("program_id"), event.get("window_ref", "main"))
+            target = targets.get(binding_key)
             if target is None:
                 raise OperationError("녹화에 연결하지 않은 프로그램의 동작이 포함되어 있습니다.", "target_mismatch")
+            if binding_key in discovered and binding_key not in connected:
+                binding_step = discovered[binding_key][1]
+                owner_key = (target["program_id"], binding_step["owner_ref"])
+                opening = (len(proposed) >= 2 and proposed[-1]["operation"] == "checkpoint"
+                           and not proposed[-1].get("return_from") and not proposed[-1].get("opened_from")
+                           and proposed[-2]["operation"].startswith("image_") and not proposed[-2].get("expect")
+                           and all((item["program_id"], item.get("window_ref", "main")) == owner_key for item in proposed[-2:]))
+                if opening:
+                    # A modal popup owns foreground now. Review that proven
+                    # popup, not an inaccessible screenshot of its parent.
+                    proposed.pop(); labels.pop()
+                proposed.append(binding_step); labels.append(target["label"]); connected.add(binding_key)
+                if opening:
+                    check = self.checkpoint(target)
+                    check.update(opened_from=binding_step["owner_ref"], message="관련 팝업 화면에서 앞선 동작의 결과를 확인한 뒤 계속하세요.")
+                    proposed.append(check); labels.append("열린 팝업 확인")
             kind = event.get("operation")
             if kind not in {*IMAGE_ACTIONS, "manual_entry", "select_option", "set_checked"}:
                 raise OperationError("지원하지 않는 녹화 동작입니다.", "recording_invalid_events")
@@ -229,12 +264,48 @@ class ProcessDraft:
                 # Never retain unknown typed characters or key sequences.
                 step = {key: val for key, val in step.items() if key not in {"value", "key", "keys"}}
                 step["manual_reason"] = reason if reason in MANUAL_REASONS else "image_capture_required"
-            proposed.append(step); labels.append("녹화한 이미지" if image is not None else "대상 확인 필요")
-            proposed.append(self.checkpoint(target)); labels.append("현재 창")
+            label = "녹화한 이미지" if image is not None else "대상 확인 필요"
+            if isinstance(event.get("observed_selection"), str) and len(event["observed_selection"]) <= 2000:
+                label += " · 관찰한 선택값: " + event["observed_selection"]
+            proposed.append(step); labels.append(label)
+            if kind != "manual_entry" and binding_key in closed and event_index == last_event[binding_key]:
+                owner = targets[(target["program_id"], closed[binding_key])]
+                check = self.checkpoint(owner)
+                check["return_from"] = target["window_ref"]
+                check["message"] = "팝업에서 수행한 동작과 원래 창으로 돌아온 결과를 확인한 뒤 계속하세요."
+                proposed.append(check); labels.append("원래 창으로 복귀 확인")
+            else:
+                proposed.append(self.checkpoint(target)); labels.append("현재 창")
         self.validate(proposed, allow_pending=True)
         self.steps, self.labels = proposed, labels
+        for key in connected:
+            if key in discovered and key not in self.targets:
+                self.targets[key] = discovered[key][0]
+                self.programs.append(discovered[key][0])
         self.recording_warnings = warnings
         if warnings: self.recording_acknowledged = False
+
+    def recorded_windows(self, windows):
+        if not isinstance(windows, (list, tuple)) or len(windows) > 5:
+            raise OperationError("녹화한 팝업 연결 정보를 확인하지 못했습니다.", "recording_invalid_windows")
+        found = {}
+        for row in windows:
+            required = {"program_id", "window_ref", "owner_ref", "pid", "window_id", "owner_window_id", "title", "class_name", "owner_verified"}
+            if not isinstance(row, dict) or not required <= set(row) or set(row) - required - {"closed"} or type(row.get("closed", False)) is not bool:
+                raise OperationError("녹화한 팝업의 소유 관계 정보가 없습니다.", "recording_invalid_windows")
+            key = (row["program_id"], row["window_ref"])
+            owner = self.targets.get((row["program_id"], row["owner_ref"]))
+            if (key in self.targets or key in found or owner is None or row["owner_verified"] is not True
+                    or row["pid"] != owner["pid"] or row["owner_window_id"] != owner["window_id"]
+                    or type(row["window_id"]) is not int or row["window_id"] <= 0 or row["window_id"] == owner["window_id"]):
+                raise OperationError("승인한 원래 창과 연결되지 않은 팝업입니다.", "recording_invalid_windows")
+            step = {key: row[key] for key in ("program_id", "window_ref", "owner_ref", "title", "class_name")}
+            step.update(operation="wait_for_window", timeout_ms=5000)
+            validate_window_wait(step)
+            target = {key: row[key] for key in ("program_id", "window_ref", "pid", "window_id")}
+            target["label"] = (row["title"] or row["class_name"]) + " · " + row["window_ref"]
+            found[(row["program_id"], row["window_ref"])] = (target, step)
+        return found
 
     def resolve_input(self, payload):
         index = payload.get("index")
@@ -265,10 +336,13 @@ class ProcessDraft:
 
     def add(self, payload):
         if set(payload) - {"action", "program_id", "pid", "window_id", "window_ref", "selection_id", "value", "key", "keys",
-                           "seconds", "timeout_seconds", "option_order", "expect", "checked", "direction", "amount"}:
+                           "seconds", "timeout_seconds", "option_order", "expect", "checked", "direction", "amount", "completion_mode"}:
             raise OperationError("지원하지 않는 단계 설정입니다.")
         target = self.target(payload)
         action = payload.get("action")
+        completion = payload.get("completion_mode", "human")
+        if completion not in {"human", "automatic"}:
+            raise OperationError("완료 확인 방법을 선택하세요.")
         if action not in ACTION_LABELS:
             raise OperationError("동작 종류를 선택하세요.")
         step = {"operation": action, "program_id": target["program_id"], "window_ref": target.get("window_ref", "main")}
@@ -313,8 +387,12 @@ class ProcessDraft:
                 raise OperationError("이미지 동작은 자동으로 추가되는 화면 확인 단계에서 결과를 확인합니다.")
             step["expect"] = [{"selector": copy.deepcopy(selected["selector"]),
                                "property": expected["property"], "equals": expected["equals"]}]
+            if completion == "automatic" and step["operation"].startswith("image_"):
+                step["expect"][0]["require_change"] = True
+        if completion == "automatic" and step["operation"].startswith("image_") and not step.get("expect"):
+            raise OperationError("자동 확인할 요소와 작업 후 예상값을 먼저 선택하세요.")
         additions, labels = [step], [label]
-        if step["operation"].startswith("image_"):
+        if step["operation"].startswith("image_") and not step.get("expect"):
             additions.append(self.checkpoint(target)); labels.append("현재 창")
         proposed = [*self.steps, *additions]
         self.validate(proposed, allow_pending=True)
@@ -336,7 +414,10 @@ class ProcessDraft:
         groups = []
         cursor = 0
         while cursor < len(self.steps):
-            length = 2 if self.steps[cursor]["operation"].startswith("image_") or self.steps[cursor]["operation"] == "manual_entry" else 1
+            length = 2 if (self.steps[cursor]["operation"].startswith("image_") and not self.steps[cursor].get("expect")) or self.steps[cursor]["operation"] == "manual_entry" else 1
+            if (length == 2 and cursor + 2 < len(self.steps) and self.steps[cursor + 1]["operation"] == "wait_for_window"
+                    and self.steps[cursor + 2]["operation"] == "checkpoint" and self.steps[cursor + 2].get("opened_from") == self.steps[cursor].get("window_ref", "main")):
+                length = 3
             groups.append((self.steps[cursor:cursor+length], self.labels[cursor:cursor+length], cursor))
             cursor += length
         group_index = next(i for i, g in enumerate(groups) if g[2] <= index < g[2] + len(g[0]))
@@ -357,7 +438,7 @@ class ProcessDraft:
             action = step["operation"]
             target = self.targets[(step["program_id"], step.get("window_ref", "main"))]
             detail = (str(step.get("duration_ms", 0)/1000) + "초" if action == "delay" else
-                      str(step.get("timeout_ms", 0)/1000) + "초 이내" if action in {"wait_for_element", "wait_for_image", "wait_for_state"} else
+                      str(step.get("timeout_ms", 0)/1000) + "초 이내" if action in {"wait_for_element", "wait_for_image", "wait_for_state", "wait_for_window"} else
                       str(step.get("message", step.get("value", step.get("key", "+".join(step.get("keys", [])))))))
             if step.get("expect"):
                 check = step["expect"][0]
@@ -495,23 +576,33 @@ class ProcessEditors:
         elif action == "record":
             if payload:
                 raise OperationError("녹화 범위는 편집 창에 연결한 프로그램으로 고정됩니다.")
-            maximum_events = (30 - len(draft.steps)) // 2
+            # Reserve room for up to five new popup-binding waits as well as
+            # one review checkpoint for each image action.
+            maximum_events = (30 - len(draft.steps) - 5) // 2
             if maximum_events < 1:
                 raise OperationError("녹화 동작과 화면 확인을 추가할 공간이 없습니다. 기존 단계를 삭제하거나 새 프로세스를 만드세요.")
-            for target in draft.programs:
+            roots = [target for target in draft.programs if (target["program_id"], target.get("window_ref", "main")) not in
+                     {(step["program_id"], step["window_ref"]) for step in draft.steps if step["operation"] == "wait_for_window"}]
+            for target in roots:
                 self.library._program(runtime, target["program_id"], {k: target[k] for k in ("pid", "window_id")})
-            recorded = self._visual(job, "record", {"targets": draft.programs, "max_events": maximum_events}, min(600, job["args"].get("timeout_seconds", 600)))
+            recorded = self._visual(job, "record", {"targets": roots, "max_events": maximum_events}, min(600, job["args"].get("timeout_seconds", 600)))
             snapshots = {}
-            for target in draft.programs:
+            # Validate owned helper metadata before inspecting any newly bound
+            # popup. Closed popups remain image/manual, never fabricated UIA.
+            popup_targets = [item[0] for item in draft.recorded_windows(recorded.get("windows", [])).values()]
+            for target in roots:
                 self.library._program(runtime, target["program_id"], {k: target[k] for k in ("pid", "window_id")})
+            for target in [*roots, *popup_targets]:
                 if any(isinstance(event, dict) and event.get("program_id") == target["program_id"] and event.get("window_ref", "main") == target.get("window_ref", "main") and "native_target" in event for event in recorded.get("events", [])):
                     try:
                         with runtime.execution_lock:
                             self._check(job)
+                            self.library._program(runtime, target["program_id"], {k: target[k] for k in ("pid", "window_id")})
                             snapshots[(target["program_id"], target.get("window_ref", "main"))], _ = self.library._observe(runtime, {k: target[k] for k in ("pid", "window_id")}, target["program_id"])
                     except OperationError:
                         self._check(job)  # Keep unresolved candidates manual; never bypass cancellation.
-            draft.recorded(recorded.get("events"), snapshots=snapshots, warning_codes=recorded.get("warnings", []))
+            draft.recorded(recorded.get("events"), snapshots=snapshots, warning_codes=recorded.get("warnings", []), windows=recorded.get("windows", []))
+            extra["programs"] = copy.deepcopy(draft.programs)
             message = "녹화한 동작을 초안에 추가했습니다. 순서와 입력 내용을 검토한 뒤 저장하세요. 아직 재실행하지 않았습니다."
             if draft.recording_warnings: message = "일부 동작이 빠졌거나 확인되지 않은 부분 기록입니다. [누락 경고 확인]과 각 단계를 검토하세요."
         elif action == "ack_recording_warnings":

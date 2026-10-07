@@ -892,8 +892,24 @@ def filter_result(name, result, policy, process_resolver=windows_process_exe):
 
 def atomic_json(path, value):
     temp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
-    temp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(temp, path)
+    try:
+        temp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+        delays = (.02, .05, .1)
+        for attempt in range(len(delays) + 1):
+            try:
+                os.replace(temp, path)
+                return
+            except PermissionError as error:
+                # Win32 readers/filters can briefly deny atomic replacement.
+                # Retry only this completed file, never its producing action.
+                if getattr(error, "winerror", None) not in {5, 32, 33} or attempt == len(delays):
+                    raise
+                time.sleep(delays[attempt])
+    finally:
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass  # Cleanup must not hide the original write/replace failure.
 
 
 class DriverTransport:

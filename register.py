@@ -22,6 +22,7 @@ SERVER_NAME = "local-computer-use"
 # Version labels alone are never trusted; a foreign same-name MCP is preserved.
 # This proves these exact distributions, not signed-code security.
 PREVIOUS_MANIFESTS = {
+    "78f1830300bde98ee3820a903389ec647565523912f1cefa1138a277e3de3d62": "0.13.0",
     "d2a19860d0bd5074e8552b2464df624dac6b0d0ccd722434a0475a4d2bc59908": "0.12.0",
     "e2b3a392400dbc2787fd67cae02994d63fd32fa4a5ddde2f7930b7cad701c3fc": "0.11.1",
     "7d63cc4d0c048daba670d909607244eb746c8796ed10090e5ade04f6576d430b": "0.11.0",
@@ -97,7 +98,7 @@ def make_server_entry(config_path: str | Path) -> dict:
         entry["args"] = ["--config", str(config)]
     elif bundled.is_file() and (APP_DIR / "BUILD-MANIFEST.json").is_file():
         manifest = _read_object(APP_DIR / "BUILD-MANIFEST.json")
-        if manifest.get("product") == "Computer-Use-MCP" and manifest.get("version") in {"0.7.0", "0.7.1", "0.8.0", "0.9.0", "0.10.0", "0.11.0", "0.11.1", "0.12.0", "0.13.0"}:
+        if manifest.get("product") == "Computer-Use-MCP" and manifest.get("version") in {"0.7.0", "0.7.1", "0.8.0", "0.9.0", "0.10.0", "0.11.0", "0.11.1", "0.12.0", "0.13.0", "0.14.0"}:
             raise RegistrationError("관리자 연결 실행파일이 없습니다. ZIP 전체를 다시 압축 해제해 주세요. 일반 권한 연결로 대체하지 않았습니다.")
     return entry
 
@@ -149,7 +150,7 @@ def _previous_entry(existing) -> dict | None:
         version = PREVIOUS_MANIFESTS.get(hashlib.sha256(manifest_bytes).hexdigest())
         if not version:
             return None
-        if bridge is not None and version not in {"0.7.0", "0.7.1", "0.8.0", "0.9.0", "0.10.0", "0.11.0", "0.11.1", "0.12.0"}:
+        if bridge is not None and version not in {"0.7.0", "0.7.1", "0.8.0", "0.9.0", "0.10.0", "0.11.0", "0.11.1", "0.12.0", "0.13.0"}:
             return None
         checked_folders = set()
         checked_names = set()

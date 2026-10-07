@@ -122,13 +122,13 @@ internal static class ProcessEditor
         readonly DateTime deadline;
         readonly Timer timer = new Timer();
         readonly Color ink = Color.FromArgb(24, 43, 72), blue = Color.FromArgb(37, 99, 235), muted = Color.FromArgb(92, 108, 132);
-        readonly ComboBox program = new ComboBox(), action = new ComboBox(), expectProperty = new ComboBox(), expectBoolean = new ComboBox();
+        readonly ComboBox program = new ComboBox(), action = new ComboBox(), expectProperty = new ComboBox(), expectBoolean = new ComboBox(), imageCompletion = new ComboBox();
         readonly Label selected = new Label(), expectSelected = new Label(), status = new Label(), valueCaption = new Label(), timeCaption = new Label(), timeUnit = new Label(), actionHelp = new Label();
         readonly TextBox value = new TextBox(), optionOrder = new TextBox(), expected = new TextBox(), processName = new TextBox(), description = new TextBox();
         readonly NumericUpDown seconds = new NumericUpDown();
         readonly ListView steps = new ListView();
         readonly FlowLayoutPanel fields = new FlowLayoutPanel();
-        readonly Panel valueSection = new Panel(), optionSection = new Panel(), timeSection = new Panel(), expectSection = new Panel();
+        readonly Panel valueSection = new Panel(), optionSection = new Panel(), timeSection = new Panel(), expectSection = new Panel(), completionSection = new Panel();
         readonly Button pick = new Button(), pickImage = new Button(), record = new Button(), reviewRecording = new Button(), editInput = new Button(), pickExpect = new Button(), add = new Button(), save = new Button(), up = new Button(), down = new Button(), remove = new Button();
         readonly PictureBox thumbnail = new PictureBox();
         readonly List<Choice> allActions = new List<Choice>();
@@ -160,7 +160,9 @@ internal static class ProcessEditor
         void ConfigureCombo(ComboBox control) { control.DropDownStyle = ComboBoxStyle.DropDownList; control.FlatStyle = FlatStyle.Flat; }
         string ActionCode { get { var choice = action.SelectedItem as Choice; return choice == null ? "" : choice.Code; } }
         bool IsImage { get { return Str(selection, "recognition", "") == "image"; } }
-        bool NeedsExpect { get { string code = ActionCode; return code == "wait_for_state" || !IsImage && (code == "click" || code == "double_click" || code == "right_click" || code == "press_key" || code == "hotkey"); } }
+        bool ImageMutation { get { return IsImage && ActionCode != "wait_for_element" && ActionCode != "delay" && ActionCode != "checkpoint" && ActionCode != "wait_for_state"; } }
+        bool AutomaticImage { get { var choice = imageCompletion.SelectedItem as Choice; return ImageMutation && choice != null && choice.Code == "automatic"; } }
+        bool NeedsExpect { get { string code = ActionCode; return AutomaticImage || code == "wait_for_state" || !IsImage && (code == "click" || code == "double_click" || code == "right_click" || code == "press_key" || code == "hotkey"); } }
         bool NeedsElement { get { return ActionCode != "delay" && ActionCode != "checkpoint" && ActionCode != "wait_for_state"; } }
 
         internal EditorForm(Dictionary<string, object> request, string response)
@@ -172,7 +174,8 @@ internal static class ProcessEditor
             foreach (object raw in programs) {
                 var data = raw as Dictionary<string, object>; if (data == null) throw new ArgumentException("invalid_program");
                 string id = Str(data, "program_id", "");
-                if (id.Length == 0 || Long(data, "window_id", 0) <= 0 || Num(data, "pid", 0) <= 0) throw new ArgumentException("invalid_program_identity");
+                if (id.Length == 0 || Long(data, "window_id", 0) < 0 || Num(data, "pid", 0) <= 0 ||
+                    Long(data, "window_id", 0) == 0 && Str(data, "window_ref", "main") == "main") throw new ArgumentException("invalid_program_identity");
                 program.Items.Add(new Choice { Code = id, Label = Str(data, "label", id), Data = data });
                 if (program.Items.Count > 100) throw new ArgumentException("too_many_programs");
             }
@@ -211,6 +214,10 @@ internal static class ProcessEditor
             AddSection(timeSection, 74); timeCaption.Bounds = Box(0, 0, 394, 25); timeCaption.ForeColor = muted; timeCaption.Font = new Font(Font.FontFamily, 9, FontStyle.Bold); timeSection.Controls.Add(timeCaption);
             seconds.DecimalPlaces = 0; seconds.Minimum = 0; seconds.Maximum = 60; seconds.Value = 20; Input(seconds, "StepSeconds", Box(0, 29, 130, 34), timeSection);
             timeUnit.Text = "초"; timeUnit.Bounds = Box(142, 32, 80, 28); timeUnit.ForeColor = muted; timeSection.Controls.Add(timeUnit);
+            AddSection(completionSection, 118); Caption("이미지 동작의 완료 확인", 0, completionSection);
+            ConfigureCombo(imageCompletion); imageCompletion.Items.AddRange(new object[] { new Choice { Code = "human", Label = "화면을 보고 직접 확인" }, new Choice { Code = "automatic", Label = "선택한 요소의 변화로 자동 확인" } });
+            Input(imageCompletion, "ImageVerificationMode", Box(0, 29, 394, 34), completionSection); imageCompletion.SelectedIndex = 0;
+            completionSection.Controls.Add(new Label { Text = "자동 확인은 아래 요소의 값이 동작 전과 달라지고\n예상 내용과 일치하면 멈추지 않고 이어갑니다.", ForeColor = muted, Font = new Font(Font.FontFamily, 8), Bounds = Box(0, 74, 394, 36) });
             AddSection(expectSection, 244); Caption("3  동작 뒤 무엇으로 완료를 확인할까요?", 0, expectSection);
             expectSelected.Text = "확인할 요소를 선택하세요"; expectSelected.AutoEllipsis = true; expectSelected.Bounds = Box(0, 29, 394, 28); expectSection.Controls.Add(expectSelected); Identify(expectSelected, "ExpectedElement", "완료 확인 요소");
             ButtonStyle(pickExpect, "PickExpectedElement", "확인할 요소 선택", Box(0, 63, 394, 34), false, expectSection);
@@ -244,6 +251,7 @@ internal static class ProcessEditor
             program.SelectedIndexChanged += delegate { if (!busy) { selection = expectation = null; ShowThumbnail(null); selected.Text = "아직 선택한 요소가 없습니다"; expectSelected.Text = "확인할 요소를 선택하세요"; PopulateActions(); } };
             action.SelectedIndexChanged += delegate { if (!loadingActions) UpdateActionFields(); };
             expectProperty.SelectedIndexChanged += delegate { UpdateExpectFields(); };
+            imageCompletion.SelectedIndexChanged += delegate { UpdateActionFields(); };
             pick.Click += delegate { Pick("action", false); }; pickImage.Click += delegate { Pick("action", true); }; pickExpect.Click += delegate { Pick("expect", false); }; add.Click += delegate { AddStep(); };
             record.Click += delegate { Send("record", new Dictionary<string, object>(), null); if (busy) { hiddenForPicker = true; Hide(); } };
             reviewRecording.Click += delegate { ShowRecordingReview(); };
@@ -289,12 +297,12 @@ internal static class ProcessEditor
         {
             string code = ActionCode;
             valueSection.Visible = code == "set_value" || code == "select_option" || code == "press_key" || code == "hotkey" || code == "checkpoint" || code == "scroll";
-            optionSection.Visible = code == "select_option"; timeSection.Visible = code == "delay" || code == "wait_for_element" || code == "wait_for_state" || code == "scroll"; expectSection.Visible = NeedsExpect;
+            optionSection.Visible = code == "select_option"; timeSection.Visible = code == "delay" || code == "wait_for_element" || code == "wait_for_state" || code == "scroll"; completionSection.Visible = ImageMutation; expectSection.Visible = NeedsExpect;
             valueCaption.Text = code == "set_value" ? (IsImage ? "입력칸 전체를 바꿀 내용 (Ctrl+A 후 입력)" : "입력할 내용") : code == "select_option" ? "선택할 항목의 정확한 이름" : code == "press_key" ? "누를 키 이름 (예: Enter, Tab)" : code == "hotkey" ? "동시에 누를 키 (예: Ctrl+S)" : code == "scroll" ? "스크롤 방향 (up / down / left / right)" : "확인 지점 설명";
             timeCaption.Text = code == "delay" ? "기다릴 시간 (초)" : code == "scroll" ? "스크롤 양 (1~20)" : "요소가 나타나기를 기다릴 최대 시간 (초)";
             timeUnit.Text = code == "scroll" ? "칸" : "초"; seconds.Minimum = code == "scroll" ? 1 : 0; seconds.Maximum = code == "scroll" ? 20 : 60;
             if (code == "scroll" && value.Text != "up" && value.Text != "down" && value.Text != "left" && value.Text != "right") value.Text = "down";
-            actionHelp.Text = IsImage && code != "wait_for_element" && code != "delay" && code != "checkpoint" ? "현재 이미지 위치를 찾고 실행한 뒤 화면 확인에서 멈춥니다." : code == "set_value" || code == "select_option" ? "입력·선택한 값이 실제로 반영됐는지 자동 확인합니다." : code == "checkpoint" ? "실행 시 화면을 캡처하고 사람이 확인할 때까지 멈춥니다." : code == "wait_for_element" ? "대상이 나타나는지 읽기만 하며 버튼을 누르지 않습니다." : code == "delay" ? "요소 선택 없이 추가할 수 있습니다." : "선택한 요소에 대해 한 번 실행하고 결과를 확인합니다.";
+            actionHelp.Text = ImageMutation ? (AutomaticImage ? "이미지로 실행한 뒤 선택한 요소의 변화를 자동 확인합니다." : "현재 이미지 위치를 찾고 실행한 뒤 화면 확인에서 멈춥니다.") : code == "set_value" || code == "select_option" ? "입력·선택한 값이 실제로 반영됐는지 자동 확인합니다." : code == "checkpoint" ? "실행 시 화면을 캡처하고 사람이 확인할 때까지 멈춥니다." : code == "wait_for_element" ? "대상이 나타나는지 읽기만 하며 버튼을 누르지 않습니다." : code == "delay" ? "요소 선택 없이 추가할 수 있습니다." : "선택한 요소에 대해 한 번 실행하고 결과를 확인합니다.";
             if (code == "wait_for_state") { timeCaption.Text = "완료 조건을 기다릴 최대 시간 (초)"; actionHelp.Text = "확인할 요소의 값·체크·활성 상태가 지정한 조건이 될 때까지 읽습니다."; }
             UpdateButtons();
         }
@@ -308,6 +316,32 @@ internal static class ProcessEditor
             var choice = program.SelectedItem as Choice; if (choice == null) throw new InvalidOperationException("missing_program");
             return new Dictionary<string, object> { { "program_id", choice.Code }, { "pid", Num(choice.Data, "pid", 0) },
                 { "window_id", Long(choice.Data, "window_id", 0) }, { "window_ref", Str(choice.Data, "window_ref", "main") } };
+        }
+        void UpdatePrograms(IEnumerable programs)
+        {
+            if (programs == null) return;
+            var previous = program.SelectedItem as Choice;
+            string priorId = previous == null ? "" : previous.Code, priorRef = previous == null ? "" : Str(previous.Data, "window_ref", "main");
+            long priorWindow = previous == null ? 0 : Long(previous.Data, "window_id", 0);
+            var replacements = new List<Choice>();
+            foreach (object raw in programs) {
+                var data = raw as Dictionary<string, object>; if (data == null) return;
+                string id = Str(data, "program_id", "");
+                if (id.Length == 0 || Long(data, "window_id", 0) < 0 || Num(data, "pid", 0) <= 0) return;
+                replacements.Add(new Choice { Code = id, Label = Str(data, "label", id), Data = data });
+                if (replacements.Count > 100) return;
+            }
+            if (replacements.Count == 0) return;
+            bool wasBusy = busy; busy = true;
+            program.Items.Clear(); foreach (Choice replacement in replacements) program.Items.Add(replacement);
+            program.SelectedIndex = 0;
+            foreach (Choice replacement in replacements) if (replacement.Code == priorId && Str(replacement.Data, "window_ref", "main") == priorRef) { program.SelectedItem = replacement; break; }
+            busy = wasBusy;
+            var current = program.SelectedItem as Choice;
+            if (current == null || current.Code != priorId || Str(current.Data, "window_ref", "main") != priorRef || Long(current.Data, "window_id", 0) != priorWindow) {
+                selection = expectation = null; ShowThumbnail(null); selected.Text = "아직 선택한 요소가 없습니다"; expectSelected.Text = "확인할 요소를 선택하세요";
+            }
+            PopulateActions();
         }
         void Pick(string purpose, bool image)
         {
@@ -387,6 +421,7 @@ internal static class ProcessEditor
             if (NeedsElement && selection == null) { ShowError("먼저 동작할 요소를 직접 선택해 주세요."); return; }
             if (NeedsExpect && expectation == null) { ShowError("동작 뒤 확인할 요소를 선택해 주세요."); return; }
             var payload = Target(); string code = ActionCode; payload["action"] = code;
+            if (ImageMutation) payload["completion_mode"] = AutomaticImage ? "automatic" : "human";
             if (NeedsElement) payload["selection_id"] = Str(selection, "selection_id", "");
             if (code == "set_value" || code == "select_option" || code == "checkpoint") payload["value"] = value.Text;
             if (code == "press_key") payload["key"] = value.Text.Trim();
@@ -428,6 +463,7 @@ internal static class ProcessEditor
             if (acknowledged != pendingSeq) { Finish("runtime_failed", new Dictionary<string, object> { { "code", "event_sequence_mismatch" } }); return; }
             busy = false; if (hiddenForPicker) { hiddenForPicker = false; Show(); Activate(); }
             if (Str(result, "status", "") != "ok") { ShowError(Str(result, "message", "요청을 처리하지 못했습니다. 입력 내용을 확인해 주세요.")); UpdateButtons(); return; }
+            if (result.ContainsKey("programs")) UpdatePrograms(List(result, "programs"));
             if (pendingAction == "pick_element" || pendingAction == "pick_image") {
                 var picked = Map(result, "selection");
                 if (picked == null || Str(picked, "selection_id", "").Length == 0) { ShowError("선택 결과를 받지 못했습니다. 요소를 다시 선택해 주세요."); UpdateButtons(); return; }
@@ -460,8 +496,10 @@ internal static class ProcessEditor
         }
         void UpdateButtons()
         {
-            program.Enabled = action.Enabled = value.Enabled = optionOrder.Enabled = seconds.Enabled = expectProperty.Enabled = expected.Enabled = expectBoolean.Enabled = processName.Enabled = description.Enabled = !busy;
-            pick.Enabled = pickImage.Enabled = pickExpect.Enabled = record.Enabled = !busy;
+            program.Enabled = action.Enabled = value.Enabled = optionOrder.Enabled = seconds.Enabled = expectProperty.Enabled = expected.Enabled = expectBoolean.Enabled = imageCompletion.Enabled = processName.Enabled = description.Enabled = !busy;
+            var targetProgram = program.SelectedItem as Choice;
+            bool connected = targetProgram != null && Long(targetProgram.Data, "window_id", 0) > 0;
+            pick.Enabled = pickImage.Enabled = pickExpect.Enabled = record.Enabled = !busy && connected;
             add.Enabled = !busy && stepCount < 30 && ActionCode.Length > 0 && (!NeedsElement || selection != null) && (!NeedsExpect || expectation != null);
             save.Enabled = !busy && !pendingInputs && !pendingRecordingReview && stepCount > 0 && processName.Text.Trim().Length > 0;
             reviewRecording.Enabled = !busy;

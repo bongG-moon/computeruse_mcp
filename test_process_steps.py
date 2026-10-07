@@ -45,6 +45,14 @@ class StepRuntime:
 
 
 class StepTests(unittest.TestCase):
+    def test_delay_and_checkpoint_publish_only_fixed_progress_stages(self):
+        runtime = StepRuntime()
+        runtime.report_progress = mock.Mock()
+        execute_process_step(runtime, {"operation": "delay", "duration_ms": 0}, TARGET)
+        execute_process_step(runtime, {"operation": "checkpoint", "message": "private task wording"}, TARGET)
+        self.assertEqual([call.args for call in runtime.report_progress.call_args_list], [("waiting",), ("observing",), ("needs_review",)])
+        self.assertNotIn("private", repr(runtime.report_progress.call_args_list))
+
     def wait(self, runtime, **kwargs):
         return execute_process_step(runtime, {"operation": "wait_for_element", "selector": SELECTOR,
             "timeout_ms": 300, "poll_interval_ms": 100, **kwargs}, TARGET)

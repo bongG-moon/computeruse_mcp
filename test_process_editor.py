@@ -234,6 +234,22 @@ class ImageDraftTests(unittest.TestCase):
             self.assertNotIn(forbidden, encoded)
         self.assertNotIn("template_png", json.dumps(self.draft.summaries()))
 
+    def test_image_automatic_completion_requires_selected_changed_state_and_no_checkpoint(self):
+        self.draft.add({**self.image_base, "action": "click", "completion_mode": "automatic",
+            "expect": {"selection_id": self.selection["selection_id"], "property": "value", "equals": "done"}})
+        self.assertEqual(len(self.draft.steps), 1)
+        self.assertTrue(self.draft.steps[0]["expect"][0]["require_change"])
+        self.draft.add({**self.base, "action": "delay", "seconds": .1})
+        self.draft.change("move_step", {"index": 1, "direction": -1})
+        self.assertEqual([s["operation"] for s in self.draft.steps], ["delay", "image_click"])
+        self.draft.change("remove_step", {"index": 1})
+        self.assertEqual([s["operation"] for s in self.draft.steps], ["delay"])
+
+    def test_image_automatic_completion_without_evidence_is_rejected(self):
+        with self.assertRaises(OperationError):
+            self.draft.add({**self.image_base, "action": "click", "completion_mode": "automatic"})
+        self.assertEqual(self.draft.steps, [])
+
     def test_image_wait_has_no_input_or_checkpoint_and_can_be_reordered(self):
         self.draft.add({**self.image_base, "action": "wait_for_element", "timeout_seconds": 3})
         self.assertEqual([s["operation"] for s in self.draft.steps], ["wait_for_image"])
@@ -675,7 +691,7 @@ class EditorIPCTests(unittest.TestCase):
         with mock.patch.object(self.editors, "_visual", return_value={"events": [event]}) as visual:
             recorded = self.command("record", {})
         self.assertEqual(recorded["status"], "ok"); self.assertTrue(recorded["steps"][0]["requires_input"])
-        self.assertEqual(visual.call_args.args[2]["max_events"], 15)
+        self.assertEqual(visual.call_args.args[2]["max_events"], 12)  # Five popup waits fit alongside review checkpoints.
         self.assertEqual(self.manager.tasks.all(), [])
         rejected = self.command("save", {"name": "recorded", "description": ""})
         self.assertEqual(rejected["code"], "recording_input_required")
@@ -685,6 +701,26 @@ class EditorIPCTests(unittest.TestCase):
         self.assertEqual(saved["status"], "ok")
         value = self.manager.call("computer_get_task", {"id": saved["saved_task"]["id"]})
         self.assertNotIn("template_png", json.dumps(value))
+        self.assertEqual(self.runtime.mutations, [])
+        atomic_json(self.paths["response"], {"nonce": self.nonce, "status": "saved"})
+        self.terminal(job)
+
+    def test_recorded_closed_popup_updates_editor_choices_and_saves_without_raw_handles(self):
+        self.context(); job = self.start()
+        window = {"program_id": "editor", "window_ref": "popup_1", "owner_ref": "main", "pid": TARGET["pid"],
+            "window_id": TARGET["window_id"] + 1, "owner_window_id": TARGET["window_id"], "title": "Recorded popup",
+            "class_name": "OwnedDialog", "owner_verified": True}
+        event = {**image_choice(), "operation": "click", "program_id": "editor", "window_ref": "popup_1"}
+        with mock.patch.object(self.editors, "_visual", return_value={"events": [event], "windows": [window]}):
+            answer = self.command("record", {})
+        self.assertEqual(answer["status"], "ok", answer)
+        self.assertEqual(len(answer["programs"]), 2)
+        self.assertEqual([s["action"] for s in answer["steps"]], ["wait_for_window", "image_click", "checkpoint"])
+        saved = self.command("save", {"name": "popup recording", "description": ""})
+        self.assertEqual(saved["status"], "ok", saved)
+        encoded = json.dumps(self.manager.tasks.all())
+        self.assertNotIn('"window_id"', encoded)
+        self.assertNotIn('"pid"', encoded)
         self.assertEqual(self.runtime.mutations, [])
         atomic_json(self.paths["response"], {"nonce": self.nonce, "status": "saved"})
         self.terminal(job)

@@ -17,6 +17,7 @@ internal static class VisualTools
 {
     [StructLayout(LayoutKind.Sequential)] internal struct POINT { public int X, Y; }
     [StructLayout(LayoutKind.Sequential)] internal struct RECT { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] struct COMBOINFO { public int Size; public RECT Item, Button; public uint State; public IntPtr Combo, Edit, List; }
     [StructLayout(LayoutKind.Sequential)] struct MOUSE { public POINT point; public uint data, flags, time; public UIntPtr extra; }
     [StructLayout(LayoutKind.Sequential)] struct KEY { public uint code, scan, flags, time; public UIntPtr extra; }
     delegate IntPtr Hook(int code, IntPtr message, IntPtr data);
@@ -33,11 +34,20 @@ internal static class VisualTools
     [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT point);
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
     [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr hwnd, uint command);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int size);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr hwnd, StringBuilder text, int size);
+    delegate bool EnumWindow(IntPtr hwnd, IntPtr data);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindow callback, IntPtr data);
+    [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, EnumWindow callback, IntPtr data);
+    [DllImport("user32.dll")] static extern bool GetComboBoxInfo(IntPtr hwnd, ref COMBOINFO info);
     [DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
     [DllImport("user32.dll")] static extern IntPtr SetWindowsHookEx(int id, Hook callback, IntPtr module, uint thread);
     [DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr hook);
     [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr message, IntPtr data);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandle(string name);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+    [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool MoveFileEx(string a, string b, uint flags);
     [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out int value, int size);
     [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")] static extern int DwmGetWindowRectangle(IntPtr hwnd, int attribute, out RECT value, int size);
@@ -96,19 +106,56 @@ internal static class VisualTools
     internal sealed class Target
     {
         internal int Pid; internal IntPtr Hwnd; internal string Program, Window, Label;
+        internal Target Owner; internal IntPtr Lifetime; internal bool OwnLifetime, Retired; internal string Title, ClassName; internal uint ThreadId;
         internal Target(Dictionary<string, object> d) {
             Pid = Num(d, "pid", 0); Hwnd = new IntPtr(Convert.ToInt64(Str(d, "window_id", "0")));
             Program = Str(d, "program_id", ""); Window = Str(d, "window_ref", "main"); Label = Str(d, "label", "선택한 프로그램");
             if (Pid <= 0 || Hwnd == IntPtr.Zero || Label.Length > 200 || !Valid()) throw new InvalidOperationException("target_unavailable");
+            Lifetime = OpenProcess(0x100000 | 0x1000, false, (uint)Pid); if (Lifetime == IntPtr.Zero) throw new InvalidOperationException("process_identity_unavailable"); OwnLifetime = true;
+            uint ignored; ThreadId = GetWindowThreadProcessId(Hwnd, out ignored); Title = WindowText(Hwnd); ClassName = WindowClass(Hwnd);
         }
-        internal bool Valid() { uint pid; return IsWindow(Hwnd) && GetWindowThreadProcessId(Hwnd, out pid) != 0 && pid == (uint)Pid; }
+        internal Target(Target owner, IntPtr hwnd, string reference) {
+            Owner = owner; Pid = owner.Pid; Hwnd = hwnd; Program = owner.Program; Window = reference; Lifetime = owner.Lifetime;
+            Title = WindowText(hwnd); ClassName = WindowClass(hwnd); Label = (Title.Length > 0 ? Title : ClassName); if (Label.Length > 180) Label = Label.Substring(0, 180);
+            uint ignored; ThreadId = GetWindowThreadProcessId(hwnd, out ignored);
+        }
+        internal bool Valid() { uint pid; try {
+            if (Retired || (Lifetime != IntPtr.Zero && WaitForSingleObject(Lifetime, 0) != 258) || !IsWindow(Hwnd) || GetWindowThreadProcessId(Hwnd, out pid) == 0 || pid != (uint)Pid) return false;
+            if (ThreadId != 0 && (ThreadId != GetWindowThreadProcessId(Hwnd, out pid) || ClassName != WindowClass(Hwnd))) return false;
+            return Owner == null || (Owner.Valid() && RelatedTo(Hwnd, Owner.Hwnd, Pid));
+        } catch { return false; } }
         internal Rectangle Bounds() { RECT r; if (!Valid() || !GetWindowRect(Hwnd, out r)) throw new InvalidOperationException("target_unavailable"); return Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom); }
         internal bool Foreground() {
-            if (!Valid() || !IsWindowVisible(Hwnd) || IsIconic(Hwnd) || GetForegroundWindow() != Hwnd) return false;
+            if (!Valid() || !IsWindowVisible(Hwnd) || IsIconic(Hwnd)) return false;
+            IntPtr foreground = GetForegroundWindow(); if (foreground != Hwnd && (Owner == null || (foreground != Owner.Hwnd && !RelatedTo(Hwnd, foreground, Pid)))) return false;
             int cloaked; if (DwmGetWindowAttribute(Hwnd, 14, out cloaked, 4) == 0 && cloaked != 0) return false;
             Rectangle r = Bounds(); return r.Width >= 8 && r.Height >= 8 && r.Width <= 4096 && r.Height <= 4096 && SystemInformation.VirtualScreen.Contains(r);
         }
         internal bool Contains(POINT p) { return GetAncestor(WindowFromPoint(p), 2) == Hwnd; }
+        internal void Release() { if (OwnLifetime && Lifetime != IntPtr.Zero) { CloseHandle(Lifetime); Lifetime = IntPtr.Zero; Retired = true; } }
+    }
+    static string WindowText(IntPtr hwnd) { var text = new StringBuilder(1025); GetWindowText(hwnd, text, text.Capacity); return text.ToString(); }
+    static string WindowClass(IntPtr hwnd) { var text = new StringBuilder(257); if (GetClassName(hwnd, text, text.Capacity) == 0) return ""; return text.ToString(); }
+    static bool OwnedBy(IntPtr hwnd, IntPtr owner, int pid) {
+        var seen = new HashSet<IntPtr>(); IntPtr current = hwnd;
+        for (int count = 0; count < 32 && current != IntPtr.Zero && seen.Add(current); count++) {
+            current = GetWindow(current, 4); if (current == IntPtr.Zero) return false;
+            uint found; if (GetWindowThreadProcessId(current, out found) == 0 || found != (uint)pid) return false;
+            current = GetAncestor(current, 2); if (current == owner) return true;
+        } return false;
+    }
+    static bool RelatedTo(IntPtr hwnd, IntPtr owner, int pid) {
+        if (OwnedBy(hwnd, owner, pid)) return true;
+        if (WindowClass(hwnd) != "ComboLBox") return false;
+        uint listPid, parentPid;
+        if (GetWindowThreadProcessId(hwnd, out listPid) == 0 || GetWindowThreadProcessId(owner, out parentPid) == 0 || listPid != (uint)pid || parentPid != (uint)pid) return false;
+        bool related = false;
+        EnumChildWindows(owner, delegate(IntPtr child, IntPtr ignored) {
+            uint childPid; if (GetWindowThreadProcessId(child, out childPid) == 0 || childPid != (uint)pid || GetAncestor(child, 2) != owner) return true;
+            COMBOINFO info = new COMBOINFO { Size = Marshal.SizeOf(typeof(COMBOINFO)) };
+            if (GetComboBoxInfo(child, ref info) && info.Combo == child && info.List == hwnd) { related = true; return false; }
+            return true;
+        }, IntPtr.Zero); return related;
     }
     static List<Rectangle> Occluders(Target target)
     {
@@ -364,7 +411,7 @@ internal static class VisualTools
                     Finish("selected", result);
                 } catch (Exception e) { info.Text = e.Message == "template_low_detail" ? "구별할 수 있는 글자나 아이콘을 조금 더 포함해 선택하세요." : e.Message == "selection_too_thin" ? "영역이 너무 가늘게 선택되었습니다. 위아래 또는 좌우 여백을 조금 더 포함해 주세요." : "선택한 크기 또는 창 상태가 바뀌었습니다. 다시 캡처해 주세요."; }
             };
-            FormClosed += delegate { if (frame != null) frame.Dispose(); if (crop != null) crop.Dispose(); };
+            FormClosed += delegate { if (frame != null) frame.Dispose(); if (crop != null) crop.Dispose(); target.Release(); };
         }
         Point ImagePoint(Point p) { return new Point(Math.Max(0, Math.Min(frame.Width, (p.X - display.X) * frame.Width / Math.Max(1, display.Width))), Math.Max(0, Math.Min(frame.Height, (p.Y - display.Y) * frame.Height / Math.Max(1, display.Height)))); }
         void Draw(object sender, PaintEventArgs e) {
@@ -387,6 +434,7 @@ internal static class VisualTools
         sealed class SemanticSample { internal AutomationElement Element; internal Dictionary<string, object> Native; internal string Identity, Role, Property; internal object Value; internal bool Enabled; }
         readonly List<Target> targets = new List<Target>(); readonly List<Dictionary<string, object>> events = new List<Dictionary<string, object>>();
         readonly Queue<Pending> pending = new Queue<Pending>(); readonly List<string> warnings = new List<string>(); readonly int maximum;
+        readonly string popupPrefix = "popup_" + Guid.NewGuid().ToString("N").Substring(0, 8) + "_";
         readonly Label info = new Label(); readonly ListBox list = new ListBox(); readonly Button start = Button("기록 시작"), pause = Button("일시정지"), stop = Button("기록 마치고 검토");
         Hook mouseProc, keyProc; IntPtr mouseHook, keyHook; bool recording, textBusy, uiaStalled, outside; int generation, injected;
         string recordState = "checking", hookProbe = "checking", uiaProbe = "checking"; DateTime heartbeatAt, probeAt;
@@ -402,7 +450,7 @@ internal static class VisualTools
             Style(this, "동작 기록 — 선택한 프로그램만 기록", new Size(650, 430)); MinimumSize = new Size(540, 350); TopMost = true;
             var layout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3, ColumnCount = 1, Padding = new Padding(16) };
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 118)); layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 70));
-            info.Dock = DockStyle.Fill; info.Text = "기록 시작 후 선택한 프로그램을 직접 조작하세요.\n클릭·키 동작을 기록하고 마지막에 검토합니다.\n암호와 알 수 없는 입력칸의 글자는 저장하지 않습니다.\n다른 창에서는 기록이 자동으로 멈춥니다. Esc: 기록 일시정지";
+            info.Dock = DockStyle.Fill; info.Text = "기록 시작 후 선택한 프로그램을 직접 조작하세요.\n같은 프로그램이 연 팝업도 함께 기록합니다.\n암호와 알 수 없는 입력칸의 글자는 저장하지 않습니다.\n관련 없는 창에서는 자동으로 멈춥니다. Esc: 기록 일시정지";
             list.Dock = DockStyle.Fill; var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill }; Button cancel = Button("취소"); buttons.Controls.Add(start); buttons.Controls.Add(pause); buttons.Controls.Add(stop); buttons.Controls.Add(cancel);
             layout.Controls.Add(info, 0, 0); layout.Controls.Add(list, 0, 1); layout.Controls.Add(buttons, 0, 2); Controls.Add(layout);
             start.Enabled = pause.Enabled = stop.Enabled = false;
@@ -410,7 +458,7 @@ internal static class VisualTools
             pause.Click += delegate { Drain(); Pause(); };
             stop.Click += delegate { CompleteRecording(); };
             cancel.Click += delegate { Finish("cancelled", null); };
-            Clock.Tick += Tick; FormClosed += delegate { UninstallHooks(); if (frame != null) frame.Dispose(); while (pending.Count > 0) { Pending p = pending.Dequeue(); if (p.Crop != null) p.Crop.Dispose(); } focusedState = null; };
+            Clock.Tick += Tick; FormClosed += delegate { UninstallHooks(); if (frame != null) frame.Dispose(); while (pending.Count > 0) { Pending p = pending.Dequeue(); if (p.Crop != null) p.Crop.Dispose(); } foreach (Target t in targets) t.Release(); focusedState = null; };
             Shown += delegate {
                 Rectangle screen = Screen.FromHandle(targets[0].Hwnd).WorkingArea;
                 Point[] positions = { new Point(screen.Right - Width - 12, screen.Top + 12), new Point(screen.Left + 12, screen.Top + 12), new Point(screen.Right - Width - 12, screen.Bottom - Height - 12), new Point(screen.Left + 12, screen.Bottom - Height - 12) };
@@ -424,7 +472,12 @@ internal static class VisualTools
         void Failure(string code) { recording = false; generation++; Warn(code); Drain(); FinalizePendingInput(); recordState = "failed"; start.Enabled = false; pause.Enabled = false; stop.Enabled = events.Count > 0; info.Text = "기록 오류로 중지했습니다. 지금까지 기록한 부분만 검토할 수 있습니다.\n" + code; Heartbeat(true); }
         void CompleteRecording() {
             Drain(); Pause(); recordState = "review"; Heartbeat(true);
-            Finish("recorded", new Dictionary<string, object> { { "events", events }, { "human_confirmed", true }, { "review_required", true }, { "warnings", warnings }, { "partial", warnings.Count > 0 }, { "injected_events", injected } });
+            var windows = new List<Dictionary<string, object>>();
+            foreach (Target t in targets) if (t.Owner != null) windows.Add(new Dictionary<string, object> {
+                { "program_id", t.Program }, { "window_ref", t.Window }, { "owner_ref", t.Owner.Window }, { "pid", t.Pid }, { "window_id", t.Hwnd.ToInt64() },
+                { "owner_window_id", t.Owner.Hwnd.ToInt64() }, { "title", t.Title }, { "class_name", t.ClassName }, { "owner_verified", true },
+                { "closed", !t.Valid() || !IsWindowVisible(t.Hwnd) } });
+            Finish("recorded", new Dictionary<string, object> { { "events", events }, { "windows", windows }, { "human_confirmed", true }, { "review_required", true }, { "warnings", warnings }, { "partial", warnings.Count > 0 }, { "injected_events", injected } });
         }
         void FinalizePendingInput() {
             if (typing != null && typing.Saved != null && dirtyAt > typingConfirmedAt && typing.Reason != "protected_input" && typing.Reason != "recording_method_unverified") {
@@ -449,7 +502,41 @@ internal static class VisualTools
         void Pause() { recording = false; generation++; FinalizePendingInput(); tracked = hovered = null; trackedEvent = null; trackedTarget = hoverTarget = null; typing = null; focusedState = null; lastImage = null; lastImageTarget = null; recordState = "paused"; start.Enabled = probeSettled && hookProbe == "available" && events.Count < maximum; pause.Enabled = false; info.Text = "일시정지 · " + events.Count + "/" + maximum + "개 동작을 기록했습니다.\n다시 시작할 때 입력 대상을 클릭하거나 기록을 마치고 검토하세요."; if (frame != null) { frame.Dispose(); frame = null; } Heartbeat(true); }
         void InstallHooks() { if (mouseHook != IntPtr.Zero) return; mouseProc = MouseHook; keyProc = KeyHook; IntPtr module = GetModuleHandle(null); mouseHook = SetWindowsHookEx(14, mouseProc, module, 0); keyHook = SetWindowsHookEx(13, keyProc, module, 0); if (mouseHook == IntPtr.Zero || keyHook == IntPtr.Zero) { UninstallHooks(); throw new InvalidOperationException("recording_hook_unavailable"); } }
         void UninstallHooks() { recording = false; if (mouseHook != IntPtr.Zero) UnhookWindowsHookEx(mouseHook); if (keyHook != IntPtr.Zero) UnhookWindowsHookEx(keyHook); mouseHook = keyHook = IntPtr.Zero; }
-        Target Current() { foreach (Target t in targets) if (t.Foreground()) return t; return null; }
+        Target Current() {
+            // A native dropdown can hide and later reuse the same HWND. Each
+            // visibility episode gets a distinct recipe binding; otherwise a
+            // first selection would try to review an already hidden window.
+            RetireHiddenPopups();
+            POINT cursor; if (GetCursorPos(out cursor)) foreach (Target t in targets) if (t.Contains(cursor) && t.Foreground()) return t;
+            foreach (Target t in targets) if (t.Hwnd == GetForegroundWindow() && t.Foreground()) return t; return null;
+        }
+        void RetireHiddenPopups() { foreach (Target t in targets) if (t.Owner != null && !IsWindowVisible(t.Hwnd)) t.Retired = true; }
+        void DiscoverPopup() {
+            // Native metadata only, outside low-level input hooks. Never scan
+            // another process's UIA tree or infer trust from PID alone.
+            RetireHiddenPopups();
+            foreach (Target t in targets) if (t.Owner != null && !t.Valid()) t.Retired = true;
+            POINT cursor; IntPtr candidate = GetForegroundWindow();
+            if (GetCursorPos(out cursor)) { IntPtr at = GetAncestor(WindowFromPoint(cursor), 2); uint atPid;
+                if (at != IntPtr.Zero && GetWindowThreadProcessId(at, out atPid) != 0)
+                    foreach (Target root in targets) if (root.Owner == null && atPid == (uint)root.Pid && at != root.Hwnd && RelatedTo(at, root.Hwnd, root.Pid)) { candidate = at; break; }
+            }
+            foreach (Target known in targets) if (known.Hwnd == candidate && !known.Retired) return;
+            foreach (Target root in targets.ToArray()) {
+                if (root.Owner != null || !root.Valid() || candidate == root.Hwnd || !IsWindowVisible(candidate) || !RelatedTo(candidate, root.Hwnd, root.Pid)) continue;
+                string title = WindowText(candidate), cls = WindowClass(candidate); if (cls.Length == 0 || cls == "IME" || cls == "MSCTFIME UI") return;
+                int matches = 0; EnumWindows(delegate(IntPtr hwnd, IntPtr ignored) {
+                    if (IsWindowVisible(hwnd) && WindowText(hwnd) == title && WindowClass(hwnd) == cls && RelatedTo(hwnd, root.Hwnd, root.Pid)) matches++;
+                    return true;
+                }, IntPtr.Zero);
+                if (matches != 1) { Warn("recording_window_ambiguous"); return; }
+                int count = 0; foreach (Target t in targets) if (t.Owner != null) count++;
+                if (count >= 5) { Warn("recording_window_limit"); return; }
+                string reference = popupPrefix + (count + 1).ToString(); bool used;
+                do { used = false; foreach (Target t in targets) if (t.Program == root.Program && t.Window == reference) { used = true; reference = popupPrefix + (++count + 1).ToString(); break; } } while (used);
+                targets.Add(new Target(root, candidate, reference)); return;
+            }
+        }
         Dictionary<string, object> Event(Target t, string operation) { return new Dictionary<string, object> { { "operation", operation }, { "program_id", t.Program }, { "window_ref", t.Window }, { "verification", "manual_required" } }; }
         void Queue(Pending p) {
             if (events.Count + pending.Count >= maximum) { if (p.Crop != null) p.Crop.Dispose(); Warn("recording_event_limit"); recording = false; BeginInvoke((Action)delegate { Drain(); Pause(); info.Text = "기록 가능한 " + maximum.ToString() + "단계에 도달했습니다. 이후 동작은 기록하지 않습니다. [기록 마치고 검토]를 눌러 확인하세요."; }); return; }
@@ -655,13 +742,13 @@ internal static class VisualTools
                 if (!probeGood) Warn("uia_probe_unavailable"); recordState = "ready"; start.Enabled = true;
                 info.Text = "시작 점검 완료 · 입력 후크 사용 가능 / UIA " + (probeGood ? "응답 확인" : "응답 확인 안 됨: 이미지·수동 기록 사용") + "\n[기록 시작]을 눌러 직접 조작하세요. 마우스만 올리는 것은 기록이 아닙니다.\n최대 " + maximum + "개 동작 / 화면 확인 포함 30단계";
             }
-            Drain(); Heartbeat(false); if (!recording) return; Target current = Current();
+            Drain(); Heartbeat(false); if (!recording) return; DiscoverPopup(); Target current = Current();
             if (trackedKeyboard && trackedEvent != null) {
                 trackedEvent["operation"] = "manual_entry"; trackedEvent["reason"] = "recording_method_unverified"; trackedEvent["input_method"] = "keyboard_unverified";
                 trackedEvent.Remove("value"); trackedEvent.Remove("native_target"); trackedEvent.Remove("after"); Warn("recording_method_unverified");
                 list.Items[trackedIndex] = (trackedIndex + 1).ToString() + "  콤보 입력·확정 방법 · 직접 설정 필요";
             }
-            if (current == null) { if (GetForegroundWindow() != Handle) Warn("outside_target_not_recorded"); if (!outside) { outside = true; recordState = "outside_target"; info.Text = "선택한 창 밖이라 기록 일시정지\n등록한 프로그램 창으로 돌아오면 자동으로 기록을 계속합니다.\n새 팝업이나 새 창은 기록되지 않습니다. 누락 경고를 검토하세요."; Heartbeat(true); } if (frame != null) { frame.Dispose(); frame = null; } }
+            if (current == null) { if (GetForegroundWindow() != Handle) Warn("outside_target_not_recorded"); if (!outside) { outside = true; recordState = "outside_target"; info.Text = "연결 범위 밖이라 기록 일시정지\n원래 프로그램이나 관련 팝업으로 돌아오면 계속합니다.\n다른 프로그램·관련 없는 창은 기록되지 않습니다."; Heartbeat(true); } if (frame != null) { frame.Dispose(); frame = null; } }
             else {
                 if (outside) { outside = false; recordState = "recording"; info.Text = ActiveText(); Heartbeat(true); }
                 try { List<Rectangle> occluders = Occluders(current); Bitmap next = Capture(current, true); occluders.AddRange(Occluders(current)); if (frame != null) frame.Dispose(); frame = next; frameBounds = current.Bounds(); frameTarget = current; frameOccluders = occluders; frameAt = DateTime.UtcNow; } catch { if (frame != null) { frame.Dispose(); frame = null; } }
@@ -674,6 +761,15 @@ internal static class VisualTools
                         if (tracked != null && !trackedKeyboard && trackedTarget == current && trackedEvent != null && completedTracked != null && tracked.Identity == completedTracked.Identity
                             && DateTime.UtcNow.Subtract(trackedAt).TotalMilliseconds >= 350 && DateTime.UtcNow.Subtract(dirtyAt).TotalMilliseconds >= 400 && workerStarted >= dirtyAt
                             && !Object.Equals(tracked.Value, completedTracked.Value) && completedTracked.Property != null) {
+                            bool popupInput = false;
+                            if (completedTracked.Role == "ComboBox") for (int index = trackedIndex + 1; index < events.Count; index++)
+                                if (Str(events[index], "program_id", "") == current.Program && Str(events[index], "window_ref", "main") != current.Window) popupInput = true;
+                            if (popupInput) {
+                                // Preserve the actual open-popup + item-click path;
+                                // replacing its first click with select_option would
+                                // select twice and leave a stale popup step behind.
+                                trackedEvent["observed_selection"] = completedTracked.Value;
+                            } else {
                             string op = completedTracked.Role == "ComboBox" ? "select_option" : completedTracked.Property == "selected" ? "set_checked" : "set_value";
                             // Only an observed changed property becomes a semantic action.
                             // The parent independently checks this identity against Driver.
@@ -695,6 +791,7 @@ internal static class VisualTools
                                         if (keys != null && keys.Length == 2 && keys[0] == "CTRL" && keys[1] == "A") { events.RemoveAt(events.Count - 1); list.Items.RemoveAt(list.Items.Count - 1); }
                                     }
                                 }
+                            }
                             }
                         }
                         focusedState = completedState; focusedTarget = completedTarget; focusedAt = DateTime.UtcNow;

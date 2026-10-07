@@ -68,6 +68,17 @@ class OperationsTests(unittest.TestCase):
     def write(self, **extra):
         return dict(operation="set_value", selector=FIELD, value="after", verification_timeout_ms=0, **extra)
 
+    def test_progress_stages_do_not_include_input_values_or_selectors(self):
+        runtime = Runtime([snapshot(element()), snapshot(element(value="after"))])
+        events = []
+        runtime.report_progress = lambda stage, **fields: events.append((stage, fields))
+        result = Operations(runtime).execute(self.write(), TARGET)
+        self.assertTrue(result["task_verified"])
+        self.assertIn("observing", [stage for stage, _ in events])
+        self.assertIn("acting", [stage for stage, _ in events])
+        self.assertIn("verifying", [stage for stage, _ in events])
+        self.assertTrue(all(fields == {"op": "set_value"} for _, fields in events))
+
     def test_explicit_window_key_has_fresh_window_but_no_element_handle(self):
         for operation, extra in (("press_key", {"key": "enter"}), ("hotkey", {"keys": ["ctrl", "s"]})):
             runtime = Runtime([snapshot(element()), snapshot(element(value="after"))])

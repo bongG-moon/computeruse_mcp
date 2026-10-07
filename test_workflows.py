@@ -15,6 +15,69 @@ from server import ComputerManager, SessionError, TaskStore
 from workflows import WorkflowError, WorkflowRunner, render_steps, validate_recipe
 
 
+def windows_permission_error(code=32):
+    error = PermissionError(13, "PRIVATE FILE ERROR", "PRIVATE PATH")
+    error.winerror = code
+    return error
+
+
+class AtomicCheckpointTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name) / "checkpoint.json"
+        self.path.write_text('{"old": true}', encoding="utf-8")
+
+    def test_windows_replace_retry_uses_same_complete_temp_and_is_bounded(self):
+        from vendor.guard import atomic_json
+        replace = os.replace
+        for code in (5, 32, 33):
+            with self.subTest(winerror=code):
+                attempts = []
+                def transient(source, destination):
+                    attempts.append((source, source.read_bytes()))
+                    if len(attempts) <= 3:
+                        raise windows_permission_error(code)
+                    replace(source, destination)
+                with mock.patch("vendor.guard.os.replace", side_effect=transient), mock.patch("vendor.guard.time.sleep") as pause:
+                    atomic_json(self.path, {"verified": True})
+                self.assertEqual(len(attempts), 4)
+                self.assertEqual(len(set(attempts)), 1)
+                self.assertEqual(pause.call_args_list, [mock.call(.02), mock.call(.05), mock.call(.1)])
+                self.assertEqual(json.loads(self.path.read_text(encoding="utf-8")), {"verified": True})
+                self.assertEqual(list(self.path.parent.glob("*.tmp")), [])
+
+    def test_permanent_replace_failure_preserves_old_file_and_original_error(self):
+        from vendor.guard import atomic_json
+        error = windows_permission_error()
+        with mock.patch("vendor.guard.os.replace", side_effect=error) as replace, mock.patch("vendor.guard.time.sleep") as pause:
+            with self.assertRaises(PermissionError) as raised:
+                atomic_json(self.path, {"verified": True})
+        self.assertIs(raised.exception, error)
+        self.assertEqual(replace.call_count, 4)
+        self.assertEqual(pause.call_count, 3)
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8")), {"old": True})
+        self.assertEqual(list(self.path.parent.glob("*.tmp")), [])
+
+    def test_other_permission_errors_are_not_retried(self):
+        from vendor.guard import atomic_json
+        for error in (PermissionError(13, "denied"), windows_permission_error(87)):
+            with self.subTest(error=error), mock.patch("vendor.guard.os.replace", side_effect=error) as replace, mock.patch("vendor.guard.time.sleep") as pause:
+                with self.assertRaises(PermissionError) as raised:
+                    atomic_json(self.path, {"verified": True})
+                self.assertIs(raised.exception, error)
+                self.assertEqual(replace.call_count, 1)
+                pause.assert_not_called()
+
+    def test_cleanup_error_does_not_mask_original_replace_error(self):
+        from vendor.guard import atomic_json
+        original = PermissionError(13, "original")
+        with mock.patch("vendor.guard.os.replace", side_effect=original), mock.patch.object(Path, "unlink", side_effect=OSError("cleanup")):
+            with self.assertRaises(PermissionError) as raised:
+                atomic_json(self.path, {"verified": True})
+        self.assertIs(raised.exception, original)
+
+
 class FakeRuntime:
     def __init__(self, folder):
         self.mode = "uia"
@@ -401,6 +464,48 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("steps", record)
         self.assertNotIn("inputs", record)
         self.assertNotIn("targets", record)
+
+    def test_transient_completion_checkpoint_retry_never_replays_input(self):
+        self.task["steps"] = self.task["steps"][:1]
+        replace = os.replace
+        attempts = []
+        def transient(source, destination):
+            if destination.parent == self.runner.root and json.loads(source.read_text(encoding="utf-8")).get("status") == "verified":
+                attempts.append(source)
+                if len(attempts) <= 3:
+                    raise windows_permission_error()
+            replace(source, destination)
+        engine = ScriptedOperations()
+        with mock.patch("vendor.guard.os.replace", side_effect=transient), mock.patch("vendor.guard.time.sleep"):
+            answer = self.run_recipe(engine)
+        self.assertTrue(answer["task_verified"])
+        self.assertEqual(len(engine.calls), 1)
+        self.assertEqual(len(attempts), 4)
+        self.assertEqual(len(set(attempts)), 1)
+        self.assertTrue(self.checkpoint(answer["run_id"])["task_verified"])
+
+    def test_permanent_completion_checkpoint_failure_stops_without_replay_or_private_details(self):
+        self.task["steps"] = self.task["steps"][:1]
+        replace = os.replace
+        attempts = []
+        def permanent(source, destination):
+            if destination.parent == self.runner.root and json.loads(source.read_text(encoding="utf-8")).get("status") == "verified":
+                attempts.append(source)
+                raise windows_permission_error(5)
+            replace(source, destination)
+        engine = ScriptedOperations()
+        with mock.patch("vendor.guard.os.replace", side_effect=permanent), mock.patch("vendor.guard.time.sleep"):
+            answer = self.run_recipe(engine)
+        self.assertEqual(answer["status"], "interrupted")
+        self.assertFalse(answer["task_verified"])
+        self.assertEqual(answer["completed_steps"], 1)
+        self.assertEqual(len(engine.calls), 1)
+        self.assertEqual(len(attempts), 4)
+        self.assertEqual(answer["diagnostic"]["stage"], "checkpoint_completion")
+        self.assertEqual(answer["diagnostic"]["errno"], 13)
+        self.assertEqual(answer["diagnostic"]["winerror"], 5)
+        self.assertNotIn("PRIVATE", json.dumps(answer))
+        self.assertEqual(self.checkpoint(answer["run_id"])["status"], "interrupted")
 
     def test_unverified_screen_evidence_returned_but_never_saved_to_checkpoint(self):
         answer = self.run_recipe(ScriptedOperations([{"task_verified": False, "screen": "PRIVATE SCREEN"}]),

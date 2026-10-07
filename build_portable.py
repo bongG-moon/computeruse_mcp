@@ -53,9 +53,13 @@ APP_FILES = (
     "README.md", "DRIVER-BUNDLE.md", "CUA-DRIVER-LICENSE.md", "PROCESS_GUIDE.html",
     "scoped_controls.py", "repeat_profiles.py", "result_files.py", "CHANGES_0.12.0.html", "CHANGES_0.13.0.html",
     "window_transitions.py", "program_registration.py",
+    "execution_progress.py", "image_delivery.py", "CHANGES_0.14.0.html",
+    "recording_windows.py",
 )
 OPTIONAL_APP_FILES = ()
 SOURCE_SUPPORT_FILES = (
+    "test_execution_progress.py", "acceptance_observation.py", "acceptance_recording_windows.py",
+    "test_image_completion.py", "test_recording_windows.py", "test_workflow_windows.py", "acceptance_status014.py", "image_completion_validation.py",
     "test_window_transitions.py", "test_program_registration.py", "acceptance_transitions.py",
     "ScopedControls.cs", "test_scoped_controls.py", "test_repeat_profiles.py", "test_result_files.py", "repeat_validation.py",
     "test_operation_verification.py", "test_launch_profiles.py", "test_workflow_contract012.py", "recording_validation.py",
