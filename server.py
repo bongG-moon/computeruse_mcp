@@ -38,7 +38,14 @@ def tool(name, description, schema, read_only=False, destructive=False):
 
 MANAGEMENT_TOOLS = [
     tool("computer_status", "Read server/driver configuration and current session status. No UI control.", object_schema(), True),
-    tool("computer_programs", "List configured programs. This MCP has no tool to register programs or change their paths. Configuration changes require the user's explicit instruction outside the screen tools.", object_schema(), True),
+    tool("computer_programs", "List registered programs. To add an app at the user's request use computer_register_program, or computer_program_candidates if its path is unknown. No config-file search or shell editing is needed.", object_schema(), True),
+    tool("computer_program_candidates", "Read visible top-level window titles and executable paths for this Windows user and login session, without screenshots/UIA or input. For an explicitly requested app registration use the matching candidate_id with computer_register_program. Duplicate app names must be distinguished by window title; never select an arbitrary candidate. References expire after five minutes and are revalidated when registered.", object_schema(), True),
+    tool("computer_register_program", "Register a program only when the user asks to add it. Supply either its exact local exe path or a candidate_id from computer_program_candidates. Optional name defaults to executable name; arguments are individual EXE arguments, working_directory is its start folder, launch_uri is an alternative URI launch route. Saves just this addition to this MCP's tracked configuration and makes it available for the next computer_begin without reconnecting. Does not launch an app, expand a running session, edit unrelated settings, or show a second approval dialog. Existing differing registrations are not overwritten. Do not search for or edit settings files; report a returned conflict or saved_restart_required accurately.",
+         object_schema({"exe": STRING, "candidate_id": STRING, "name": {"type": "string", "minLength": 1, "maxLength": 100},
+                        "program_id": STRING, "arguments": {"type": "array", "items": {"type": "string", "minLength": 0, "maxLength": 4096}, "minItems": 0, "maxItems": 32, "uniqueItems": False},
+                        "working_directory": STRING, "launch_uri": STRING,
+                        "control_exes": {"type": "array", "items": STRING, "minItems": 0, "maxItems": 32, "uniqueItems": True},
+                        "hints": {"type": "string", "maxLength": 10000}})),
     tool("computer_begin", "Start one bounded desktop session using the configured approval mode. Only enabled program IDs are accepted. "
          "Client mode skips this server's native approval dialogs and relies on the MCP client's permissions; session/each modes ask locally. "
          "Select uia for accessibility/text or visual for screenshots. Visual interpretation requires an image-capable model in the client.",
@@ -98,11 +105,11 @@ MANAGEMENT_TOOLS.extend([
                         "search": {"type": "string", "maxLength": 200}, "within": SELECTOR_SCHEMA,
                         "offset": {"type": "integer", "minimum": 0, "maximum": 5000},
                         "actionable_only": {"type": "boolean"}}, ["pid", "window_id"]), True),
-    tool("computer_perform", "UIA: observe, resolve exactly one control (optionally within one unique ancestor), perform a typed operation and verify its postconditions. Supports text, combo selection, checkbox/toggle state, list/tab/tree/radio selection, clicks and keys using observed capabilities in any configured program. Keys/clicks/assert require expect. No automatic input retry. Use background by default, foreground only intentionally; explicit foreground may activate an initially unready window once before input.",
+    tool("computer_perform", "UIA: observe, resolve exactly one control (optionally within one unique ancestor), perform a typed operation and verify its postconditions. Supports text, combo selection, checkbox/toggle state, list/tab/tree/radio selection, clicks and keys using observed capabilities in any configured program. Keys/clicks/assert require expect. No automatic input retry. Use background by default, foreground only intentionally; explicit foreground may activate an initially unready window once before input. Default window_transition auto verifies a unique related window if the original disappears; for a known next window use new_window with exact title. Closure uses computer_close. Never replay uncertain input. Results include target, transition, delivery and phase timings; pointer movement is not guaranteed.",
          object_schema({"pid": {"type": "integer", "minimum": 1}, "window_id": {"type": "integer", "minimum": 1},
                         "step": {"type": "object", "description": "{operation,selector:{name?,role?,automation_id?},value?,expect?:[{selector,property:value|name|selected|enabled,equals}],verification_timeout_ms?:0..5000}"},
                         "delivery_mode": {"type": "string", "enum": ["background", "foreground"]}}, ["pid", "window_id", "step"])),
-    tool("computer_run_task", "Run a saved declarative UIA workflow across configured programs and named windows. Each step's window_ref defaults to main. Bind program_id/window_ref to a fresh pid/window_id, or an exact window_title within that approved pid for a later window. Duplicate or missing windows stop before input. Every step verifies its result in its own window. A resume_run_id rechecks the last or uncertain step without replaying it. Never infers permission from saved tasks.",
+    tool("computer_run_task", "Run a saved declarative UIA workflow across configured programs and named windows. Each step's window_ref defaults to main. Bind program_id/window_ref to a fresh pid/window_id, or an exact window_title within that approved pid for a later window. Duplicate or missing windows stop before input. Every step verifies its result in its own window. A verified same-process window transition updates this run binding automatically. A resume_run_id rechecks the last or uncertain step without replaying it; supply fresh current targets on resume. Never infers permission from saved tasks.",
          object_schema({"task_id": STRING, "inputs": {"type": "object"},
                         "targets": {"type": "array", "minItems": 1, "maxItems": 100, "items": object_schema({
                             "program_id": STRING, "window_ref": STRING, "pid": {"type": "integer", "minimum": 1},
@@ -233,8 +240,11 @@ def validate_management(name, args):
         if spec["type"] == "array":
             if (not isinstance(value, list) or not spec.get("minItems", 1) <= len(value) <= spec.get("maxItems", 1000)):
                 raise SessionError(key + " 목록의 개수를 확인하세요.")
-            if spec.get("items", {}).get("type") == "string" and (any(not isinstance(v, str) or not v for v in value) or len(value) != len(set(value))):
-                raise SessionError(key + "에는 중복 없는 프로그램 ID 목록이 필요합니다.")
+            if spec.get("items", {}).get("type") == "string":
+                item_spec = spec["items"]
+                if (any(not isinstance(v, str) or not item_spec.get("minLength", 1) <= len(v) <= item_spec.get("maxLength", 32000) for v in value)
+                        or spec.get("uniqueItems", True) and len(value) != len(set(value))):
+                    raise SessionError(key + " 목록의 문자열 길이와 중복 허용 여부를 확인하세요.")
         if spec["type"] == "object" and not isinstance(value, dict):
             raise SessionError(key + "는 JSON 객체여야 합니다.")
         if spec["type"] == "boolean" and type(value) is not bool:
@@ -447,6 +457,8 @@ class ComputerManager:
         self.cache_key = None
         self.schema_error = ""
         self.stop_generation = 0
+        from program_registration import ProgramRegistration
+        self.registration = ProgramRegistration(self)
 
     def status(self):
         from configuration_state import configuration_status
@@ -463,6 +475,9 @@ class ComputerManager:
                 "configuration": configuration_status(self.config, self.config_path),
                 "execution": execution_privileges(),
                 "teaching_support": teaching_capabilities(Path(__file__).resolve().parent),
+                "program_registration": {"supported": True, "tool": "computer_register_program",
+                    "candidates_tool": "computer_program_candidates", "tracked_config": self.config_path is not None,
+                    "applies_to": "next_session", "reconnect_required": False, "active_scope_expansion": False},
                 "repeat_execution": {"supported": True, "default_mode": "auto", "verification_skipped": False,
                     "scoped_helper_present": (Path(__file__).resolve().parent / "Computer Use MCP 빠른 확인.exe").is_file(),
                     "readiness": "not_tested", "profile_scope": "verified_recipe_programs_version_and_delivery"},
@@ -653,6 +668,20 @@ class ComputerManager:
             validate_management(name, args)
             if name == "computer_status":
                 return result(self.status())
+            if name in {"computer_program_candidates", "computer_register_program"}:
+                from program_registration import RegistrationError
+                from programs import ProgramError
+                try:
+                    answer = (self.registration.list_candidates() if name == "computer_program_candidates"
+                              else self.registration.register(args, cancel_event))
+                    return result(answer, error=answer.get("ok") is False)
+                except (RegistrationError, ProgramError, OSError, ValueError, GuardError) as exc:
+                    code = getattr(exc, "code", "registration_denied" if isinstance(exc, PermissionError) else "invalid_program")
+                    return result({"ok": False, "status": "registration_failed", "saved": False,
+                                   "applied_to_next_session": False, "active_session_scope_changed": False,
+                                   "screen_accessed": False, "driver_started": False,
+                                   "diagnostic": {"code": code, "message": str(exc)},
+                                   "message": str(exc), "automatic_retry": False}, error=True)
             if name in {"computer_prepare_result", "computer_verify_result"}:
                 from result_files import ResultFiles, ResultFileError
                 if self.session is None:
@@ -950,6 +979,8 @@ class StdioServer:
             self.response(request_id, {"protocolVersion": params.get("protocolVersion", "2024-11-05"),
                 "capabilities": {"tools": {}}, "serverInfo": {"name": "company-computer-use", "version": VERSION},
                 "instructions": "For a named app first use computer_programs and approved live list_apps/list_windows, not a disk-wide filename/content search. "
+                    "After a click changes windows, inspect the returned transition and current target before deciding what to do next. Only verified postconditions permit continuation. For a known next window use window_transition new_window with exact title. Missing/ambiguous targets require read-only result checks, never repeated input or an automatic foreground switch. Report completed tool calls as returned, not still running. Distinguish MCP phase times from client/model time and reported delivery from visible pointer movement. "
+                    "If the user asks to add an app, use computer_register_program with its exe path, or use computer_program_candidates to choose a currently open app. Never claim registration tools are absent or search/edit config files. Registration saves just the addition and applies to the next computer_begin on this connection; end any current session first, without closing business apps. A current session never gains permission to the added app. Registration pending or conflict is not success. "
                     "Use computer_programs then computer_begin for a bounded session under the user's configured approval mode. "
                     "For repeat work check computer_tasks, read the matching task, and call computer_run_task with execution_mode:auto. "
                     "Reuse the verified saved sequence instead of rediscovering controls or writing ad hoc PowerShell/UIA scripts. "

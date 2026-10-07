@@ -51,10 +51,12 @@ APP_FILES = (
     "session_runtime.py", "configuration_state.py", "operations.py", "workflows.py", "inspection.py", "accessibility_tree.py", "closing.py", "close_actions.py", "privileges.py",
     "program_launch.py", "learning.py", "learning_picker.py", "teaching_sessions.py", "teaching_support.py", "process_editor.py", "process_steps.py", "image_targets.py", "image_steps.py",
     "README.md", "DRIVER-BUNDLE.md", "CUA-DRIVER-LICENSE.md", "PROCESS_GUIDE.html",
-    "scoped_controls.py", "repeat_profiles.py", "result_files.py", "CHANGES_0.12.0.html",
+    "scoped_controls.py", "repeat_profiles.py", "result_files.py", "CHANGES_0.12.0.html", "CHANGES_0.13.0.html",
+    "window_transitions.py", "program_registration.py",
 )
 OPTIONAL_APP_FILES = ()
 SOURCE_SUPPORT_FILES = (
+    "test_window_transitions.py", "test_program_registration.py", "acceptance_transitions.py",
     "ScopedControls.cs", "test_scoped_controls.py", "test_repeat_profiles.py", "test_result_files.py", "repeat_validation.py",
     "test_operation_verification.py", "test_launch_profiles.py", "test_workflow_contract012.py", "recording_validation.py",
     "scoped_nested_validation.py",

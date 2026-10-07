@@ -7,7 +7,7 @@ import unittest
 import io
 import subprocess
 import sys
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 import diagnostics
 
@@ -209,6 +209,34 @@ for line in sys.stdin:
         process.kill.assert_called_once()
         self.assertTrue(client.cleanup['verified'])
         self.assertFalse(client.cleanup['graceful'])
+
+
+class PipeCloseDiagnosisTests(unittest.TestCase):
+    def client(self, returncode):
+        client = object.__new__(diagnostics.ReadOnlyMCP)
+        client.process = Mock(returncode=returncode)
+        client.process.stdin.close.side_effect = OSError(22, "Invalid argument")
+        client.owner = Mock(job=None)
+        client.reader, client.stderr_reader = Mock(), Mock()
+        client.cleanup = {}
+        client._exit_error = Mock(return_value=RuntimeError("known startup failure"))
+        return client
+
+    def test_broken_stdin_close_preserves_startup_error_and_verifies_exit(self):
+        client = self.client(42)
+        with self.assertRaisesRegex(RuntimeError, "known startup failure"):
+            client.close()
+        client.process.wait.assert_called_once_with(timeout=20)
+        self.assertEqual(client.cleanup, {"verified": True, "graceful": False, "exit_code": 42})
+        client.process.stdout.close.assert_called_once()
+
+    def test_broken_stdin_close_does_not_report_clean_connection(self):
+        client = self.client(0)
+        with self.assertRaisesRegex(RuntimeError, "연결 성공으로 처리하지"):
+            client.close()
+        self.assertTrue(client.cleanup["verified"])
+        self.assertFalse(client.cleanup["graceful"])
+        client._exit_error.assert_not_called()
 
 
 if __name__ == "__main__":

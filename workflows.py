@@ -369,11 +369,25 @@ class WorkflowRunner:
                     metrics["measured_steps"] += 1
                     for key in ("tool_calls", "observations", "discovery_calls", "mutations", "observation_ms",
                                 "discovery_ms", "action_ms", "expanded_observations", "reused_observations",
-                                "focus_actions", "focus_ms", "scoped_observations", "elapsed_ms"):
+                                "focus_actions", "focus_ms", "scoped_observations", "elapsed_ms",
+                                "transition_ms", "transition_probe_ms", "transition_discovery_ms", "transition_verification_ms"):
                         value = observed.get(key)
                         if type(value) in (int, float) and math.isfinite(value) and value >= 0:
                             metrics[key] = round(metrics.get(key, 0) + value, 2)
                 return result
+            def adopt_transition(item, result):
+                transition = result.get("transition", {})
+                if result.get("task_verified") is not True or transition.get("state") != "verified":
+                    return
+                key = target_key(item)
+                previous = bindings[key]
+                target = transition.get("target")
+                if (not isinstance(target, dict) or set(target) != {"pid", "window_id"}
+                        or any(type(v) is not int or v < 1 for v in target.values())
+                        or target["pid"] != previous["pid"]):
+                    raise BindingError("검증한 창 전환의 연결 정보를 확인하지 못했습니다.")
+                bindings[key] = dict(target)
+                resolve(item)  # Recheck allowed executable and current HWND owner.
             def save(status):
                 record.update(status=status, updated_at=utc_now(), duration_ms=round((time.monotonic()-started)*1000, 2))
                 atomic_json(path, record)
@@ -466,6 +480,7 @@ class WorkflowRunner:
                     else:
                         latest = engine.execute(operation_step(item), target, delivery_mode=delivery_mode, reuse_verified=True)
                     measured(latest)
+                    adopt_transition(item, latest)
                     if latest.get("task_verified") is not True and not (item["operation"] in IMAGE_MUTATIONS
                             and latest.get("verification_deferred") is True and latest.get("input_dispatched") is True):
                         save("needs_review")

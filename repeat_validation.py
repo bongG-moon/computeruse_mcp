@@ -11,6 +11,7 @@ import uuid
 from generic_validation import prepare
 from live_validation import Client, DRIVER, HERE, decoded, safe
 from build_portable import runtime_environment
+from settings import VERSION
 
 
 def main():
@@ -44,7 +45,7 @@ def main():
         tool_names = {item["name"] for item in client.request("tools/list")["tools"]}
         assert {"computer_verify_controls", "computer_prepare_result", "computer_verify_result"} <= tool_names
         status = call("computer_status")
-        assert status["version"] == "0.12.0", status
+        assert status["version"] == VERSION, status
         report["version"] = status["version"]
         call("computer_begin", {"program_ids": [app["id"]], "task_description": "Owned synthetic repeat validation"})
         deadline = time.monotonic() + 15

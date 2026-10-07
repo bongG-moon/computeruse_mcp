@@ -112,7 +112,11 @@ class NativeClosureProbe:
         root_owner = int(self.user.GetAncestor(hwnd, 3) or 0)  # GA_ROOTOWNER
         if not root_owner:
             raise ProbeError("window_owner_read_failed")
-        row = {"window_id": hwnd, "pid": self.pid, "owner_window_id": owner,
+        thread_pid = wintypes.DWORD()
+        thread_id = int(self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(thread_pid)))
+        if not thread_id or thread_pid.value != self.pid:
+            raise ProbeError("window_identity_read_failed")
+        row = {"window_id": hwnd, "pid": self.pid, "thread_id": thread_id, "owner_window_id": owner,
                "root_owner_window_id": root_owner, "title": title.value,
                "class_name": class_name.value, "visible": bool(self.user.IsWindowVisible(hwnd)),
                "enabled": bool(self.user.IsWindowEnabled(hwnd)), "minimized": bool(self.user.IsIconic(hwnd))}

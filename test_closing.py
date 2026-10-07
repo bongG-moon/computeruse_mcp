@@ -448,6 +448,7 @@ class NativeProbeTests(unittest.TestCase):
         probe, kernel, _ = self.make_probe()
         result = self.capture(probe)
         self.assertEqual(probe.handle, 555)
+        self.assertEqual(result["windows"][0]["thread_id"], 7)
         self.assertFalse(result["windows"][0]["visible"])
         self.assertTrue(result["windows"][0]["minimized"])
         kernel.WaitForSingleObject.result = 0

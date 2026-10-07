@@ -1,6 +1,6 @@
-"""Local, explicitly requested program registration; never a screen/MCP tool.
+"""Validated local registration shared by CLI and the explicit MCP add tool.
 
-The calling assistant uses this CLI only after the user asks to add a program.
+The calling assistant registers only after the user asks to add a program.
 Preview is technical inspection, not an additional consent prompt. No app,
 Driver, model, Claude settings, or desktop session is started or changed here.
 """

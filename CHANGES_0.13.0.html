@@ -1,0 +1,19 @@
+<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Computer Use MCP 0.13.0 · 쉽게 등록하고 이어서 실행하기</title>
+<style>*{box-sizing:border-box}body{margin:0;background:#f2f5fa;color:#19324e;font:17px/1.8 'Malgun Gothic',sans-serif}main{max-width:980px;margin:36px auto;padding:0 20px 48px}header{background:#173a65;color:white;padding:32px;border-radius:20px}h1{font-size:30px;margin:6px 0}h2{font-size:23px}section{background:white;border:1px solid #dae4ef;border-radius:16px;margin:20px 0;padding:28px}.sample{white-space:pre-wrap;background:#edf5ff;border-left:4px solid #3677bd;padding:20px;border-radius:6px}a{color:#1665a2}li{margin:10px 0}code{overflow-wrap:anywhere}</style>
+<main><header><small>COMPUTER USE MCP · 0.13.0</small><h1>쉽게 등록하고<br>다음 화면까지 이어서 실행하세요</h1><p>필요한 프로그램과 할 일을 채팅으로 알려주세요.</p></header>
+<section id="simple-0130"><h2>0.13.0 — 등록하고 다음 화면까지 이어서</h2>
+<p><strong>프로그램 추가는 채팅 한 번으로 요청하세요.</strong> 설정 파일을 찾거나 PowerShell 명령을 실행할 필요가 없습니다.</p>
+<div class="sample">지금 열려 있는 ‘내 업무 프로그램’을 자동화 대상으로 등록해줘.
+같은 이름이 여러 개면 목록을 보여줘. 등록만 하고 아직 실행하지 마.</div>
+<p>경로를 알고 있다면 EXE 경로와 필요한 실행 인자를 알려주세요. 등록한 앱은 <strong>같은 연결의 다음 화면 작업부터 사용</strong>할 수 있습니다. 제품 버전 갱신은 처음 한 번 재접속해야 하지만, 새 등록 도구로 앱을 추가할 때마다 재접속할 필요는 없습니다.</p>
+<p><strong>버튼을 누른 뒤 창이 바뀌면 현재 결과부터 확인합니다.</strong> 관련된 새 창과 완료 조건이 확인되면 이어서 진행합니다. 이미 보낸 클릭은 반복하지 않습니다. 후보가 여러 개이거나 종료됐는지 확실하지 않으면 확인할 내용을 알려줍니다.</p>
+<div class="sample">실행 버튼을 누르고 다음 화면의 ‘준비 완료’가 확인되면 이어서 진행해줘.
+창이 바뀌어도 같은 버튼을 다시 누르지 말고 현재 결과부터 확인해줘.</div>
+<p>커서가 움직이지 않아도 버튼에 직접 동작을 요청할 수 있습니다. 기본 배경 실행은 유지하고, 결과에 대상·입력 방식·확인 단계를 표시합니다. Driver가 실제 처리 방식을 알려주지 않으면 추측하지 않습니다. <a href="CHANGES_0.13.0.html">변경 내용과 사용 예문</a></p></section>
+
+<section><h2>처음 한 번, 새 버전으로 연결하기</h2><ol><li><a href="https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.13.0">0.13.0 릴리스</a>에서 Driver 포함 ZIP을 받아 새 폴더에 모두 압축 풉니다.</li><li>동봉 <strong>INSTALL.md</strong>를 채팅에 첨부하고 아래처럼 요청합니다.</li><li>연결 후 버전이 <strong>0.13.0</strong>인지 확인합니다. 이후 앱 추가는 위 예문으로 부탁하세요.</li></ol><div class="sample">기존 Driver·등록한 프로그램·저장한 작업과 학습 요소를 유지하고 이 버전으로 연결을 갱신해줘.
+MCP를 다시 연결한 뒤 computer_status의 version이 0.13.0인지 확인해줘.</div></section>
+<section><h2>기다리다가 멈춘 것 같다면</h2><p>동작을 보낸 뒤 결과가 확인되지 않으면 같은 버튼을 바로 다시 누르지 않습니다. 현재 창을 확인하고, 관련 창이 하나로 확인되면 결과 확인을 이어갑니다. 창이 여러 개이면 어떤 창인지 선택해야 합니다. 앱의 조회 시간과 모델의 응답 시간은 MCP 처리 시간과 따로 구분합니다.</p><p>종료 요청은 저장·종료 확인창까지 처리하고 실제 창 또는 프로세스의 종료를 확인합니다. 창이 사라졌다는 이유만으로 로그인·조회 성공을 주장하지 않습니다.</p></section>
+<section><h2>마우스가 안 움직여도 실행될 수 있습니다</h2><p>Windows의 버튼·입력칸 기능에 직접 요청하는 방식은 커서를 움직이지 않아도 동작합니다. 기본 배경 실행은 이전과 같습니다. 요소 선택·녹화를 방해하던 Driver 커서 표시는 꺼져 있습니다. 창을 앞으로 가져오는 foreground는 커서 이동 애니메이션을 뜻하지 않습니다.</p><p>실행 결과에는 요청한 입력 방식과 Driver가 보고한 처리 방식을 구분해 제공합니다. 보고하지 않은 방식은 추측하지 않습니다.</p></section>
+<section><h2>확인 범위</h2><p>검증은 독립된 Windows 시험 창과 실제 배포 MCP를 대상으로 합니다. 사내 프로그램, 사내 LLM, 업무 서버의 응답 속도는 별도 운영 검증이 필요합니다. <a href="VALIDATION.html">검증 기록</a> · <a href="PROCESS_GUIDE.html">학습·녹화·반복 실행 안내</a></p></section></main></html>

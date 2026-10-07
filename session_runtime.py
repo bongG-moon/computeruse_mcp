@@ -276,6 +276,15 @@ class SessionRuntime:
                 self.scoped_reader = ScopedControls(self)
             return self.scoped_reader.observe(target, selectors, timeout_ms=timeout_ms)
 
+    def create_transition_probe(self, target):
+        """Cheap native identity baseline; no input, UIA traversal or new approval."""
+        from closing import NativeClosureProbe
+        self.check_active()
+        if (self.guard.window_resolver(target["window_id"]) != target["pid"]
+                or check_app(self.guard.process_resolver(target["pid"])) not in self.guard.policy["allowed_apps"]):
+            raise SessionError("현재 승인한 프로그램의 창인지 확인하지 못했습니다.")
+        return NativeClosureProbe(target["pid"], target["window_id"])
+
     def image_action(self, step, target):
         """Only saved, validated image recipe steps can reach the private guard."""
         from image_targets import match_image

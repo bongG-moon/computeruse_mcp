@@ -10,6 +10,7 @@ import json
 import math
 import time
 from accessibility_tree import normalize_snapshot
+from window_transitions import WINDOW_TRANSITION_SCHEMA, WindowTransition, TransitionError, validate_transition
 
 
 class OperationError(ValueError):
@@ -55,6 +56,7 @@ OPERATION_SCHEMA = {
         "edit_selector": SELECTOR_SCHEMA,
         "commit_key": {"enum": ["ENTER", "TAB"]},
         "expect": {"type": "array", "minItems": 1, "maxItems": 20, "items": ASSERTION_SCHEMA},
+        "window_transition": WINDOW_TRANSITION_SCHEMA,
         "verification_timeout_ms": {"type": "integer", "minimum": 0, "maximum": 60000,
             "description": "Completion observation/polling deadline, default 10000ms. A running observation keeps its normal read budget within step_timeout_ms; late results do not pass. Zero means one normal bounded read."},
         "poll_interval_ms": {"type": "integer", "minimum": 100, "maximum": 2000},
@@ -106,6 +108,13 @@ def validate_step(step):
     if operation not in OPERATION_SCHEMA["properties"]["operation"]["enum"]:
         raise OperationError("지원하지 않는 작업 종류입니다.")
     result = copy.deepcopy(step)
+    if "window_transition" in step:
+        try:
+            result["window_transition"] = validate_transition(step["window_transition"])
+        except TransitionError as error:
+            raise OperationError(str(error), error.code) from error
+        if operation == "assert":
+            raise OperationError("assert는 현재 창을 다시 확인합니다. 창 전환 조건은 입력 동작에 지정하세요.")
     key_target = step.get("key_target", "element")
     if "key_target" in step and (operation not in ("press_key", "hotkey") or key_target not in ("element", "window")):
         raise OperationError("key_target은 press_key/hotkey에서 element 또는 window로만 지정하세요.")
@@ -357,6 +366,13 @@ class _Execution:
         self.snapshot_target = None
         self.observed_at = 0
         self.observation_limits = (12, 600)
+        self.original_target = dict(target)
+        self.transition_spec = step.get("window_transition", {"mode": "auto"})
+        self.transition_tracker = None
+        self.transition = None
+        self.transition_row = None
+        self.action_evidence = []
+        self.action_acknowledgement_error = None
 
     def _remaining(self):
         self.runtime.check_active()
@@ -401,6 +417,15 @@ class _Execution:
             if focus:
                 self.metrics["focus_ms"] += duration
         data = _payload(answer)
+        if mutation and not focus:
+            # Driver facts only: background/foreground does not imply whether
+            # a physical pointer moved. A missing report stays not_reported.
+            reported_mode = data.get("delivery_mode")
+            backend = data.get("backend", data.get("input_backend"))
+            self.action_evidence.append({"tool": name, "requested_delivery_mode": args.get("delivery_mode", "driver_default"),
+                "reported_delivery_mode": reported_mode[:120] if isinstance(reported_mode, str) else "not_reported",
+                "reported_backend": backend[:120] if isinstance(backend, str) else "not_reported",
+                **({"input_sent": data["input_sent"]} if type(data.get("input_sent")) is bool else {})})
         if mutation and data.get("input_sent") is False:
             if focus:
                 self.focus_dispatched = previous_focus
@@ -663,14 +688,35 @@ class _Execution:
         self.observation_deadline = deadline if timeout else None  # zero means one bounded read
         first = True
         try:
+            if self.dispatched and self.transition_spec["mode"] == "new_window":
+                initial = self._recover_transition(assertions, deadline if timeout else self.deadline)
             while True:
                 self._remaining()
-                snapshot = initial if first and initial is not None else self._observe_assertions(assertions)
+                try:
+                    if (self.dispatched and self.transition is None and self.transition_tracker is not None
+                            and self.transition_tracker.probe is not None and not self.transition_tracker.original_present()):
+                        snapshot = self._recover_transition(assertions, deadline if timeout else self.deadline)
+                    else:
+                        snapshot = initial if first and initial is not None else self._observe_assertions(assertions)
+                except OperationError as error:
+                    if (error.code not in {"target_unavailable", "observation_error", "scoped_observation_failed"}
+                            or not self.dispatched or self.transition is not None
+                            or self.transition_spec["mode"] == "same_window"):
+                        raise
+                    if error.code != "target_unavailable" and (self.transition_tracker is None
+                            or self.transition_tracker.probe is None or self.transition_tracker.original_present()):
+                        raise
+                    snapshot = self._recover_transition(assertions, deadline if timeout else self.deadline)
                 if timeout and time.monotonic() >= deadline:
                     raise OperationError("완료 확인 제한 시간이 지난 뒤 도착한 관찰은 성공으로 판정하지 않았습니다.", "verification_timeout")
                 if first and self.baseline_at_start:
                     self._baseline(snapshot, assertions)
                 if self._evaluate(snapshot, assertions):
+                    if self.transition is not None and self.transition.get("target"):
+                        self.transition_tracker.confirm(self.target, self.transition_row)
+                        self._remaining()
+                        if timeout and time.monotonic() >= deadline:
+                            raise OperationError("마지막 창 식별 확인이 완료 제한 시간 뒤에 끝났습니다.", "verification_timeout")
                     return True
                 ambiguous = next((check["reason"] for check in self.checks
                                   if check.get("reason") in ("ambiguous_selector", "ambiguous_scope")), None)
@@ -690,20 +736,98 @@ class _Execution:
         finally:
             self.observation_deadline = None
 
+    def _recover_transition(self, assertions, verification_deadline):
+        """One bounded read-only transition attempt; never invokes mutation."""
+        self.no_parent_recovery = True
+        self.transition = {"state": "needs_target", "from_target": dict(self.original_target),
+                           "automatic_replay": False, "candidates": []}
+        tracker = self.transition_tracker
+        if tracker is None:
+            raise OperationError("전환할 창의 실행 프로세스 정보를 확보하지 못했습니다.", "transition_identity_unavailable")
+        timeout = self.transition_spec.get("timeout_ms", 1500)
+        deadline = min(self.deadline, verification_deadline, time.monotonic() + timeout / 1000)
+        began = time.monotonic()
+        try:
+            while True:
+                self._remaining()
+                row = tracker.inspect()
+                self.transition["candidates"] = copy.deepcopy(tracker.candidates)
+                if row is not None:
+                    if timeout and time.monotonic() >= deadline:
+                        raise OperationError("새 창 검색 제한 시간이 지났습니다. 추가 화면 읽기를 시작하지 않았습니다.", "transition_timeout")
+                    self.metrics["transition_discovery_ms"] = round((time.monotonic() - began) * 1000, 2)
+                    target = {key: row[key] for key in ("pid", "window_id")}
+                    # An independent live native ownership check surrounds the
+                    # Driver read. No tokens or handles from the old UIA tree.
+                    tracker.confirm(target, row)
+                    read_began = time.monotonic()
+                    try:
+                        snapshot = self._observe([a["selector"] for a in assertions], target=target)
+                        tracker.confirm(target, row)
+                    finally:
+                        self.metrics["transition_verification_ms"] = round((time.monotonic() - read_began) * 1000, 2)
+                    self._remaining()
+                    if time.monotonic() >= verification_deadline:
+                        raise OperationError("창 전환 확인 시간이 지났습니다. 늦은 결과로 계속 실행하지 않았습니다.", "transition_timeout")
+                    self.target = target
+                    self.transition_row = row
+                    self.read_failed = False
+                    self.last_guidance = None
+                    self.transition.update(state="observed", target=dict(target), title=row.get("title", ""))
+                    return snapshot
+                if not timeout or time.monotonic() >= deadline:
+                    raise OperationError("관련된 새 창을 제한 시간 안에 확인하지 못했습니다. 입력을 반복하지 않았습니다.", "transition_timeout")
+                self.runtime.stop_event.wait(min(0.1, max(0, deadline - time.monotonic())))
+        except TransitionError as error:
+            self.transition["candidates"] = copy.deepcopy(tracker.candidates)
+            raise OperationError(str(error), error.code) from error
+        finally:
+            self.metrics["transition_ms"] = round((time.monotonic() - began) * 1000, 2)
+            self.metrics.setdefault("transition_discovery_ms", self.metrics["transition_ms"])
+
     def _result(self, status, code, message):
         self.metrics["elapsed_ms"] = round((time.monotonic() - self.started) * 1000, 2)
+        if self.transition_tracker is not None:
+            self.metrics["transition_probe_ms"] = round(self.transition_tracker.elapsed_ms, 2)
         diagnostic = {"code": code, "message": message, "automatic_replay": False}
         if self.strategy:
             diagnostic["selection_strategy"] = self.strategy
         if self.last_guidance:
             diagnostic["driver_guidance"] = self.last_guidance
+        if self.action_acknowledgement_error:
+            diagnostic["action_acknowledgement_error"] = self.action_acknowledgement_error
+        if code.startswith("transition_") and self.transition is None:
+            self.transition = {"state": "needs_target", "from_target": dict(self.original_target),
+                               "automatic_replay": False, "candidates": []}
         if status != "verified":
-            diagnostic["next_step"] = ("새 관찰로 현재 결과부터 확인하세요. 입력을 자동 반복하지 않습니다. "
-                "배경 입력의 미적용이 확인되면 foreground를 명시해 필요한 작업만 다시 요청할 수 있습니다.")
+            if code.startswith("transition_") or code == "target_unavailable":
+                diagnostic["next_step"] = ("클릭은 다시 보내지 마세요. 현재 프로그램의 창을 확인해 정확한 대상 창으로 완료 조건만 검사하세요. "
+                    "새 프로세스로 전환됐다면 현재 창을 다시 연결하세요. 종료 목적의 동작은 computer_close로 준비·확인하세요.")
+            elif code in {"background_unavailable", "background_no_effect"}:
+                diagnostic["next_step"] = "현재 결과와 입력 미전달 여부를 확인한 뒤 필요한 작업만 foreground로 명시해 요청하세요. 자동 재입력하지 않습니다."
+            else:
+                diagnostic["next_step"] = "현재 완료 조건과 진단 원인을 확인하세요. 같은 입력을 자동 반복하지 않습니다."
+        if self.transition is not None:
+            self.transition["state"] = "verified" if status == "verified" else "needs_target" if "target" not in self.transition else "unverified"
         return {"status": status, "task_verified": status == "verified", "operation": self.step["operation"],
                 "input_dispatched": self.dispatched, "focus_dispatched": self.focus_dispatched,
                 "checks": self.checks, "metrics": self.metrics,
-                "diagnostic": diagnostic}
+                "diagnostic": diagnostic, "target": dict(self.target),
+                **({"transition_monitor": {"ready": self.transition_tracker.error is None,
+                    "diagnostic_code": self.transition_tracker.error,
+                    "detail": self.transition_tracker.error_detail}} if self.transition_tracker is not None else {}),
+                "delivery": {"requested_mode": self.delivery, "actions": self.action_evidence,
+                             "pointer_movement": "not_reported",
+                             "acknowledgement": "error_postconditions_checked" if self.action_acknowledgement_error else "see_action_evidence"},
+                "feedback": {"selected_target": {"window": dict(self.original_target),
+                    **({"selector": copy.deepcopy(self.step["selector"])} if "selector" in self.step else {})},
+                    "last_stage": "completion_verified" if status == "verified" else "completion_check" if self.dispatched else "before_input",
+                    "phases": [{"phase": "observation", "duration_ms": round(self.metrics["observation_ms"], 2)},
+                               {"phase": "input", "duration_ms": round(self.metrics["action_ms"], 2)},
+                               {"phase": "window_discovery", "duration_ms": self.metrics.get("transition_discovery_ms", 0)},
+                               {"phase": "transition_result_read", "duration_ms": self.metrics.get("transition_verification_ms", 0)}],
+                    "phase_times_overlap": True},
+                **({"transition": self.transition} if self.transition is not None else {})}
 
     def run(self):
         assertions = verification_step(self.step)["expect"]
@@ -725,6 +849,12 @@ class _Execution:
                 self._baseline(snapshot, assertions)
                 requires_change = any(check.get("require_change") for check in assertions)
                 element = None if window_key else _unique(snapshot, selector)
+                if self.transition_spec["mode"] != "same_window":
+                    self.transition_tracker = WindowTransition(self.runtime, self.target, self.transition_spec)
+                    self.transition_tracker.prepare()
+                    self._remaining()
+                    if self.transition_spec["mode"] == "new_window" and self.transition_tracker.error:
+                        raise OperationError("창 전환의 실행 프로세스 정보를 확보하지 못해 입력하지 않았습니다.", "transition_identity_unavailable")
                 if operation == "set_value":
                     if element.get("role") not in ("Edit", "Document", "TextBox") or element.get("read_only") is True or element.get("is_read_only") is True:
                         raise OperationError("set_value는 편집 가능한 입력칸에만 사용할 수 있습니다. 선택 상자는 select_option을 사용하세요.", "unsupported_control")
@@ -806,12 +936,37 @@ class _Execution:
                                 "모든 완료 조건을 확인했습니다." if passed else "현재 화면에서 완료 조건을 충족하지 못했습니다.")
         except Exception as error:
             code = getattr(error, "code", "session_unavailable")
+            # The Driver may dispatch the click, then reject its old-HWND
+            # foreground acknowledgement because that click replaced the
+            # window. Only this narrow diagnostic + native disappearance may
+            # proceed to read-only postconditions. Explicit input_sent:false,
+            # arbitrary permission denial, and original-still-present cannot.
+            acknowledgement_transition = code in {"target_unavailable", "foreground_unavailable"} or (
+                code == "target_denied" and ((self.last_guidance or {}).get("diagnostic_code") == "target_unavailable"
+                    or (str(error).startswith("foreground_unavailable: exact target HWND ") and "after the click" in str(error))))
+            if (self.dispatched and acknowledgement_transition and not self.read_failed
+                    and self.transition is None and self.transition_tracker is not None
+                    and self.transition_tracker.probe is not None):
+                try:
+                    if not self.transition_tracker.original_present():
+                        self.no_parent_recovery = True
+                        self.action_acknowledgement_error = {"code": code, "message": str(error)[:1000]}
+                        passed = self._verify(assertions)
+                        return self._result("verified" if passed else "failed", "verified_after_window_transition" if passed else "verification_failed",
+                            "입력 응답의 창 전환 오류 뒤 새 창의 완료 조건을 확인했습니다. 입력은 반복하지 않았습니다." if passed else
+                            "입력 응답 오류 뒤 새 창을 확인했지만 완료 조건을 충족하지 못했습니다.")
+                except Exception as recovery_error:
+                    error = recovery_error
+                    code = getattr(error, "code", "session_unavailable")
             # One read-only recovery attempt can document current conditions;
             # even if they match, an errored mutation stays unknown, never replayed.
-            if self.dispatched and not self.no_parent_recovery and not self.read_failed and code not in ("observation_error", "driver_timeout", "stopped", "session_unavailable", "step_timeout", "verification_timeout"):
+            if self.dispatched and not self.no_parent_recovery and not self.read_failed and not code.startswith("transition_") and code not in ("observation_error", "driver_timeout", "stopped", "session_unavailable", "step_timeout", "verification_timeout"):
                 try:
                     snapshot = self._observe([a["selector"] for a in assertions])
                     self._evaluate(snapshot, assertions)
                 except Exception:
                     pass
-            return self._result("unknown" if self.dispatched else "failed", code, str(error)[:1000])
+            return self._result("needs_target" if code.startswith("transition_") and self.dispatched else "unknown" if self.dispatched else "failed", code, str(error)[:1000])
+        finally:
+            if self.transition_tracker is not None:
+                self.transition_tracker.close()

@@ -1,23 +1,39 @@
-# Computer Use MCP 0.12.0
+# Computer Use MCP 0.13.0
 
 Claude Code 등 MCP를 지원하는 클라이언트에서 **이 PC의 프로그램 화면을 읽고 조작하는 Windows용 도구**입니다. Chrome, 메모장, 설치된 Excel뿐 아니라 사용자가 실행파일을 지정한 다른 프로그램도 등록할 수 있습니다. 실제 화면을 확인해 클릭·입력하고, 요청한 결과까지 확인하는 것을 목표로 합니다.
 
-## 0.12.0 다운로드
+## 0.13.0 다운로드
 
-이 안내는 **0.12.0 배포본** 기준입니다. 아래 ZIP으로 기존 MCP 연결을 갱신하세요. 메인 앱을 바꾸는 업데이트가 아니라 Computer Use MCP 업데이트입니다. 이전 버전과 같이 시험용(Pre-release)으로 제공하며 운영 환경의 모든 프로그램 호환성을 보장하지 않습니다.
+이 안내는 **0.13.0 배포본** 기준입니다. 아래 ZIP으로 기존 MCP 연결을 갱신하세요. 메인 앱을 바꾸는 업데이트가 아니라 Computer Use MCP 업데이트입니다. 이전 버전과 같이 시험용(Pre-release)으로 제공하며 운영 환경의 모든 프로그램 호환성을 보장하지 않습니다.
 
 | 파일 | 용도 |
 | --- | --- |
-| [Computer-Use-MCP-0.12.0-with-driver.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.12.0/Computer-Use-MCP-0.12.0-with-driver.zip) | MCP·Python·Cua Driver 0.28.2를 함께 제공하는 권장 묶음 |
-| [Computer-Use-MCP-0.12.0.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.12.0/Computer-Use-MCP-0.12.0.zip) | Driver를 별도로 준비하는 묶음 |
-| [Computer-Use-MCP-0.12.0-source.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.12.0/Computer-Use-MCP-0.12.0-source.zip) | 개발·코드 확인용 원본 소스 |
-| [cua-driver.exe](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.12.0/cua-driver.exe) | Driver 실행파일만 받기. 전체 구성 준비에는 포함 ZIP 사용 |
+| [Computer-Use-MCP-0.13.0-with-driver.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.13.0/Computer-Use-MCP-0.13.0-with-driver.zip) | MCP·Python·Cua Driver 0.28.2를 함께 제공하는 권장 묶음 |
+| [Computer-Use-MCP-0.13.0.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.13.0/Computer-Use-MCP-0.13.0.zip) | Driver를 별도로 준비하는 묶음 |
+| [Computer-Use-MCP-0.13.0-source.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.13.0/Computer-Use-MCP-0.13.0-source.zip) | 개발·코드 확인용 원본 소스 |
+| [cua-driver.exe](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.13.0/cua-driver.exe) | Driver 실행파일만 받기. 전체 구성 준비에는 포함 ZIP 사용 |
 
-연결한 채팅 앱에서 MCP를 다시 연결한 뒤 **`computer_status`의 `version`이 `0.12.0`인지** 확인하세요. 이전 MCP 프로세스가 계속 연결되어 있으면 새 파일만 받아도 기능이 바뀌지 않습니다.
+연결한 채팅 앱에서 MCP를 다시 연결한 뒤 **`computer_status`의 `version`이 `0.13.0`인지** 확인하세요. 이전 MCP 프로세스가 계속 연결되어 있으면 새 파일만 받아도 기능이 바뀌지 않습니다.
 
-[0.12.0 릴리스](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.12.0) · [SHA256SUMS.txt](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.12.0/SHA256SUMS.txt) · [이전 0.11.1](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.11.1)
+[0.13.0 릴리스](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.13.0) · [SHA256SUMS.txt](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.13.0/SHA256SUMS.txt) · [이전 0.12.0](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.12.0)
 
 GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실행파일과 동봉 Python이 필요한 일반 사용자는 위의 배포 ZIP을 받으세요. 지원 대상은 Windows x86_64이며, 사용할 프로그램과 Claude Code 등 MCP 클라이언트는 이 PC에 설치되어 있어야 합니다.
+
+## 0.13.0: 프로그램 추가와 창 전환을 간단하게
+
+**다른 프로그램 추가는 채팅에서 부탁하세요.** 설정 파일을 찾거나 명령어를 입력할 필요가 없습니다.
+
+> 지금 열려 있는 ‘내 업무 프로그램’을 자동화 대상으로 등록해줘. 같은 이름이 여러 개면 목록을 보여줘.
+
+실행파일 경로를 알고 있다면 경로와 필요한 실행 인자를 알려줘도 됩니다. 등록 후 같은 MCP 연결의 다음 화면 작업부터 쓸 수 있습니다. 진행 중인 작업에 새 앱을 임의로 끼워 넣지는 않습니다. 등록했다고 프로그램을 실행한 것은 아닙니다.
+
+**버튼을 누른 뒤 창이 바뀌면 결과부터 확인합니다.** 기존 창이 없어졌을 때 관련된 새 창을 제한시간 안에서 찾아 완료 조건을 확인합니다. 결과가 확인되면 이어서 진행하고, 후보가 여러 개면 선택할 대상을 알려줍니다. 이미 보낸 클릭을 다시 보내지 않습니다. 프로그램 종료는 별도의 종료 확인을 사용합니다.
+
+> 실행 버튼을 누르고 다음 화면의 ‘준비 완료’가 확인되면 이어서 진행해줘. 창이 바뀌어도 버튼을 다시 누르지 말고 현재 결과부터 확인해줘.
+
+**커서가 움직이지 않아도 요소에 직접 동작을 요청할 수 있습니다.** 기본 배경 실행은 그대로이며, 요소 선택·녹화를 방해하던 Driver 커서 표시는 꺼져 있습니다. 결과에서 요청한 입력 방식, Driver가 보고한 처리 방식, 대상과 확인 단계를 구분합니다. `foreground`는 창을 앞으로 가져오는 방식이며 커서 이동 애니메이션을 보장하지 않습니다.
+
+처음 연결하거나 제품 버전을 갱신할 때는 MCP 재접속이 필요합니다. **0.13.0의 등록 도구로 앱만 추가할 때는 재접속하지 않습니다.** [쉬운 변경 안내](CHANGES_0.13.0.html)
 
 ## 처음 연결하기
 
@@ -101,7 +117,7 @@ GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실�
 
 주소 실행과 EXE 인자·시작 폴더는 함께 지정하지 않습니다. 주소를 Windows에 전달했다는 결과와 실제 업무 창이 준비됐다는 결과는 구분합니다. 운영체제의 해당 주소 연결이 준비되어 있어야 하며, 로그인 화면은 별도로 확인합니다.
 
-채팅 설치 도구에서는 `programs.py`의 `--launch-uri`, `--argument=--flag`, `--working-directory`를 지원합니다. `install.py inspect/prepare`에서는 정확히 하나의 `--app-exe`에 `--app-launch-uri`, `--app-argument=--flag`, `--app-working-directory`, `--app-control-exe`를 연결합니다. 일반 사용자는 다음처럼 요청하면 됩니다.
+MCP 등록 도구는 `launch_uri`, `arguments`, `working_directory`를 지원합니다. 로컬 유지보수 도구에서는 `programs.py`의 `--launch-uri`, `--argument=--flag`, `--working-directory`를 지원합니다. `install.py inspect/prepare`에서는 정확히 하나의 `--app-exe`에 `--app-launch-uri`, `--app-argument=--flag`, `--app-working-directory`, `--app-control-exe`를 연결합니다. 일반 사용자는 다음처럼 요청하면 됩니다.
 
 > 이 앱은 EXE를 직접 여는 대신 내가 알려주는 주소로 열어야 해. 실제 열린 창에서 실행파일을 확인해서 등록하고, 그 주소를 여는 방법으로 저장해줘. 기존 프로그램 설정은 유지해줘.
 
@@ -165,7 +181,7 @@ UIA 모드는 직접 요소 선택 창을 지원합니다. 창이 보이지 않�
 
 **자체 그림 화면의 버튼이 Windows 접근성 정보에 아예 없는 경우에는 UIA 학습을 할 수 없습니다.** 실제 로컬 프로그램에서 네이티브 UIA와 Driver에 버튼 정보가 없는 경우를 확인했습니다. 이때 `picker_controls_not_exposed`로 이유를 알리고 F8 반복이나 상위 영역을 버튼으로 잘못 저장하는 일을 막습니다. 0.10.0에는 그림 버튼의 이미지 학습·자동 재탐색이 없었습니다. 현재 버전에서는 위의 **이미지로 선택** 기능을 사용할 수 있습니다.
 
-새 ZIP 전체를 압축 풀고 기존 설정을 유지한 채 연결을 갱신한 뒤 **0.12.0** 및 `computer_process_editor`가 표시되는지 확인하세요. 편집 실행파일은 MCP가 자동 실행합니다.
+새 ZIP 전체를 압축 풀고 기존 설정을 유지한 채 연결을 갱신한 뒤 **0.13.0** 및 `computer_process_editor`가 표시되는지 확인하세요. 편집 실행파일은 MCP가 자동 실행합니다.
 
 ## 0.9.0: 직접 선택 → 확인 → 학습 완료
 
@@ -181,7 +197,7 @@ UIA 모드는 직접 요소 선택 창을 지원합니다. 창이 보이지 않�
 
 이름·화면 분류·설명·찾는 기준을 이 PC에 저장합니다. LLM 자체 훈련이나 전체 작업 녹화는 아닙니다. 입력 값·이미지·좌표·임시 창 번호는 학습 파일에 저장하지 않습니다. “배운 요소 목록을 보여줘”, “조회 버튼을 다시 가르칠게”, “저장한 조회 버튼을 지워줘”로 관리합니다. 같은 이름의 대상은 고유한 상위 영역으로 구분하며 화면이 바뀌면 다시 확인합니다.
 
-새 배포 ZIP을 모두 압축 풀고 `INSTALL.md`를 첨부하여 **“기존 Driver·프로그램·저장한 작업·학습 요소를 유지하고 이 버전으로 연결을 갱신해줘”**라고 요청하세요. 연결을 다시 연 뒤 **0.12.0**과 `computer_teach_status`가 표시돼야 새 방식이 적용됩니다. 기존 연결 파일을 그대로 실행하면 이전 버전이 계속 사용됩니다.
+새 배포 ZIP을 모두 압축 풀고 `INSTALL.md`를 첨부하여 **“기존 Driver·프로그램·저장한 작업·학습 요소를 유지하고 이 버전으로 연결을 갱신해줘”**라고 요청하세요. 연결을 다시 연 뒤 **0.13.0**과 `computer_teach_status`가 표시돼야 새 방식이 적용됩니다. 기존 연결 파일을 그대로 실행하면 이전 버전이 계속 사용됩니다.
 
 ## 0.8.0: 프로그램 시작 방식 수정
 
@@ -191,7 +207,7 @@ UIA 모드는 직접 요소 선택 창을 지원합니다. 창이 보이지 않�
 
 ## 과거 검증 기록과 안내
 
-**아래는 이전 버전의 시험 기록입니다. 현재 0.12.0의 결과는 [검증 보고서](VALIDATION.html)를 확인하세요.**
+**아래는 이전 버전의 시험 기록입니다. 현재 0.13.0의 결과는 [검증 보고서](VALIDATION.html)를 확인하세요.**
 
 0.10.0 당시: 자동 검사 669개 실행: 667개 통과, 2개 조건부 제외. 소스와 내장 Python 배포본에서 공개 MCP의 요소 선택·저장·재사용 시험을 각각 9개 통과했습니다. 프로세스 작성·실행 시험도 소스와 배포본에서 각각 7개 통과했습니다. 새 프로세스 편집 창의 직접 요소 선택, 입력·요소 대기·고정 대기·화면 확인·후속 확인 5단계 저장, 실제 Driver 실행, 이미지 반환과 일시정지, 명시적 확인 후 재개, 앱·MCP 재시작 후 같은 작업 재실행을 소스와 배포본에서 확인했습니다. 작성 중 업무 시험 창의 입력·클릭·키 기록이 바뀌지 않았고, 프로세스 파일에 좌표·이미지·임시 창 번호가 없음을 확인했습니다. 같은 편집 요청·중첩 요소 선택 중 취소·도우미 종료와 긴 폴더 경로도 검사했습니다. Windows 파일 교체 경합과 동시 저장 문제를 재현해 수정하고 기존 명령·작업의 보존을 확인했습니다. 200% 화면 배율에서 편집 창을 검수했습니다. 이는 사용자 선택과 확인을 자동화한 합성 시험이며 실제 사람의 사용성이나 이미지 해석 정확도를 검증한 결과는 아닙니다. 실제 자체 렌더링 앱은 읽기 전용으로 버튼 정보 부재를 확인했으며, 해당 버튼의 학습·클릭 성공은 검증하지 않았습니다. 사내 프로그램·사내 LLM·관리자 권한 연결의 실제 화면 작업은 검증하지 않았습니다.
 

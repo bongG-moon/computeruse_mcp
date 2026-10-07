@@ -1,39 +1,40 @@
 {
   "format": 1,
   "product": "Computer-Use-MCP",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "release_status": "prerelease",
-  "publication_note": "Unchanged public files retain prior bytes; changed text normalizes line endings. ZIPs retain tested code/runtime/binary bytes. Publication repacks documentation and manifests only.",
+  "publication_note": "Unchanged public text retains prior bytes. Changed public text uses LF line endings. Release ZIPs retain exactly the tested source/runtime/binary bytes; PUBLICATION-MANIFEST hashes Git files, BUILD-MANIFEST hashes source ZIP members. The unchanged test_process_editor.py retains previous Git bytes, omitting one source ZIP trailing blank line; Python syntax trees are identical. The new test_program_registration.py omits a trailing blank line in Git only; its Python syntax tree matches the tested source ZIP.",
   "source_files": {
     ".gitignore": "5ea5ea8957bcddb30496a4a92de9be958ed1bf8a159dcb46b71e176905f123fd",
     "AdministratorBridge.cs": "56dd5c12cbb5199fab020e58609dbb728ddd7d0d37537237695d2688151c4cf5",
-    "BUILD-MANIFEST.json": "ea6a98a243e9dc28c1ffcaa0c494ba7aaa816d98d44f63d4cc79ffe94eff5098",
+    "BUILD-MANIFEST.json": "4eaec1a4d595acbaa694d0f6e438b892eaa3e2144f4e6dd2163a12ed9b951c20",
     "CHANGES_0.12.0.html": "7d314d83097ecb2a0c6850a3722e286039c17c288af159e97ff9920212bdcb1e",
+    "CHANGES_0.13.0.html": "475fc9bd8e3c4ae9936c726d6154c521291cc1adbbd1e00bf33085ad0754ab85",
     "CUA-DRIVER-LICENSE.md": "c0779290c1d4783169aa3dbfb55feb505e563ef8a004bbf55298ceffcfbda8d9",
-    "DRIVER-BUNDLE-MANIFEST.json": "d8d37c4a801efc64075a7671d57489dee8e26397681b67b0ea3e480d04790871",
-    "DRIVER-BUNDLE.md": "e50981b9dcdeba6abc9edbddcad383f9dbff5a25bf89a7709602d7a43349becb",
+    "DRIVER-BUNDLE.md": "d57c88e162920a33d34b710f41ba3eba09633be9909b268fc0ae260adf69589d",
     "ElementPicker.cs": "a7265182c8f9c6f5b35f6a9fc8ffd8e31a682de1c25fd34566221e652726b600",
-    "INSTALL.md": "29ee7225cb0af988ee06e91dc92a5c2f15781dabbdc1d75f0681596f86e636cc",
+    "INSTALL.md": "302186a39821d502c24c958c5deafac1d8c5e06b2aa47d7d9fbdd221e66c5f4b",
     "Launcher.cs": "3a74b9421d201eb24510cf6000ca3082f58bdc701ecb1c226f7ece64b2db32e1",
-    "PROCESS_GUIDE.html": "92e5e9a21f0478e0088421bb1fdb331dce6913a19a15cbb07ec2adc61180abf9",
+    "PROCESS_GUIDE.html": "bf84dad4bda97b1d34f0f0802f38860b0580fc5aa44e848c47ebbb485efc6405",
     "ProcessEditor.cs": "3f46b7ac59d1662c0eb7d7cc1331efae9d142299d26680d8707fc4559b5cf430",
-    "README.html": "fdbadf26ed994f79837aca1dedde772634e05bdff325de83a930532cdbd20833",
-    "README.md": "45c49ac75a277bf4afcbd88c7bedb1eae21bf0fb388c3dd61afc1156b0423ac9",
+    "README.html": "9da0c15623d361890143e357a93af28559bbee5cb9309c8c171f73bd25e53039",
+    "README.md": "ebf055f7283bef7fbdc16000f544a32ad4bb446c3c5f0fac80e20fa95b38ed66",
     "ScopedControls.cs": "0a2d4fefb545c13664bf12f96822bdf539032aaa8d3eefe1f264f6c451fceb35",
-    "VALIDATION.html": "5f9b1d2bfac036afdf64e65a7ea4d27f2b0ba609f5a76c5d6a3ad5e4c29a67cc",
+    "VALIDATION.html": "cd840ef1035f1527d7484abe96189709c49e18ffa2cff36c207e72454e7417fc",
     "VisualTools.cs": "29af4ef794aedf94ff0d65645fdd0354c79080b7d308cac77fd521a07081f76f",
+    "acceptance_transitions.py": "a70eae8eb519c7da11a8ea42bf580621515a75c504f95e4b4b30c47d5201cd5a",
     "acceptance_workflows.py": "7d21437227571c6a3d801f47863627d3c4d81329cdf50da028394b48c082996d",
     "accessibility_tree.py": "33df2329690c31f9f41618cec5c0041bc218284da79bfc072057dac7d70a1b9e",
     "administrator_validation.py": "50928abbf954b1e82833ad744a9fc065645bcdcc797e6d58da79aa336fa6c714",
-    "build_portable.py": "bddbe62be34319bfb98a6fb62cc74fe51d5d63849159f688d4dcab5f8d36ec72",
-    "bundle_driver.py": "5dac99192008e457d5c4fe54eefbb1b2c5b93f65ba12fb9cd57c12f613f4caff",
+    "build_portable.py": "2d11d64d46ee2cb6ef2babae0c93208b536e4f5a4af5c0e7dc9841abb11fb288",
+    "bundle_driver.py": "dd90c49e3b1236896ccc31e6abdadba4ac8cbc7e9b0705693c6b561ec599e692",
     "close_actions.py": "8059b28b834733941bcb524ab9069fed907a267106d83a784bb575b5b7617fc8",
-    "closing.py": "213903882db2ef69cdff8ddf49d204e29aa47c57265dbf076ca3b0b37cbf8906",
+    "closing.py": "3b9a33fbc365b13cd1004862d68c0d0bc2730e4044e17962827c3697e442ebbc",
     "closure_validation.py": "786c8a2c06ace7b5711f90bf7cf972a62770d5f92e3f76230efbd18c1d619007",
     "configuration_state.py": "ffe7755be91fd8bfe7986254c9ca1a8beb16a66628a953856b57f12439f3d5cc",
     "consent.py": "1f8cb23b35720102b65baf3474fe04f677485a7786db23e403e63f5b01653c28",
     "desktop_apps_validation.py": "613f039e7368e887c49340bf33be4535896407de7d9b856de25563c74bd1d37b",
-    "diagnostics.py": "d5c92c93530157d3adb4d7da0cd66b2278148e2f4f2196313761f8827269c61f",
+    "diagnostics.py": "b85dd0b331b7b17b84af7aa8b36e934d0f68ecabe4d987d707eef9e1d3c88666",
     "fixtures/blank.xlsx": "b68e0bc846a8e3cf3b9b649b90a846ea63194e43785bd67efad7215ef35864bd",
     "generic_validation.py": "91c342b444d653faf818c909cf90398e263882494466c45a4697e79ebd5a2d5e",
     "image_steps.py": "01141eb84e743caad0249dc402353ed3c191eea7d1c12f5baf4a36bd3ea0ba6d",
@@ -46,7 +47,7 @@
     "live_validation.py": "718683c93c5ea6313dc709726de02e502180fc7181e739f0d49b6eb27047b707",
     "maintenance.py": "d2409bcce299d23f68e9224f1a3e8ae0dbf0d1ff6fc88961935a23cc2311a03c",
     "native_fixture.py": "aa0eeb3287971e03510c393e2a3c545bca79463bc50e865e40ad56fc5953d1b8",
-    "operations.py": "95d9900535c1897cf244a916201741cf3ff13bebd4cfdedef8acadffb21eaec8",
+    "operations.py": "3fd4767074f0c8e61f677cab4454c4b5d8cc53773c45b7e58034944a7203595f",
     "performance_validation.py": "c9a23265f0a6ec628fb4e8f9bfaeff15f9be09cddb086bcdd76b031faea250af",
     "picker_validation.py": "581eebdb6e6f8689643960d3f6eeee2f8810be9683bc90995c1122b7dbd41f14",
     "privileges.py": "9cc140a7630b28c19477c96272882f1140f8481d303d698545121fa4ced57fe3",
@@ -54,17 +55,18 @@
     "process_steps.py": "fb1b11272a32c56cf0507a44c36691e113f7110ceb31914473b468a0fd7abe69",
     "process_validation.py": "ece27bf13fe1a2b70c222618b6086b40fe9aa4117a61817e3a62d50f3ac40e91",
     "program_launch.py": "8dc7aef25e704e05e5c3f30abe7b0acbc21ef525289806a898c514ba20a1c1c6",
-    "programs.py": "38ae97e0f74b6fdb1f3e2b66a6266ac69f0aeb9c6b5b1ca6d51eba86224a58f4",
+    "program_registration.py": "fd56f24272d383941bf30883449c1b159685931f2efa9b041ee3ca1ecbef8d58",
+    "programs.py": "9662bf5942ef4e243573c93e4a0602ae96b7fe22b4913e10d9bed98c9807c73e",
     "recording_validation.py": "eb4e957f20421f6cfea3dee5204f12398ac0d68bfd31ff1f129374367874fd6b",
-    "register.py": "158303a0fdbff57bfb09778c02e2c5db6fc9ac80b5ad183390b5b0f9ced71c5a",
+    "register.py": "988ca31221ed055fd6f9bae9818f96594b59e5d1c27a6216b21136253beac4ac",
     "repeat_profiles.py": "ce6a7243c422d060ecf74ced7b8243ade1b8662404afb7030ceaea680bccd7a1",
-    "repeat_validation.py": "6297eff10e53eeecbd53e6bcc7b7a137fb8c51e95c898ac7c67471a70081a801",
+    "repeat_validation.py": "4d02c8af489798cec91a1faa3a3db5e7143434e7f61d69e01f810e949a61fba5",
     "result_files.py": "17175dcb86dbadd5a086c29f2b6e7c3876539e453177a52ee7c4f787862ec667",
     "scoped_controls.py": "32e405fb31b5413cb4c3b8b0efc4457478a653c718ad673331091fd4099c169b",
     "scoped_nested_validation.py": "9e2291bedc7c372f161a5a3d2cd048da7bf3c33ce95146fb5b3ef26456f1e046",
-    "server.py": "eb051938394460074347dd7c1da076db0ef0e02b2be4b0ea2c6f099571e5e887",
-    "session_runtime.py": "4455f567730fcc93f8871f9a506021ee39808ac445828c58f742a430d125d1b2",
-    "settings.py": "b9a45e3a3e3734ed81961e20e425bd75ecb09109fb8080b7c61fe4dd3a91f7bc",
+    "server.py": "dfd6f4052c6aec40bbf77604a85cf96f6a8a2d3ee65ed9c4a2de9da087d8a398",
+    "session_runtime.py": "df2653f822c00baef596e8dec420293782e11df2e767c4426f3375650086437c",
+    "settings.py": "5b64f0511eb4489517ada92d4d5a60d9b99d7c9332f1f714c005bbfdeae40491",
     "setup.py": "38edbcc0bd86cf1ba4c1893c6846868ef5c1a74a5531c8f44b84c10d378b36d2",
     "teaching_sessions.py": "959223057652e13e3f4e7cf0afcc758bcad16d1efce25826c7b77619be50536f",
     "teaching_support.py": "042db016c89905926f429114a3979f0ae3764e57fc47e6a458562d070d74327e",
@@ -74,11 +76,11 @@
     "test_checkpoint_capture.py": "41d80616774cb0fc1e66185cafb6084d71adf561f1fa4d17e579087dd01888ae",
     "test_close_actions.py": "cb64f7e336f1defc2480a6e93591d101feb4813fbcf221fef272562061f46dca",
     "test_close_tools.py": "f5b3e89794d85711aad702777737b64f9cc017ae6823f31594ba22d87280d3bf",
-    "test_closing.py": "a81db243aee1e4f4fada8a6820c5ae7de7ec2eb52c9c2a097a65078e3ab9d77f",
+    "test_closing.py": "0fe1ce5ea423d8c90b77e3a2501702252bb409cf034a91518a0b4a019f3dec5f",
     "test_configuration_state.py": "0ebfdd1b74be46d01ed90123ea5cfb559e7c229789e33c4ef9248bc2b9c88ea0",
     "test_consent.py": "cd5ef01780b1a92d688c980c5db98b855d838e06fbe0a83e29177d03488df9b3",
     "test_consent_ui.py": "28a0f84e9bf6098eda86f0787422ced08b20b596d69e6de15dc7e1ae62dba270",
-    "test_diagnostics.py": "7df852fc657d6c7c3f6ac70159e2355257401c4224147cf67295506f4a188871",
+    "test_diagnostics.py": "a7e565c1670c6a60459d4feb3aaa5dd2fbf56d4963ffaa21a6a7c97322dc8527",
     "test_driver_overlay.py": "aced38ccadecd7a80d00f7c4f76bf56b9164779ed003bfe36316ece087d2fcf4",
     "test_guard_performance.py": "1ca2f2d02b89c0791e013c46992143dd03089f85da080d297277b9d5900af758",
     "test_image_steps.py": "0917b8d7dfaf2b1d818be94b349822eaefe9b5af0b57f439f5042f5665f226a9",
@@ -97,14 +99,15 @@
     "test_process_editor.py": "2e4f2f910f602f8cefcc7cccb20a03ee1864fef0fa14f8acb7b624b88d6095d2",
     "test_process_steps.py": "297b7f16b1e91a651b16cce2191d7282550bbd43e50f5c6b50ad93a2a68d6e53",
     "test_program_launch.py": "7f0580d32c63d780fa705288ef991b92d9260ba9be438894cd3415f68250cdad",
+    "test_program_registration.py": "0503b6b8367b140a8224168373534acc4e5bbba022ccf6b8394ee3dec08de855",
     "test_programs.py": "c13bdecd0fbb124a4550babc4ddcb5fb20ebfb5ac88b54a35f8e978539bd3391",
     "test_register.py": "8b0d52c8e3889498eb39884a91e68e5b737a0e6a70cc13afffc9433ff5e9722b",
-    "test_register_upgrades.py": "cee29256ad7eb1bc9760b6a632a4f2d2228dacc59439c192980b552ce555fd73",
+    "test_register_upgrades.py": "22b5caebcfa28f2ff856e81b6e833241a03f58380ea08d7e58ec30fc6777f3e0",
     "test_repeat_profiles.py": "48af43359aaa0ce72ea940c76dede833cdcc36d05e56d49c22f8c01b18c6360b",
     "test_result_files.py": "330c2850745f8e004a2d134a83dc009284a2f841a0d90fdf5c6691b916295d23",
     "test_scoped_controls.py": "48b665afe58448ddd2b690f6cdc433b01f595978bafdd6d5716a4c49d787b7d3",
     "test_server.py": "2924ad9cb7f8215c37bf8cad75f3b29681efbf9f3bbfae89cb242f3731dee032",
-    "test_settings.py": "b2204ac27e014d0a087c1cd92ed272439f31f46f061378a61133ea852694e33f",
+    "test_settings.py": "c5b68caf18e3a38fadabc99a15b641006d961358f6e9a949d26b4dc093a34276",
     "test_setup.py": "32c777b70222f3a107cd96c2f90986907e8d09c461045f22099c1dddfa4663b1",
     "test_setup_programs.py": "5b117a2a67211754ddf016c2ba5ba237d3101cc2cb805d80c25b68e39c77de5c",
     "test_store_locks.py": "136c40b91b778b1940ece7cc6e42d38dbb08899b6af105b11e39bdd0dd5b3144",
@@ -112,6 +115,7 @@
     "test_teaching_sessions.py": "66fba5abbb626ef50e6db89552a796de2ecd38bfe912c0fd3ca5b19b796704e9",
     "test_teaching_support.py": "70b7002a1aea48f720415b909605ec727b9c4b32aa90456699e9df4408c4c1de",
     "test_visual_native.py": "0883a1753389099720059a93910088738b1539c6fba011019b9483bf967c43fb",
+    "test_window_transitions.py": "350c5218af00fab24a4bc68cd3758ba8addc74b5f590f7c6fef1be371d6f8682",
     "test_workflow_contract012.py": "c0b7b2241ceef434e55451c8fc1476c404984eab43f5f17beed8ec25e6248e4c",
     "test_workflows.py": "ea7e84c46b34732bb979f4eefa3a0aba4aebefb26baecfd717cd2ca1d5cb1aac",
     "vendor/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -119,50 +123,46 @@
     "vendor/windows.py": "2f6073ae555434754cab65e713881ce68714e50bec23423ede732eb709389b6a",
     "visual_fixture.py": "2646eab5dcfaf8391a8cb12fe13f769db11a90a2f8578e30195192999a73bc1d",
     "visual_validation.py": "474e6a266403097259a633f0a55dd6d66f6fe1de51e572a6425ceff04ef6eb55",
-    "workflows.py": "469cd3f171912d22e01ac4c3319628c3098f81536be8cf2ad2a01f5c460b4477"
+    "window_transitions.py": "574774036c60153bcc73a1c26e48c8b0e6fbae0269ef28737e65bdf067277c29",
+    "workflows.py": "a66cd2fa8fcba019f11eb04147a6fa47221c8afe7c0a77e46bc05bc05b1899ca",
+    "DRIVER-BUNDLE-MANIFEST.json": "97b30f81ffdffdaa9c4b01b8b3d3b03efd5901bf6ccad9e997d7a2a39bc70267"
   },
-  "tests": {
-    "unit": {
-      "run": 871,
-      "passed": 869,
-      "skipped": 2,
-      "failures": 0
+  "release_assets": [
+    {
+      "name": "Computer-Use-MCP-0.13.0.zip",
+      "size": 13727328,
+      "sha256": "191c12a79f6b06fbde8b372012871370c6fa42efd58d882424470f2be2298024"
     },
-    "bundle_recording": 3,
-    "bundle_process": 7,
-    "bundle_visual": 6,
-    "bundle_repeated_runs": 4,
-    "nested_query_orders": 2,
-    "synthetic_gui_input": true,
-    "real_human_recording_tested": false,
-    "external_llm_used": false,
-    "corporate_application_tested": false,
-    "published_source_unit": {
-      "run": 871,
-      "passed": 867,
-      "skipped": 4,
-      "failures": 0
+    {
+      "name": "Computer-Use-MCP-0.13.0-source.zip",
+      "size": 777752,
+      "sha256": "d6d14b5a4467a5297b03ac921006f896112a745c22cf0049a98104ce4cbcdaf0"
+    },
+    {
+      "name": "Computer-Use-MCP-0.13.0-with-driver.zip",
+      "size": 41654256,
+      "sha256": "5c4f71ea82329c289daef75bd873062d6f61f971248cd6a6b2b5955b354c791f"
+    },
+    {
+      "name": "cua-driver.exe",
+      "size": 30922064,
+      "sha256": "dbbd52d75759900155fbf3d5f0a13c759a12d06ef17338b88b3f2b8b9c1ef8dc"
+    },
+    {
+      "name": "CUA-DRIVER-LICENSE.md",
+      "size": 1069,
+      "sha256": "c0779290c1d4783169aa3dbfb55feb505e563ef8a004bbf55298ceffcfbda8d9"
+    },
+    {
+      "name": "DRIVER-BUNDLE-MANIFEST.json",
+      "size": 1730,
+      "sha256": "97b30f81ffdffdaa9c4b01b8b3d3b03efd5901bf6ccad9e997d7a2a39bc70267"
+    },
+    {
+      "name": "SHA256SUMS.txt",
+      "size": 564,
+      "sha256": "5664784e6dd552a75d1f8a2eb7055474c311c32e714cfb571f9ba1053c87ecf2"
     }
-  },
-  "documentation_only_repack": true,
-  "private_files_included": false,
-  "driver_executables_committed_to_git": false,
-  "previous_stable_release": "v0.6.0",
-  "release_assets": {
-    "Computer-Use-MCP-0.12.0.zip": {
-      "sha256": "b6042f4e01522dc77169db894b479cad9e4d47ca73c31f1a49d3389e583dde42",
-      "bytes": 13710278,
-      "verified_files": 1576
-    },
-    "Computer-Use-MCP-0.12.0-with-driver.zip": {
-      "sha256": "63668219eb984d876211f2091a84991606b883e1df272a0b0aa82c9e96fd4168",
-      "bytes": 41637063,
-      "verified_files": 1585
-    },
-    "Computer-Use-MCP-0.12.0-source.zip": {
-      "sha256": "5f94b7e9591213bf6a9e6fa1d0485af4735b3b6ada610415193c921634f10244",
-      "bytes": 745248,
-      "verified_source_files": 113
-    }
-  }
+  ],
+  "documentation_update": "Two user guides corrected after tests; all Python, tests, runtimes, driver and executable bytes are identical to tested packages."
 }

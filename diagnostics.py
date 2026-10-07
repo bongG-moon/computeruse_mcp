@@ -215,14 +215,24 @@ class ReadOnlyMCP:
 
     def close(self):
         failure = None
+        pipe_failure = None
         try:
             if self.process.stdin:
-                self.process.stdin.close()
+                try:
+                    self.process.stdin.close()
+                except OSError as error:
+                    # Closing a buffered Windows pipe can flush after a child
+                    # has already exited. Preserve its real startup diagnostic
+                    # and still verify cleanup instead of masking it with EINVAL.
+                    pipe_failure = error
             try:
                 self.process.wait(timeout=20)
                 self.cleanup.update(verified=True, graceful=self.process.returncode == 0, exit_code=self.process.returncode)
                 if self.process.returncode != 0:
                     failure = self._exit_error()
+                elif pipe_failure is not None:
+                    self.cleanup["graceful"] = False
+                    failure = RuntimeError("MCP 진단 입력 연결을 정상적으로 닫지 못했습니다. 프로세스 종료는 확인했지만 연결 성공으로 처리하지 않았습니다.")
             except subprocess.TimeoutExpired:
                 if self.owner.job is not None:
                     self.owner.close()
