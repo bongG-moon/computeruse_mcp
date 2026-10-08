@@ -37,7 +37,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
         return hashlib.sha256(data).hexdigest()
 
     def test_known_exact_manifest_accepts_each_supported_release(self):
-        for version in ("0.2.0", "0.3.0", "0.3.1", "0.3.2", "0.3.3", "0.4.0", "0.5.0", "0.6.0", "0.7.0", "0.7.1", "0.8.0", "0.9.0", "0.10.0", "0.11.0", "0.11.1", "0.12.0", "0.13.0"):
+        for version in ("0.2.0", "0.3.0", "0.3.1", "0.3.2", "0.3.3", "0.4.0", "0.5.0", "0.6.0", "0.7.0", "0.7.1", "0.8.0", "0.9.0", "0.10.0", "0.11.0", "0.11.1", "0.12.0", "0.13.0", "0.14.0"):
             with self.subTest(version=version):
                 digest = self.manifest(version)
                 with patch.dict(register.PREVIOUS_MANIFESTS, {digest: version}):
@@ -83,7 +83,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
     def test_release_manifest_pins_match_actual_archives_when_available(self):
         releases = Path(__file__).resolve().parent / "release"
         found = 0
-        for version in ("0.2.0", "0.3.0", "0.3.1", "0.3.2", "0.3.3", "0.4.0", "0.5.0", "0.6.0", "0.7.0", "0.7.1", "0.8.0", "0.12.0", "0.13.0"):
+        for version in ("0.2.0", "0.3.0", "0.3.1", "0.3.2", "0.3.3", "0.4.0", "0.5.0", "0.6.0", "0.7.0", "0.7.1", "0.8.0", "0.12.0", "0.13.0", "0.14.0"):
             path = releases / f"Computer-Use-MCP-{version}.zip"
             if not path.is_file():
                 continue

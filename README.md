@@ -1,21 +1,23 @@
-# Computer Use MCP 0.14.0
+# Computer Use MCP 0.14.1
+
+0.14.1은 프로세스 편집창의 최대화 창 캡처와 요소 선택 진단을 수정합니다. [변경 내용](CHANGES_0.14.1.html) · [사용 안내](PROCESS_GUIDE.html)
 
 Claude Code 등 MCP를 지원하는 클라이언트에서 **이 PC의 프로그램 화면을 읽고 조작하는 Windows용 도구**입니다. Chrome, 메모장, 설치된 Excel뿐 아니라 사용자가 실행파일을 지정한 다른 프로그램도 등록할 수 있습니다. 실제 화면을 확인해 클릭·입력하고, 요청한 결과까지 확인하는 것을 목표로 합니다.
 
-## 0.14.0 다운로드
+## 0.14.1 다운로드
 
-이 안내는 **0.14.0 배포본** 기준입니다. 아래 ZIP으로 기존 MCP 연결을 갱신하세요. 메인 앱을 바꾸는 업데이트가 아니라 Computer Use MCP 업데이트입니다. 이전 버전과 같이 시험용(Pre-release)으로 제공하며 운영 환경의 모든 프로그램 호환성을 보장하지 않습니다.
+이 안내는 **0.14.1 배포본** 기준입니다. 아래 ZIP으로 기존 MCP 연결을 갱신하세요. 메인 앱을 바꾸는 업데이트가 아니라 Computer Use MCP 업데이트입니다. 이전 버전과 같이 시험용(Pre-release)으로 제공하며 운영 환경의 모든 프로그램 호환성을 보장하지 않습니다.
 
 | 파일 | 용도 |
 | --- | --- |
-| [Computer-Use-MCP-0.14.0-with-driver.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.14.0/Computer-Use-MCP-0.14.0-with-driver.zip) | MCP·Python·Cua Driver 0.28.2를 함께 제공하는 권장 묶음 |
-| [Computer-Use-MCP-0.14.0.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.14.0/Computer-Use-MCP-0.14.0.zip) | Driver를 별도로 준비하는 묶음 |
-| [Computer-Use-MCP-0.14.0-source.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.14.0/Computer-Use-MCP-0.14.0-source.zip) | 개발·코드 확인용 원본 소스 |
-| [cua-driver.exe](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.14.0/cua-driver.exe) | Driver 실행파일만 받기. 전체 구성 준비에는 포함 ZIP 사용 |
+| [Computer-Use-MCP-0.14.1-with-driver.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.14.1/Computer-Use-MCP-0.14.1-with-driver.zip) | MCP·Python·Cua Driver 0.28.2를 함께 제공하는 권장 묶음 |
+| [Computer-Use-MCP-0.14.1.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.14.1/Computer-Use-MCP-0.14.1.zip) | Driver를 별도로 준비하는 묶음 |
+| [Computer-Use-MCP-0.14.1-source.zip](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.14.1/Computer-Use-MCP-0.14.1-source.zip) | 개발·코드 확인용 원본 소스 |
+| [cua-driver.exe](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.14.1/cua-driver.exe) | Driver 실행파일만 받기. 전체 구성 준비에는 포함 ZIP 사용 |
 
-연결한 채팅 앱에서 MCP를 다시 연결한 뒤 **`computer_status`의 `version`이 `0.14.0`인지** 확인하세요. 이전 MCP 프로세스가 계속 연결되어 있으면 새 파일만 받아도 기능이 바뀌지 않습니다.
+연결한 채팅 앱에서 MCP를 다시 연결한 뒤 **`computer_status`의 `version`이 `0.14.1`인지** 확인하세요. 이전 MCP 프로세스가 계속 연결되어 있으면 새 파일만 받아도 기능이 바뀌지 않습니다.
 
-[0.14.0 릴리스](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.14.0) · [SHA256SUMS.txt](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.14.0/SHA256SUMS.txt) · [이전 0.13.0](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.13.0)
+[0.14.0 릴리스](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.14.1) · [SHA256SUMS.txt](https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.14.1/SHA256SUMS.txt) · [이전 0.13.0](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.13.0)
 
 GitHub의 **Code → Download ZIP**은 소스 다운로드입니다. 설정 실행파일과 동봉 Python이 필요한 일반 사용자는 위의 배포 ZIP을 받으세요. 지원 대상은 Windows x86_64이며, 사용할 프로그램과 Claude Code 등 MCP 클라이언트는 이 PC에 설치되어 있어야 합니다.
 

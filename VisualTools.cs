@@ -24,6 +24,11 @@ internal static class VisualTools
     [DllImport("user32.dll")] internal static extern bool IsWindow(IntPtr hwnd);
     [DllImport("user32.dll")] internal static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll")] internal static extern bool IsIconic(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern bool IsZoomed(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hwnd, int command);
+    [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern int GetSystemMetricsForDpi(int index, uint dpi);
+    [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll")] internal static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] internal static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
     [DllImport("user32.dll")] internal static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
@@ -125,14 +130,58 @@ internal static class VisualTools
             return Owner == null || (Owner.Valid() && RelatedTo(Hwnd, Owner.Hwnd, Pid));
         } catch { return false; } }
         internal Rectangle Bounds() { RECT r; if (!Valid() || !GetWindowRect(Hwnd, out r)) throw new InvalidOperationException("target_unavailable"); return Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom); }
-        internal bool Foreground() {
-            if (!Valid() || !IsWindowVisible(Hwnd) || IsIconic(Hwnd)) return false;
-            IntPtr foreground = GetForegroundWindow(); if (foreground != Hwnd && (Owner == null || (foreground != Owner.Hwnd && !RelatedTo(Hwnd, foreground, Pid)))) return false;
-            int cloaked; if (DwmGetWindowAttribute(Hwnd, 14, out cloaked, 4) == 0 && cloaked != 0) return false;
-            Rectangle r = Bounds(); return r.Width >= 8 && r.Height >= 8 && r.Width <= 4096 && r.Height <= 4096 && SystemInformation.VirtualScreen.Contains(r);
+        internal Rectangle CaptureBounds() {
+            Rectangle raw = Bounds(); RECT visible; Rectangle? frame = null;
+            if (DwmGetWindowRectangle(Hwnd, 9, out visible, Marshal.SizeOf(typeof(RECT))) == 0 && visible.Right > visible.Left && visible.Bottom > visible.Top)
+                frame = Rectangle.FromLTRB(visible.Left, visible.Top, visible.Right, visible.Bottom);
+            var monitors = new List<Rectangle>(); foreach (Screen screen in Screen.AllScreens) monitors.Add(screen.Bounds);
+            int border;
+            try { uint dpi = GetDpiForWindow(Hwnd); if (dpi == 0) dpi = 96; border = Math.Max(GetSystemMetricsForDpi(32, dpi), GetSystemMetricsForDpi(33, dpi)) + GetSystemMetricsForDpi(92, dpi); }
+            catch (EntryPointNotFoundException) { border = Math.Max(GetSystemMetrics(32), GetSystemMetrics(33)) + GetSystemMetrics(92); }
+            return ResolveCaptureBounds(raw, frame, IsZoomed(Hwnd), Screen.FromHandle(Hwnd).Bounds, Math.Max(1, border), monitors);
         }
+        internal void EnsureCaptureReady() {
+            if (!Valid()) throw new InvalidOperationException("target_unavailable");
+            if (IsIconic(Hwnd)) throw new InvalidOperationException("target_minimized");
+            if (!IsWindowVisible(Hwnd)) throw new InvalidOperationException("target_hidden");
+            IntPtr foreground = GetForegroundWindow(); if (foreground != Hwnd && (Owner == null || (foreground != Owner.Hwnd && !RelatedTo(Hwnd, foreground, Pid)))) throw new InvalidOperationException("target_requires_foreground");
+            int cloaked; if (DwmGetWindowAttribute(Hwnd, 14, out cloaked, 4) == 0 && cloaked != 0) throw new InvalidOperationException("target_cloaked");
+            CaptureBounds();
+        }
+        internal bool Foreground() { try { EnsureCaptureReady(); return true; } catch { return false; } }
         internal bool Contains(POINT p) { return GetAncestor(WindowFromPoint(p), 2) == Hwnd; }
         internal void Release() { if (OwnLifetime && Lifetime != IntPtr.Zero) { CloseHandle(Lifetime); Lifetime = IntPtr.Zero; Retired = true; } }
+    }
+    // GetWindowRect includes invisible resize borders. In particular a maximized
+    // window can start at (-8,-8) although every visible pixel is on a monitor.
+    // Keep Bounds() for UIA identities; image pixels and their screen origin use
+    // the DWM visible frame instead. Never silently crop ordinary off-screen UI.
+    internal static Rectangle ResolveCaptureBounds(Rectangle raw, Rectangle? visible, bool maximized, Rectangle monitor, int border, List<Rectangle> monitors)
+    {
+        Rectangle bounds = visible.HasValue ? visible.Value : raw;
+        if (!visible.HasValue && maximized && bounds.IntersectsWith(monitor)) {
+            Rectangle clipped = Rectangle.Intersect(bounds, monitor);
+            if (clipped.Left - bounds.Left <= border && clipped.Top - bounds.Top <= border && bounds.Right - clipped.Right <= border && bounds.Bottom - clipped.Bottom <= border)
+                bounds = clipped;
+        }
+        if (bounds.Width < 8 || bounds.Height < 8) throw new InvalidOperationException("target_capture_size_invalid");
+        if (bounds.Width > 4096 || bounds.Height > 4096) throw new InvalidOperationException("target_capture_too_large");
+        // VirtualScreen is a bounding rectangle, not the union of monitors. A
+        // window in a gap between differently arranged displays is not visible.
+        var remaining = new List<Rectangle> { bounds };
+        foreach (Rectangle screen in monitors) {
+            var next = new List<Rectangle>();
+            foreach (Rectangle part in remaining) {
+                Rectangle overlap = Rectangle.Intersect(part, screen);
+                if (overlap.IsEmpty || overlap.Width == 0 || overlap.Height == 0) { next.Add(part); continue; }
+                if (overlap.Top > part.Top) next.Add(Rectangle.FromLTRB(part.Left, part.Top, part.Right, overlap.Top));
+                if (overlap.Bottom < part.Bottom) next.Add(Rectangle.FromLTRB(part.Left, overlap.Bottom, part.Right, part.Bottom));
+                if (overlap.Left > part.Left) next.Add(Rectangle.FromLTRB(part.Left, overlap.Top, overlap.Left, overlap.Bottom));
+                if (overlap.Right < part.Right) next.Add(Rectangle.FromLTRB(overlap.Right, overlap.Top, part.Right, overlap.Bottom));
+            }
+            remaining = next; if (remaining.Count == 0) return bounds;
+        }
+        throw new InvalidOperationException("target_offscreen");
     }
     static string WindowText(IntPtr hwnd) { var text = new StringBuilder(1025); GetWindowText(hwnd, text, text.Capacity); return text.ToString(); }
     static string WindowClass(IntPtr hwnd) { var text = new StringBuilder(257); if (GetClassName(hwnd, text, text.Capacity) == 0) return ""; return text.ToString(); }
@@ -177,11 +226,11 @@ internal static class VisualTools
     static Bitmap Capture(Target target) { return Capture(target, false); }
     static Bitmap Capture(Target target, bool allowOcclusion)
     {
-        if (!target.Foreground()) throw new InvalidOperationException("target_requires_foreground");
-        Rectangle r = target.Bounds(); Bitmap b = new Bitmap(r.Width, r.Height, PixelFormat.Format32bppArgb);
+        target.EnsureCaptureReady();
+        Rectangle r = target.CaptureBounds(); Bitmap b = new Bitmap(r.Width, r.Height, PixelFormat.Format32bppArgb);
         try { if (!allowOcclusion && Covered(r, Occluders(target))) throw new InvalidOperationException("target_occluded");
             using (Graphics g = Graphics.FromImage(b)) g.CopyFromScreen(r.Location, Point.Empty, r.Size, CopyPixelOperation.SourceCopy);
-            if (!target.Foreground() || target.Bounds() != r) throw new InvalidOperationException("target_changed");
+            if (!target.Foreground() || target.CaptureBounds() != r) throw new InvalidOperationException("target_changed");
             if (!allowOcclusion && Covered(r, Occluders(target))) throw new InvalidOperationException("target_occluded"); return b;
         } catch { b.Dispose(); throw; }
     }
@@ -345,6 +394,23 @@ internal static class VisualTools
         }
     }
     static Button Button(string text) { return new Button { Text = text, AutoSize = true, MinimumSize = new Size(110, 38), FlatStyle = FlatStyle.Flat, BackColor = Color.White, ForeColor = Color.FromArgb(30, 55, 90), Margin = new Padding(8) }; }
+    internal static string CaptureMessage(string code) {
+        string message;
+        switch (code) {
+            case "target_unavailable": message = "선택한 창이 닫혔거나 다른 창으로 바뀌었습니다. 취소한 뒤 현재 창을 다시 선택하세요."; break;
+            case "target_minimized": message = "대상 창이 최소화되어 있습니다. 작업 표시줄에서 창을 복원한 뒤 다시 캡처하세요."; break;
+            case "target_hidden": case "target_cloaked": message = "대상 창이 숨겨져 있거나 다른 가상 데스크톱에 있습니다. 현재 바탕화면에 창을 연 뒤 다시 캡처하세요."; break;
+            case "target_requires_foreground": message = "대상 창을 앞으로 가져오지 못했습니다. 작업 표시줄에서 대상 창을 한 번 선택한 뒤 다시 캡처하세요. 계속 실패하면 대상 프로그램과 MCP의 실행 권한을 확인하세요."; break;
+            case "target_offscreen": message = "대상 창의 일부가 모니터 밖이나 모니터 사이 빈 공간에 있습니다. 창을 한 모니터 안으로 옮기거나 최대화한 뒤 다시 캡처하세요."; break;
+            case "target_capture_too_large": message = "대상 창이 캡처 가능한 크기(가로·세로 4096픽셀)를 넘었습니다. 최대화를 해제하고 창 크기를 줄인 뒤 다시 캡처하세요."; break;
+            case "target_capture_size_invalid": message = "대상 창의 크기를 확인하지 못했습니다. 창을 복원하거나 크기를 조절한 뒤 다시 캡처하세요."; break;
+            case "target_occluded": message = "대상 창 위에 다른 창이나 툴팁이 겹쳐 있습니다. 가리는 창을 옮기거나 닫은 뒤 다시 캡처하세요."; break;
+            case "target_changed": message = "캡처하는 동안 창 위치나 화면 상태가 바뀌었습니다. 창이 멈춘 뒤 다시 캡처하세요."; break;
+            case "window_order_unavailable": message = "겹친 창의 순서를 확인하지 못했습니다. 대상 창 위의 다른 창을 정리한 뒤 다시 캡처하세요."; break;
+            default: code = "screen_capture_failed"; message = "화면 이미지를 가져오지 못했습니다. 화면 잠금이나 원격 연결 상태를 확인하세요. 계속되면 이 오류 코드를 전달해 주세요."; break;
+        }
+        return message + "\n[" + code + "]";
+    }
     static void Style(Form form, string title, Size size) { form.Text = title; form.ClientSize = size; form.StartPosition = FormStartPosition.CenterScreen; form.Font = new Font("맑은 고딕", 10); form.BackColor = Color.FromArgb(244, 247, 251); form.ForeColor = Color.FromArgb(25, 45, 75); form.AutoScaleMode = AutoScaleMode.Dpi; }
     abstract class SessionForm : Form
     {
@@ -374,12 +440,13 @@ internal static class VisualTools
     {
         readonly Target target; readonly PictureBox picture = new PictureBox(), preview = new PictureBox(); readonly Label info = new Label();
         readonly Button confirm = Button("이 이미지로 선택"), capture = Button("대상 창을 가져와 캡처"), again = Button("다시 선택");
-        Bitmap frame, crop; Rectangle selection, display; Point start, anchor; bool dragging, anchorChosen; DateTime captureAt;
+        Bitmap frame, crop; Rectangle selection, display; Point start, anchor; bool dragging, anchorChosen; DateTime captureAt, captureDeadline;
         internal Picker(Dictionary<string, object> data, string response) : base(data, response, 180) {
             target = new Target(data); Style(this, "이미지로 요소 선택", new Size(1050, 760)); MinimumSize = new Size(780, 580);
             var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 3, Padding = new Padding(20) };
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 76)); layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 24));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 86)); layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 100));
+            info.Name = info.AccessibleName = "CaptureStatus";
             info.Text = target.Label + "\n화면을 캡처한 다음, 찾을 버튼이나 그림의 테두리를 마우스로 드래그하세요.\n프로그램에는 클릭이나 입력을 보내지 않습니다."; info.Dock = DockStyle.Fill; layout.Controls.Add(info, 0, 0); layout.SetColumnSpan(info, 2);
             picture.Name = picture.AccessibleName = "TargetScreenshot"; picture.Dock = DockStyle.Fill; picture.BackColor = Color.FromArgb(226, 233, 242); picture.Paint += Draw; picture.MouseDown += Begin; picture.MouseMove += DragSelection; picture.MouseUp += End; layout.Controls.Add(picture, 0, 1);
             preview.Name = preview.AccessibleName = "TargetPreview"; preview.Dock = DockStyle.Fill; preview.SizeMode = PictureBoxSizeMode.Zoom; preview.BackColor = Color.White; layout.Controls.Add(preview, 1, 1);
@@ -398,12 +465,35 @@ internal static class VisualTools
             };
             var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true }; buttons.Controls.Add(capture); buttons.Controls.Add(again); buttons.Controls.Add(confirm); Button cancel = Button("취소"); buttons.Controls.Add(cancel); layout.Controls.Add(buttons, 0, 2); layout.SetColumnSpan(buttons, 2); Controls.Add(layout);
             confirm.Enabled = false; again.Enabled = false;
-            capture.Click += delegate { Hide(); SetForegroundWindow(target.Hwnd); captureAt = DateTime.UtcNow.AddMilliseconds(350); };
-            Clock.Tick += delegate { if (captureAt != DateTime.MinValue && DateTime.UtcNow >= captureAt) { captureAt = DateTime.MinValue; try { if (frame != null) { frame.Dispose(); frame = null; } frame = Capture(target); selection = Rectangle.Empty; anchorChosen = false; preview.Image = null; if (crop != null) { crop.Dispose(); crop = null; } confirm.Enabled = false; info.Text = "찾을 부분을 드래그한 뒤 오른쪽 미리보기에서 실제 클릭할 위치를 지정하세요.\n같은 버튼이 여러 개면 주변 이름까지 포함하면 구별하기 쉽습니다."; } catch (Exception e) { info.Text = e.Message == "target_occluded" ? "대상 창을 가리는 다른 창이나 툴팁을 옆으로 옮긴 뒤 다시 캡처하세요." : "대상 창을 화면 안에 보이게 한 뒤 다시 캡처하세요."; } Show(); Activate(); picture.Invalidate(); } };
+            capture.Click += delegate {
+                // Retire both the screenshot and its confirmation before trying
+                // again. A failed capture must never leave an old crop saveable.
+                ClearCapture();
+                if (!target.Valid()) { info.Text = CaptureMessage("target_unavailable"); return; }
+                capture.Enabled = false; Hide();
+                if (IsIconic(target.Hwnd)) ShowWindow(target.Hwnd, 9);
+                SetForegroundWindow(target.Hwnd);
+                captureAt = DateTime.UtcNow.AddMilliseconds(200); captureDeadline = DateTime.UtcNow.AddSeconds(2);
+            };
+            Clock.Tick += delegate {
+                if (Done || IsDisposed) { captureAt = DateTime.MinValue; return; }
+                if (captureAt == DateTime.MinValue || DateTime.UtcNow < captureAt) return;
+                try {
+                    frame = Capture(target);
+                    info.Text = "찾을 부분을 드래그한 뒤 오른쪽 미리보기에서 실제 클릭할 위치를 지정하세요.\n같은 버튼이 여러 개면 주변 이름까지 포함하면 구별하기 쉽습니다.";
+                } catch (Exception e) {
+                    // Only re-observe while Windows finishes restore/activation.
+                    // The activation request is issued once; no application input.
+                    bool settling = e.Message == "target_requires_foreground" || e.Message == "target_minimized" || e.Message == "target_changed" || e.Message == "target_occluded";
+                    if (settling && DateTime.UtcNow < captureDeadline) { captureAt = DateTime.UtcNow.AddMilliseconds(80); return; }
+                    info.Text = CaptureMessage(e.Message);
+                }
+                captureAt = DateTime.MinValue; capture.Enabled = true; Show(); Activate(); picture.Invalidate();
+            };
             again.Click += delegate { selection = Rectangle.Empty; confirm.Enabled = false; preview.Image = null; picture.Invalidate(); };
             cancel.Click += delegate { Finish("cancelled", null); };
             confirm.Click += delegate {
-                try { if (!target.Valid() || target.Bounds().Size != frame.Size) throw new InvalidOperationException("target_changed");
+                try { if (frame == null || !target.Valid() || target.CaptureBounds().Size != frame.Size) throw new InvalidOperationException("target_changed");
                     if (!anchorChosen) throw new InvalidOperationException("anchor_required");
                     var result = Template(frame, selection, anchor);
                     result["human_confirmed"] = true; result["pid"] = target.Pid; result["window_id"] = target.Hwnd.ToInt64();
@@ -412,6 +502,11 @@ internal static class VisualTools
                 } catch (Exception e) { info.Text = e.Message == "template_low_detail" ? "구별할 수 있는 글자나 아이콘을 조금 더 포함해 선택하세요." : e.Message == "selection_too_thin" ? "영역이 너무 가늘게 선택되었습니다. 위아래 또는 좌우 여백을 조금 더 포함해 주세요." : "선택한 크기 또는 창 상태가 바뀌었습니다. 다시 캡처해 주세요."; }
             };
             FormClosed += delegate { if (frame != null) frame.Dispose(); if (crop != null) crop.Dispose(); target.Release(); };
+        }
+        void ClearCapture() {
+            preview.Image = null; if (crop != null) { crop.Dispose(); crop = null; } if (frame != null) { frame.Dispose(); frame = null; }
+            selection = display = Rectangle.Empty; dragging = anchorChosen = false; picture.Capture = false;
+            confirm.Enabled = again.Enabled = false; picture.Invalidate(); preview.Invalidate();
         }
         Point ImagePoint(Point p) { return new Point(Math.Max(0, Math.Min(frame.Width, (p.X - display.X) * frame.Width / Math.Max(1, display.Width))), Math.Max(0, Math.Min(frame.Height, (p.Y - display.Y) * frame.Height / Math.Max(1, display.Height)))); }
         void Draw(object sender, PaintEventArgs e) {
@@ -555,7 +650,7 @@ internal static class VisualTools
                 var bounds = Map(hovered.Native, "bounds");
                 if (bounds != null && new Rectangle((int)Real(bounds, "x", 0), (int)Real(bounds, "y", 0), (int)Real(bounds, "width", 0), (int)Real(bounds, "height", 0)).Contains(point.X, point.Y)) item.Semantic = hovered;
             }
-            if (frame == null || frameTarget != target || DateTime.UtcNow.Subtract(frameAt).TotalMilliseconds > 250 || frameBounds != target.Bounds() || !target.Contains(point)) { item.Operation = "manual_entry"; item.Reason = "image_capture_required"; return item; }
+            if (frame == null || frameTarget != target || DateTime.UtcNow.Subtract(frameAt).TotalMilliseconds > 250 || frameBounds != target.CaptureBounds() || !target.Contains(point)) { item.Operation = "manual_entry"; item.Reason = "image_capture_required"; return item; }
             int x = point.X - frameBounds.X, y = point.Y - frameBounds.Y, w = Math.Min(160, frame.Width), h = Math.Min(96, frame.Height);
             Rectangle r = new Rectangle(Math.Max(0, Math.Min(frame.Width - w, x - w / 2)), Math.Max(0, Math.Min(frame.Height - h, y - h / 2)), w, h);
             Rectangle desktopRegion = new Rectangle(frameBounds.X + r.X, frameBounds.Y + r.Y, r.Width, r.Height);
@@ -751,7 +846,7 @@ internal static class VisualTools
             if (current == null) { if (GetForegroundWindow() != Handle) Warn("outside_target_not_recorded"); if (!outside) { outside = true; recordState = "outside_target"; info.Text = "연결 범위 밖이라 기록 일시정지\n원래 프로그램이나 관련 팝업으로 돌아오면 계속합니다.\n다른 프로그램·관련 없는 창은 기록되지 않습니다."; Heartbeat(true); } if (frame != null) { frame.Dispose(); frame = null; } }
             else {
                 if (outside) { outside = false; recordState = "recording"; info.Text = ActiveText(); Heartbeat(true); }
-                try { List<Rectangle> occluders = Occluders(current); Bitmap next = Capture(current, true); occluders.AddRange(Occluders(current)); if (frame != null) frame.Dispose(); frame = next; frameBounds = current.Bounds(); frameTarget = current; frameOccluders = occluders; frameAt = DateTime.UtcNow; } catch { if (frame != null) { frame.Dispose(); frame = null; } }
+                try { List<Rectangle> occluders = Occluders(current); Rectangle capturedBounds = current.CaptureBounds(); Bitmap next = Capture(current, true); occluders.AddRange(Occluders(current)); if (current.CaptureBounds() != capturedBounds) { next.Dispose(); throw new InvalidOperationException("target_changed"); } if (frame != null) frame.Dispose(); frame = next; frameBounds = capturedBounds; frameTarget = current; frameOccluders = occluders; frameAt = DateTime.UtcNow; } catch { if (frame != null) { frame.Dispose(); frame = null; } }
             }
             lock (stateLock) {
                 if (workerCompleted) {

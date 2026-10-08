@@ -1,7 +1,7 @@
 <!-- Image recognition and recording are explicit local workflow capabilities, not authorization for unrelated apps. -->
-# Claude에게 화면 작업 기능 연결 부탁하기 — 0.13.0
+# Claude에게 화면 작업 기능 연결 부탁하기 — 0.14.1
 
-이 문서는 [0.13.0 배포본](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.13.0) 기준입니다. 배포 ZIP을 새 폴더에 압축 풀고 기존 설정을 유지한 채 MCP 연결을 갱신합니다. 메인 앱은 이번 변경 대상이 아닙니다. 다시 연결한 `computer_status.version`이 `0.13.0`인지 확인합니다. 파일만 교체하고 이전 MCP 프로세스를 계속 사용하면 새 기능이 적용되지 않습니다.
+이 문서는 [0.14.1 배포본](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.14.1) 기준입니다. 배포 ZIP을 새 폴더에 압축 풀고 기존 설정을 유지한 채 MCP 연결을 갱신합니다. 메인 앱은 이번 변경 대상이 아닙니다. 다시 연결한 `computer_status.version`이 `0.14.1`인지 확인합니다. 파일만 교체하고 이전 MCP 프로세스를 계속 사용하면 새 기능이 적용되지 않습니다.
 
 ## 0.13.0: 클라이언트가 사용할 기본 실행 순서
 
@@ -31,12 +31,12 @@ Excel·COM·매크로는 실행하지 않습니다. CSV/XLSX의 저장된 문자
 - `saved`와 `saved_task.id`가 반환되어야 저장 완료입니다. 저장은 실행이 아니며, 이후 `computer_run_task`를 사용합니다. `task_id`로 편집 창을 열면 새 복사본으로 저장합니다.
 - `checkpoint`는 현재 연결 창의 이미지를 반환하고 멈춥니다. 사용자의 확인 없이 승인하지 않습니다. 확인 후 같은 `resume_run_id`와 `acknowledge_checkpoint=checkpoint.id`로 이어갑니다. 세션/창이 바뀌었으면 승인 없이 다시 관찰합니다. 화면 캡처 자체를 완료 검증으로 보고하지 않습니다.
 - `picker_controls_not_exposed`는 앱이 버튼 정보를 UIA에 제공하지 않는 경우입니다. F8 반복, 부모 컨테이너를 버튼으로 저장, 성공했다고 보고하는 일을 하지 않습니다. 프로세스 편집 창에서는 이미지 영역과 클릭 위치를 직접 지정해 저장할 수 있습니다. 단독 `computer_teach_element`의 UIA 요소 보관함과 프로세스의 이미지 대상을 구분합니다.
-- 자세한 사용자 안내는 `PROCESS_GUIDE.html`입니다. 연결 갱신 후 `computer_status.version: 0.14.0`과 `computer_process_editor` 제공 여부를 확인합니다.
+- 자세한 사용자 안내는 `PROCESS_GUIDE.html`입니다. 연결 갱신 후 `computer_status.version: 0.14.1`과 `computer_process_editor` 제공 여부를 확인합니다.
 
 
 ## 선택 창이 안 보일 때 먼저 확인할 것
 
-- `computer_status.version`이 0.14.0인지, `teaching_support.identity.app_directory`가 새 압축 해제 폴더인지 확인합니다. 기존 연결이나 캐시된 도구 목록이면 새 폴더로 연결을 갱신하고 클라이언트를 다시 연결합니다. 다른 MCP 설정은 유지합니다.
+- `computer_status.version`이 0.14.1인지, `teaching_support.identity.app_directory`가 새 압축 해제 폴더인지 확인합니다. 기존 연결이나 캐시된 도구 목록이면 새 폴더로 연결을 갱신하고 클라이언트를 다시 연결합니다. 다른 MCP 설정은 유지합니다.
 - `teaching_support`는 파일 존재만 읽습니다. `readiness: not_tested`는 실행 오류가 아니며 실제 창 표시를 검사하지 않았다는 뜻입니다.
 - `direct_picker.supported: true`는 UIA 직접 선택 기능이 있다는 뜻입니다. 파일 누락·권한·표시 실패를 UIA 미지원으로 바꾸어 설명하지 않습니다.
 - 학습 실패 시 `server_version`, `diagnostic.code`, `diagnostic.stage`, `diagnostic.native`와 `recovery`를 전달합니다. 시작 실패에 F8을 요구하지 않습니다. 명시적 선택 정보 부재에만 프로세스 이미지 선택을 안내하고, 취소·권한·대상 불일치를 이미지 방식으로 우회하지 않습니다.
@@ -62,7 +62,7 @@ Excel·COM·매크로는 실행하지 않습니다. CSV/XLSX의 저장된 문자
 
 0.7.0 배포본은 **MCP와 Cua Driver를 관리자 권한으로 실행하는 연결 프로그램**을 사용합니다. Claude Code 전체를 관리자 권한으로 열 필요는 없습니다. 연결 시작 때 Windows UAC 창이 나타나면 같은 로그인 사용자의 관리자 권한으로 허용합니다. 승인 취소·회사 정책 차단·다른 관리자 계정 사용 시에는 일반 권한으로 대신 실행하지 않습니다. Windows 보안 설정·UAC 정책은 변경하지 않습니다.
 
-갱신 후 연결을 다시 열고 `computer_status.version: 0.14.0`과 `computer_teach_status` 제공 여부를 확인합니다. 기존 0.6.0·0.7.0·0.7.1·0.8.0·0.9.0·0.10.0 연결을 갱신할 때는 실제 등록 범위와 설정 경로를 먼저 확인합니다. 새 배포 폴더의 `runtime/python.exe`로 `register.py upgrade --config <기존 설정 경로> --scope user` 또는 `--scope local --project <기존 프로젝트 전체 경로>`를 실행합니다. 검증한 이전 배포본만 갱신하며 다른 MCP·모델·로그인은 유지합니다. 갱신한 연결의 command는 새 폴더의 `Computer Use MCP 관리자 연결.exe`, args는 `--config`와 기존 설정 경로입니다. 연결을 다시 연 뒤 `computer_status.execution.administrator: true`, `integrity: high`를 확인해야 합니다. 관리자 프로그램을 조작할 수 있다는 결론은 실제 작은 작업을 확인한 뒤 내립니다.
+갱신 후 연결을 다시 열고 `computer_status.version: 0.14.1`과 `computer_teach_status` 제공 여부를 확인합니다. 기존 0.6.0·0.7.0·0.7.1·0.8.0·0.9.0·0.10.0 연결을 갱신할 때는 실제 등록 범위와 설정 경로를 먼저 확인합니다. 새 배포 폴더의 `runtime/python.exe`로 `register.py upgrade --config <기존 설정 경로> --scope user` 또는 `--scope local --project <기존 프로젝트 전체 경로>`를 실행합니다. 검증한 이전 배포본만 갱신하며 다른 MCP·모델·로그인은 유지합니다. 갱신한 연결의 command는 새 폴더의 `Computer Use MCP 관리자 연결.exe`, args는 `--config`와 기존 설정 경로입니다. 연결을 다시 연 뒤 `computer_status.execution.administrator: true`, `integrity: high`를 확인해야 합니다. 관리자 프로그램을 조작할 수 있다는 결론은 실제 작은 작업을 확인한 뒤 내립니다.
 
 배포 ZIP을 모두 압축 풀고 이 파일을 Claude Code에 첨부한 뒤 다음처럼 요청하세요. 아래의 Chrome은 처음 연결하는 예제이며, Chrome 전용 기능이라는 뜻은 아닙니다.
 
@@ -376,3 +376,11 @@ Bash에서는 앞의 `&`를 빼고, 공백이 있는 실행파일·스크립트�
 - 이미지 클릭·입력의 자동 완료 조건은 사용자가 확인한 결과 요소에 지정합니다. 최소 하나는 전후 변화가 필요합니다. 원래 프로세스·창 식별을 유지하며 불확실한 입력은 다시 보내지 않습니다. 재개는 기록된 실행의 현재 결과를 읽기만 합니다. 기본 수동 체크포인트는 임의 승인하지 않습니다.
 - 녹화는 같은 원래 프로세스의 소유 관계가 확인된 팝업만 포함합니다. 초안에 `wait_for_window`와 이름 있는 `window_ref`를 저장하고, 창 번호나 PID를 작업 정의에 고정하지 않습니다. 다른 프로세스·무관한 창·여러 후보는 자동 포함하지 않습니다. 한 녹화의 동작은 최대 12개이며 확인·팝업 대기를 포함한 프로세스는 최대 30단계입니다.
 - 기존 0.13.0 연결도 검증된 배포 파일 목록·해시를 확인한 후 설정·저장 작업을 유지하여 갱신합니다. 갱신 후 MCP를 다시 연결하고 버전이 0.14.0인지 확인합니다.
+
+## 0.14.1 요소 선택·캡처 수정
+
+- `computer_status.version`이 `0.14.1`인지 확인하고, 기존 편집창을 닫은 뒤 새로 엽니다. 기존 설정·저장한 작업과 학습 요소를 유지합니다.
+- native UIA에서 Button으로 표시되어도 Driver가 동일 조작 대상을 제공하지 않을 수 있습니다. 이미지 전환을 “버튼 정보를 전혀 못 읽음” 또는 “UIA가 picker를 지원하지 않음”으로 설명하지 마세요.
+- `computer_process_status.last_recognition`은 이미지 전환 사유를 보존합니다. 실패·취소 후에도 이 진단을 먼저 확인하고 같은 선택을 반복 요청하지 않습니다.
+- 이미지 캡처는 DWM 가시 영역을 사용합니다. 사용자가 누른 캡처 버튼만 해당 창의 복원·활성화를 요청합니다. 오류 안내의 코드와 원인을 그대로 설명합니다.
+- 4096픽셀을 넘는 창, 화면 밖 내용, 가려진 화면은 자동 축소·잘라내기·임의 좌표로 대신 처리하지 않습니다.

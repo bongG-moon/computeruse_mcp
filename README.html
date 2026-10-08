@@ -1,10 +1,11 @@
 <!doctype html>
 <html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Computer Use MCP 0.14.0 — 배우고 빠르게 반복하기</title>
+<title>Computer Use MCP 0.14.1 — 배우고 빠르게 반복하기</title>
 <style>
 *{box-sizing:border-box}body{margin:0;background:#f3f6fa;color:#18304a;font:17px/1.8 'Malgun Gothic',sans-serif}main{max-width:1000px;margin:40px auto;padding:0 24px 60px}header{padding:32px;background:#18375b;color:white;border-radius:16px}h1{font-size:32px;margin:0 0 10px}h2{font-size:23px;margin:0 0 16px}h3{font-size:18px}section{background:white;border:1px solid #d6e0eb;border-radius:14px;margin-top:20px;padding:28px}p{margin:12px 0}li{margin:9px 0}code{background:#eef3f9;color:#234c7a;padding:2px 6px;border-radius:4px;overflow-wrap:anywhere}.sample{white-space:pre-wrap;background:#edf4fb;padding:20px;border-left:4px solid #2476b5;border-radius:5px}table{border-collapse:collapse;width:100%;font-size:16px}th,td{text-align:left;vertical-align:top;border:1px solid #d9e2eb;padding:12px}th{background:#edf4fb}.muted{color:#576b80;font-size:15px}a{color:#1269ad}.tag{color:#b8d9f4;font-size:14px}footer{padding:22px;color:#52677e}@media(max-width:650px){main{padding:0 12px;margin-top:18px}header,section{padding:22px}h1{font-size:27px}table{font-size:14px}}
 </style><main>
-<header><div class="tag">WINDOWS · LOCAL MCP · 0.14.0</div><h1>화면 작업 기능 연결하기</h1><p>Claude에게 설치를 부탁하고, 필요한 선택만 답하세요.<br>설정 창을 먼저 열거나 JSON 파일을 직접 편집할 필요가 없습니다.</p></header>
+<header><div class="tag">WINDOWS · LOCAL MCP · 0.14.1</div><h1>화면 작업 기능 연결하기</h1><p>Claude에게 설치를 부탁하고, 필요한 선택만 답하세요.<br>설정 창을 먼저 열거나 JSON 파일을 직접 편집할 필요가 없습니다.</p></header>
+<section id="capture-0141"><h2>0.14.1 — 요소 선택·이미지 캡처 수정</h2><p>최대화된 창의 보이지 않는 테두리를 화면 밖으로 오인하던 문제를 수정했습니다. ‘대상 창을 가져와 캡처’는 최소화된 대상도 복원합니다. 캡처가 실패하면 원인별 안내와 오류 코드를 표시하며 이전 이미지는 비웁니다.</p><p>선택창에서 ‘버튼’으로 보이더라도 자동 조작 목록에 같은 대상이 없으면 이미지 선택으로 이어질 수 있습니다. 이제 그 이유를 구분해 설명합니다. <a href="CHANGES_0.14.1.html">변경 내용과 사용 순서</a></p></section>
 <section id="current-0140"><h2>0.14.0 — 화면을 읽고, 진행 상황을 알려주며 이어서 실행합니다</h2>
 <p>복잡한 화면을 반복해서 전부 읽는 일을 줄이고, 무엇을 기다리는지 확인할 수 있게 했습니다. 새로운 프로그램에도 같은 방식을 사용합니다.</p>
 <table><tr><th>개선</th><th>사용 방법</th></tr>
@@ -41,10 +42,10 @@
 <p>기본 설정은 <code>execution_mode: auto</code>입니다. <strong>“이번에는 일반 방식으로 다시 확인해줘”</strong>라고 요청하면 <code>standard</code>를 사용합니다. 실행 결과의 <code>execution.mode</code>에서 실제 경로를 확인할 수 있습니다. 이미지 동작에 자동 완료 확인을 지정하면 새 결과를 확인한 뒤 진행합니다. 직접 화면 확인 단계는 빠른 반복에서도 유지합니다.</p>
 <p>프로그램의 서버 조회 시간과 저장해 둔 고정 대기는 남습니다. 불필요한 고정 대기는 <strong>완료 조건이 될 때까지 대기</strong>로 바꾸세요. 준비되면 즉시 진행하고, 제한 시간 안에 준비되지 않으면 멈춥니다.</p>
 <p><a href="PROCESS_GUIDE.html"><strong>초보자용 학습·녹화·반복 실행 안내</strong></a> · <a href="VALIDATION.html">현재 검증 범위와 한계</a></p></section>
-<section id="delivery-0120"><h2>0.14.0 배포본 다운로드</h2>
-<p><a href="https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.14.0/Computer-Use-MCP-0.14.0-with-driver.zip"><strong>Driver 포함 ZIP 받기</strong></a> · <a href="https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.14.0/Computer-Use-MCP-0.14.0.zip">Driver 별도 ZIP 받기</a> · <a href="https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.14.0">릴리스 파일 전체</a></p><p>새 ZIP을 새 폴더에 모두 압축 풀고 기존 설정을 유지한 채 연결을 갱신하세요. 이전 버전과 같이 시험용(Pre-release) 배포입니다.</p>
+<section id="delivery-0120"><h2>0.14.1 배포본 다운로드</h2>
+<p><a href="https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.14.1/Computer-Use-MCP-0.14.1-with-driver.zip"><strong>Driver 포함 ZIP 받기</strong></a> · <a href="https://github.com/bongG-moon/computeruse_mcp/releases/download/v0.14.1/Computer-Use-MCP-0.14.1.zip">Driver 별도 ZIP 받기</a> · <a href="https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.14.1">릴리스 파일 전체</a></p><p>새 ZIP을 새 폴더에 모두 압축 풀고 기존 설정을 유지한 채 연결을 갱신하세요. 이전 버전과 같이 시험용(Pre-release) 배포입니다.</p>
 <div class="sample">기존 Driver·등록한 프로그램·저장한 작업과 학습 요소를 유지하고 이 버전으로 연결을 갱신해줘.
-MCP를 다시 연결한 뒤 computer_status의 version이 0.14.0인지 확인해줘.</div>
+MCP를 다시 연결한 뒤 computer_status의 version이 0.14.1인지 확인해줘.</div>
 <p>메인 앱은 이번 변경 대상이 아닙니다. 이전 프로세스가 연결되어 있으면 새 파일을 받아도 기능이 바뀌지 않습니다. <a href="https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.11.1">이전 공개 버전 0.11.1</a>에는 이번 빠른 반복과 결과 파일 검증 기능이 없습니다.</p></section>
 <section id="recording-0120"><h2>녹화한 동작과 누락된 동작을 구분합니다</h2>
 <p>마우스를 올려 본 기록은 실제 클릭·선택값을 기록한 것이 아닙니다. 연속 작업은 프로세스 편집 창에서 <strong>동작 녹화 → 기록 시작 → 기록 마치고 검토</strong>로 만드세요. 녹화 상태와 동작 수를 확인할 수 있습니다.</p>
@@ -162,7 +163,7 @@ Claude Code 자체의 승인 설정과 다른 MCP 설정도 바꾸지 마.</div>
 <section><h2>설정을 바꾼 뒤 반영됐는지 확인하기</h2><div class="sample">현재 연결에서 쓰는 설정과 저장된 설정이 같은지 확인해줘.
 다시 연결해야 한다면 이유와 다음 한 단계만 알려줘.
 설정이나 허용 프로그램은 자동으로 바꾸지 마.</div><p><code>computer_status</code>는 실행 중인 설정과 저장 파일을 비교해 <code>configuration.restart_required</code>로 재연결 필요 여부를 알려줍니다. 변경됐다면 현재 작업을 끝내고 연결을 다시 여세요. 파일이 없거나 잘못됐거나 읽을 수 없는 상태라면 <strong>먼저 원래 설정을 복구·확인</strong>한 뒤 다시 연결합니다.</p><p>설정값을 자동 적용하거나 권한을 넓히지 않습니다. 비교에는 내용 자체 대신 변경 확인용 해시를 사용합니다. 실행 중인 버전과 배포 폴더의 버전이 다른 경우에도 다시 연결하라는 안내를 제공합니다.</p></section>
-<section><h2>기존 버전에서 새 버전으로 바꾸기</h2><ol><li>새 배포 ZIP을 별도 폴더에 모두 압축 풉니다.</li><li><strong>INSTALL.md</strong>를 채팅에 첨부하고 아래처럼 요청합니다.</li><li>갱신이 끝나면 MCP를 다시 연결하고 <code>computer_status.version</code>이 <strong>0.14.0</strong>인지 확인합니다.</li></ol><div class="sample">기존 Driver·등록한 프로그램·저장한 작업과 학습 요소를 유지하고 이 버전으로 연결을 갱신해줘.</div><p>현재 사용자 전체(<code>user</code>)와 작업 폴더 한정(<code>local</code>) 모두 원래 범위와 설정 경로를 유지해 갱신합니다. 0.13.0을 포함해 파일 목록·해시와 등록 내용을 검증한 이전 배포본을 지원하며, 버전 이름만으로 허용하지 않습니다. 일반 갱신을 위해 연결을 먼저 해제하거나 설정을 초기화할 필요는 없습니다.</p><p>이전 연결의 출처를 검증하지 못하면 원인을 안내하고 중단합니다. 기존 모델·로그인·다른 MCP 설정은 유지합니다. 파일 확인은 전자서명이나 보안 승인을 대신하지 않습니다.</p></section>
+<section><h2>기존 버전에서 새 버전으로 바꾸기</h2><ol><li>새 배포 ZIP을 별도 폴더에 모두 압축 풉니다.</li><li><strong>INSTALL.md</strong>를 채팅에 첨부하고 아래처럼 요청합니다.</li><li>갱신이 끝나면 MCP를 다시 연결하고 <code>computer_status.version</code>이 <strong>0.14.1</strong>인지 확인합니다.</li></ol><div class="sample">기존 Driver·등록한 프로그램·저장한 작업과 학습 요소를 유지하고 이 버전으로 연결을 갱신해줘.</div><p>현재 사용자 전체(<code>user</code>)와 작업 폴더 한정(<code>local</code>) 모두 원래 범위와 설정 경로를 유지해 갱신합니다. 0.13.0을 포함해 파일 목록·해시와 등록 내용을 검증한 이전 배포본을 지원하며, 버전 이름만으로 허용하지 않습니다. 일반 갱신을 위해 연결을 먼저 해제하거나 설정을 초기화할 필요는 없습니다.</p><p>이전 연결의 출처를 검증하지 못하면 원인을 안내하고 중단합니다. 기존 모델·로그인·다른 MCP 설정은 유지합니다. 파일 확인은 전자서명이나 보안 승인을 대신하지 않습니다.</p></section>
 <section><h2>다른 MCP 클라이언트에서 쓰기</h2><p><strong>1 연결 준비 → 다른 MCP용 연결 파일</strong>을 누르면 별도 JSON 파일을 만들고 위치를 알려줍니다. 해당 프로그램의 로컬 MCP 연결 안내에 따라 파일 내용을 등록하면 됩니다. HTTP 주소를 넣는 서버 방식은 제공하지 않습니다.</p><p>Claude Code를 사용하는 분은 연결 버튼만 사용하면 됩니다. 이 MCP 자체는 별도의 LLM을 호출하거나 모델을 다시 실행하지 않습니다.</p></section>
 <section><h2>막히면 무엇을 부탁하면 되나요?</h2><div class="sample">같은 동작을 반복하지 말고 현재 상태부터 확인해줘.
 대상 프로그램과 창 제목, 마지막 요청, 입력 전달 여부, 결과 확인 여부를 구분해서 알려줘.

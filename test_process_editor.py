@@ -685,6 +685,51 @@ class EditorIPCTests(unittest.TestCase):
         self.assertNotIn("thumbnail_png", json.dumps(self.status(job)))
         self.status(job, cancel=True); self.terminal(job)
 
+    def test_native_button_missing_from_driver_explains_distinction_and_keeps_diagnostic(self):
+        self.context(); job = self.start()
+        native = native_choice()
+        native["element"].update(role="Button", automation_id="RunButton", name="private button caption")
+        with mock.patch("process_editor._run_helper", return_value=native), \
+                mock.patch.object(self.editors, "_visual", return_value=image_choice()) as visual:
+            answer = self.command("pick_element", {"program_id": "editor", **TARGET, "purpose": "action"})
+        self.assertEqual(answer["status"], "ok")
+        self.assertEqual(answer["recognition_diagnostic"]["reason"], "role_not_projected")
+        self.assertEqual(answer["recognition_diagnostic"]["role_candidates"], 0)
+        label = visual.call_args.args[2]["label"]
+        self.assertIn("요소 유형을 인식했지만", label)
+        self.assertNotIn("버튼 정보가 없어", label)
+        self.assertEqual(visual.call_count, 1)
+        state = self.status(job)
+        self.assertEqual(state["last_recognition"]["reason"], "role_not_projected")
+        self.assertNotIn("private button caption", json.dumps(state))
+        self.assertNotIn("RunButton", json.dumps(state))
+        self.assertEqual(self.runtime.mutations, [])
+        self.assertEqual([name for name, _ in self.runtime.calls], ["get_window_state"])
+        self.status(job, cancel=True); self.terminal(job)
+
+    def test_image_capture_failure_retains_matching_reason_and_success_clears_it(self):
+        self.context(); job = self.start()
+        failure = OperationError("not found", "picker_not_found")
+        failure.picker_diagnostic = {"reason": "geometry_mismatch", "geometry_rejected": 1,
+                                     "point": {"x": 123, "y": 456}, "name": "private"}
+        with mock.patch("process_editor._run_helper", side_effect=failure), \
+                mock.patch.object(self.editors, "_visual", side_effect=OperationError("capture cancelled", "visual_cancelled")):
+            answer = self.command("pick_element", {"program_id": "editor", **TARGET, "purpose": "action"})
+        self.assertEqual(answer["status"], "error")
+        self.assertEqual(answer["code"], "visual_cancelled")
+        info = self.status(job)["last_recognition"]
+        self.assertEqual(info["reason"], "geometry_mismatch")
+        self.assertEqual(info["geometry_rejected"], 1)
+        self.assertNotIn("point", info); self.assertNotIn("name", info)
+        with mock.patch("process_editor._run_helper", return_value=native_choice()), \
+                mock.patch.object(self.editors, "_visual") as visual:
+            answer = self.command("pick_element", {"program_id": "editor", **TARGET, "purpose": "action"})
+        self.assertEqual(answer["selection"]["recognition"], "uia")
+        self.assertNotIn("last_recognition", self.status(job))
+        visual.assert_not_called()
+        self.assertEqual(self.runtime.mutations, [])
+        self.status(job, cancel=True); self.terminal(job)
+
     def test_recording_is_reviewable_not_saved_and_unknown_input_blocks_save(self):
         self.context(); job = self.start()
         event = {**image_choice(), "operation": "manual_entry", "program_id": "editor"}

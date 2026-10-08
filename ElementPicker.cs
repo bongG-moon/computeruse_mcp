@@ -375,7 +375,7 @@ internal static class ElementPicker
             var candidate = choices.SelectedItem as Candidate; save.Enabled = reviewing && candidate != null;
             if (candidate == null) return;
             string role = Convert.ToString(candidate.Identity["role"]);
-            detail.Text = "선택 유형: " + RoleName(role) + " (" + role + ")\n확인 후 MCP가 식별 가능한지 검사하고 기억합니다.";
+            detail.Text = "선택 유형: " + RoleName(role) + " (" + role + ")\n유형 인식 완료. 실제 조작 가능 여부는 선택 후 확인합니다.";
         }
 
         void Tick(object sender, EventArgs args)

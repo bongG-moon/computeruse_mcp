@@ -25,6 +25,42 @@ IMAGE_ACTIONS = {"click": "image_click", "double_click": "image_double_click", "
                  "set_value": "image_type_text", "press_key": "image_press_key", "hotkey": "image_hotkey",
                  "scroll": "image_scroll", "wait_for_element": "wait_for_image"}
 IMAGE_FALLBACK_ERRORS = {"picker_not_found", "picker_controls_not_exposed"}
+
+
+def _recognition_fallback(error):
+    """Explain the native UIA / Driver distinction without exposing app data.
+
+    A native candidate can be a Button and still be absent from the Driver's
+    actionable projection. Do not tell the user it had no button information,
+    and retain the bounded matching evidence for diagnosing that difference.
+    """
+    source = getattr(error, "picker_diagnostic", {})
+    source = source if isinstance(source, dict) else {}
+    reason = source.get("reason")
+    explanations = {
+        "no_controls_projected": "이 화면에서 자동 조작할 요소 목록을 받지 못했습니다.",
+        "empty_projection_unconfirmed": "현재 화면의 요소 읽기 결과가 비어 있습니다.",
+        "role_not_projected": "선택 창은 요소 유형을 인식했지만, 자동 조작 목록에는 같은 유형이 없습니다.",
+        "geometry_mismatch": "선택한 요소와 현재 조작 대상의 위치가 달라 같은 대상인지 확인하지 못했습니다.",
+        "missing_driver_id_without_matching_geometry": "요소 유형은 인식했지만 조작 목록의 식별 정보가 부족해 같은 대상인지 확인하지 못했습니다.",
+        "identity_not_projected": "선택 창은 요소 유형을 인식했지만, 같은 요소를 자동 조작 대상으로 연결하지 못했습니다.",
+    }
+    explanation = explanations.get(reason, "선택한 요소를 자동 조작 대상으로 연결하지 못했습니다.")
+    if error.code == "picker_controls_not_exposed" and reason not in explanations:
+        explanation = "이 화면은 버튼 대신 화면 영역만 요소 정보로 제공합니다."
+    diagnostic = {"code": error.code, "reason": reason if reason in explanations else "unmatched_projection"}
+    # These are bounded counts / booleans only; selected text, values, window
+    # handles and screen coordinates never enter the normal status response.
+    for key in ("projected_element_count", "role_candidates", "name_role_candidates", "exact_identity_candidates",
+                "matched_candidates", "geometry_rejected", "missing_id_name_candidates"):
+        if type(source.get(key)) is int and 0 <= source[key] <= 100000:
+            diagnostic[key] = source[key]
+    for key in ("native_has_automation_id", "native_has_name", "window_translation_applied"):
+        if type(source.get(key)) is bool:
+            diagnostic[key] = source[key]
+    return explanation, diagnostic
+
+
 RECORDING_WARNINGS = {
     "outside_target_not_recorded": "다른 프로그램이나 소유 관계가 확인되지 않은 창의 동작은 기록되지 않았습니다.",
     "recording_window_ambiguous": "같은 제목·종류의 팝업이 여러 개라 해당 창의 동작은 기록하지 않았습니다.",
@@ -550,6 +586,8 @@ class ProcessEditors:
             exact = {k: target[k] for k in ("pid", "window_id")}
             self.library._program(runtime, target["program_id"], exact)
             use_image = action == "pick_image"
+            fallback_explanation = None
+            fallback_diagnostic = None
             if use_image and payload["purpose"] != "action":
                 raise OperationError("이미지 동작의 결과는 화면 확인 단계에서 검토합니다.")
             if not use_image:
@@ -565,14 +603,27 @@ class ProcessEditors:
                             or getattr(exc, "helper_cleanup_pending", False)):
                         raise
                     use_image = True
-                    message = "버튼 정보를 찾지 못해 이미지로 선택했습니다. 동작 뒤 화면 확인 단계가 함께 추가됩니다."
+                    fallback_explanation, fallback_diagnostic = _recognition_fallback(exc)
+                    message = fallback_explanation + " 직접 확정한 이미지를 선택했습니다. 동작 뒤 화면 확인 단계가 함께 추가됩니다."
             if use_image:
                 self._check(job)
                 self.library._program(runtime, target["program_id"], exact)
+                # Retain the reason even if image capture is cancelled or fails;
+                # support can inspect it without another selection/read cycle.
+                with self.lock:
+                    if fallback_diagnostic:
+                        job["result"]["last_recognition"] = {"method": "image_fallback", **fallback_diagnostic}
+                    else:
+                        job["result"].pop("last_recognition", None)
                 native = self._visual(job, "pick", {**exact,
-                    "label": "버튼 정보가 없어 이미지로 선택합니다" if action == "pick_element" else "이미지로 사용할 영역을 선택하세요"}, 120)
+                    "label": fallback_explanation + " 이미지에서 대상을 직접 선택하세요." if fallback_explanation else "이미지로 사용할 영역을 선택하세요"}, 120)
                 self.library._program(runtime, target["program_id"], exact)
                 extra = {"purpose": "action", "selection": draft.remember_image(target, native)}
+                if fallback_diagnostic:
+                    extra["recognition_diagnostic"] = fallback_diagnostic
+            else:
+                with self.lock:
+                    job["result"].pop("last_recognition", None)
         elif action == "record":
             if payload:
                 raise OperationError("녹화 범위는 편집 창에 연결한 프로그램으로 고정됩니다.")

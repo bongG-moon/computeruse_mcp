@@ -22,6 +22,7 @@ SERVER_NAME = "local-computer-use"
 # Version labels alone are never trusted; a foreign same-name MCP is preserved.
 # This proves these exact distributions, not signed-code security.
 PREVIOUS_MANIFESTS = {
+    "42b3e59d47b14cc7b352e3ff87f54e2c71fd08d022dd20e887213cebf3f27104": "0.14.0",
     "78f1830300bde98ee3820a903389ec647565523912f1cefa1138a277e3de3d62": "0.13.0",
     "d2a19860d0bd5074e8552b2464df624dac6b0d0ccd722434a0475a4d2bc59908": "0.12.0",
     "e2b3a392400dbc2787fd67cae02994d63fd32fa4a5ddde2f7930b7cad701c3fc": "0.11.1",
