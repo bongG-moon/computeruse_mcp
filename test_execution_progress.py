@@ -146,7 +146,7 @@ class ImageDeliveryTests(unittest.TestCase):
         from unittest.mock import patch
         delivery=ImageDelivery()
         with patch('image_delivery.secrets.choice',side_effect=list('A2B3C4')):
-            first=delivery.check()
+            first=delivery.check(delivery_mode='vision')
         self.assertEqual(first['image_content']['mimeType'],'image/png')
         self.assertNotIn('A2B3C4',json.dumps(first))
         self.assertFalse(first['screen_accessed'])
@@ -157,24 +157,24 @@ class ImageDeliveryTests(unittest.TestCase):
     def test_wrong_or_expired_answer_never_claims_vision_success(self):
         now=[1.0]
         delivery=ImageDelivery(clock=lambda:now[0])
-        first=delivery.check()
+        first=delivery.check(delivery_mode='vision')
         result=delivery.check(first['challenge_id'],'!')
         self.assertFalse(result['roundtrip_verified'])
         self.assertEqual(delivery.status()['last_roundtrip'],'failed')
-        second=delivery.check()
+        second=delivery.check(delivery_mode='vision')
         now[0]=302.0
         self.assertEqual(delivery.check(second['challenge_id'],'ABCDEF')['status'],'expired_or_unknown')
 
     def test_non_ascii_readback_is_a_failed_check_without_server_error(self):
         delivery=ImageDelivery()
-        first=delivery.check()
+        first=delivery.check(delivery_mode='vision')
         self.assertEqual(delivery.check(first['challenge_id'],'잘 안 보여요')['status'],'failed')
 
     def test_mcp_preserves_image_content_as_image_and_metadata_as_text(self):
         f=fixtures.ProtocolTests(methodName='runTest')
         f.setUp()
         self.addCleanup(f.doCleanups)
-        f.input.send({'jsonrpc':'2.0','id':2,'method':'tools/call','params':{'name':'computer_check_image','arguments':{}}})
+        f.input.send({'jsonrpc':'2.0','id':2,'method':'tools/call','params':{'name':'computer_check_image','arguments':{'delivery_mode':'vision'}}})
         result=f.wait_for(2)['result']
         self.assertEqual([item['type'] for item in result['content']],['text','image'])
         self.assertNotIn('data',result['structuredContent'])

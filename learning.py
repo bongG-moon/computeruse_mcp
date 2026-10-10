@@ -82,6 +82,16 @@ def stable_selector(snapshot, element):
     _fingerprint(element)
     original = _elements(snapshot)
     safe_elements = [_identity(item) for item in original]
+    # Numeric WinForms IDs are often per-launch handles. Prefer a name/role
+    # identity (possibly scoped) when it is sufficient, without guessing that
+    # every numeric resource ID is unstable or altering runtime observations.
+    named_elements = copy.deepcopy(safe_elements)
+    for item in named_elements:
+        if isinstance(item.get("automation_id"), str) and item["automation_id"].isdigit():
+            item.pop("automation_id")
+    candidate = named_elements[original.index(element)]
+    if control_selector({"elements": named_elements}, candidate) is not None:
+        safe_elements = named_elements
     safe_snapshot = {"elements": safe_elements}
     safe_element = safe_elements[original.index(element)]
     selector = control_selector(safe_snapshot, safe_element)
@@ -98,7 +108,8 @@ def stable_selector(snapshot, element):
             seen.add(parent)
             ancestor = by_index[parent]
             # Window names usually contain document titles or current content.
-            if ancestor.get("role") not in {"Window", "Document"}:
+            if (ancestor.get("role") not in {"Window", "Document"}
+                    and not (str(ancestor.get("automation_id", "")).isdigit() and not ancestor.get("name"))):
                 scope = control_selector(safe_snapshot, ancestor)
                 if scope is not None and "within" not in scope:
                     scope = {**scope, **({"role": ancestor["role"]} if ancestor.get("role") else {})}

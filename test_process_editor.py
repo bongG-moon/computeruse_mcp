@@ -733,7 +733,8 @@ class EditorIPCTests(unittest.TestCase):
     def test_recording_is_reviewable_not_saved_and_unknown_input_blocks_save(self):
         self.context(); job = self.start()
         event = {**image_choice(), "operation": "manual_entry", "program_id": "editor"}
-        with mock.patch.object(self.editors, "_visual", return_value={"events": [event]}) as visual:
+        with mock.patch("replay_preflight.image_replay_preflight", return_value={"ready_for_input": True}), \
+                mock.patch.object(self.editors, "_visual", return_value={"events": [event]}) as visual:
             recorded = self.command("record", {})
         self.assertEqual(recorded["status"], "ok"); self.assertTrue(recorded["steps"][0]["requires_input"])
         self.assertEqual(visual.call_args.args[2]["max_events"], 12)  # Five popup waits fit alongside review checkpoints.
@@ -756,7 +757,8 @@ class EditorIPCTests(unittest.TestCase):
             "window_id": TARGET["window_id"] + 1, "owner_window_id": TARGET["window_id"], "title": "Recorded popup",
             "class_name": "OwnedDialog", "owner_verified": True}
         event = {**image_choice(), "operation": "click", "program_id": "editor", "window_ref": "popup_1"}
-        with mock.patch.object(self.editors, "_visual", return_value={"events": [event], "windows": [window]}):
+        with mock.patch("replay_preflight.image_replay_preflight", return_value={"ready_for_input": True}), \
+                mock.patch.object(self.editors, "_visual", return_value={"events": [event], "windows": [window]}):
             answer = self.command("record", {})
         self.assertEqual(answer["status"], "ok", answer)
         self.assertEqual(len(answer["programs"]), 2)
@@ -769,6 +771,24 @@ class EditorIPCTests(unittest.TestCase):
         self.assertEqual(self.runtime.mutations, [])
         atomic_json(self.paths["response"], {"nonce": self.nonce, "status": "saved"})
         self.terminal(job)
+
+    def test_explicit_image_repair_bypasses_uia_and_preserves_other_steps(self):
+        self.context(); job = self.start()
+        draft = self.editors.jobs[job["editor_id"]]["draft"]
+        draft.recorded([{"program_id": "editor", "operation": "manual_entry", "reason": "image_capture_required", "requested_operation": "click"}])
+        old_checkpoint = copy.deepcopy(draft.steps[1])
+        with mock.patch("process_editor._run_helper") as native, mock.patch.object(self.editors, "_visual", return_value=image_choice()) as visual:
+            for invalid in ("wrong", None, {"method": "image"}):
+                answer = self.command("retarget_step", {"index": 0, "action": "click", "method": invalid})
+                self.assertEqual(answer["status"], "error")
+            visual.assert_not_called(); native.assert_not_called()
+            answer = self.command("retarget_step", {"index": 0, "action": "click", "method": "image"})
+            self.assertEqual(answer["status"], "ok", answer)
+            native.assert_not_called(); self.assertEqual(visual.call_count, 1)
+        self.assertEqual(draft.steps[0]["operation"], "image_click")
+        self.assertEqual(draft.steps[1], old_checkpoint)
+        self.assertEqual(self.runtime.mutations, [])
+        self.status(job, cancel=True); self.terminal(job)
 
     def test_step_thumbnail_is_only_returned_to_native_preview_not_mcp_status(self):
         self.context(); job = self.start()
@@ -896,6 +916,7 @@ class EditorIPCTests(unittest.TestCase):
         self.assertTrue(self.child.terminated)
 
     def test_checkpoint_image_is_forwarded_without_claiming_task_verification(self):
+        self.manager.image_delivery.check(delivery_mode="vision")
         task = self.manager.tasks.save({"name": "review", "instructions": "review", "expected": "human review",
             "program_ids": ["editor"], "steps": [{"operation": "checkpoint", "program_id": "editor", "message": "Review"}],
             "variables": {}})

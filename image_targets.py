@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import binascii
 import copy
+import hashlib
 import json
 import math
 import os
@@ -105,8 +106,21 @@ def validate_match(answer, image_target, screenshot_png):
     width, height = png_dimensions(screenshot_png)
     if not isinstance(answer, dict) or answer.get("status") not in {"matched", "not_found", "ambiguous"}:
         raise OperationError("이미지 비교 결과를 확인하지 못했습니다.", "image_match_failed")
+    details = {"screenshot": {"width": width, "height": height}, "capture_window": copy.deepcopy(target["capture_window"]),
+               "threshold": target["min_score"], "ambiguity_margin": target["ambiguity_margin"]}
+    for field in ("score", "second_score"):
+        value = answer.get(field)
+        if type(value) in {int, float} and math.isfinite(value) and 0 <= value <= 1:
+            details[field] = round(value, 6)
+    if type(answer.get("candidate_count")) is int and 0 <= answer["candidate_count"] <= 100000:
+        details["candidate_count"] = answer["candidate_count"]
+    if type(answer.get("scale")) in {int, float} and math.isfinite(answer["scale"]) and .2 <= answer["scale"] <= 16:
+        details["scale"] = round(answer["scale"], 6)
+    if answer.get("code") == "template_low_detail":
+        details["low_detail"] = True
     if answer["status"] != "matched":
-        return {"status": answer["status"], "code": "image_ambiguous" if answer["status"] == "ambiguous" else "image_not_found"}
+        return {"status": answer["status"], "code": "image_ambiguous" if answer["status"] == "ambiguous" else
+                "image_template_low_detail" if details.get("low_detail") else "image_not_found", **details}
     rect, screenshot, score = answer.get("rect"), answer.get("screenshot"), answer.get("score")
     if (screenshot != {"width": width, "height": height}
             or not isinstance(rect, dict) or set(rect) != {"x", "y", "width", "height"}
@@ -118,7 +132,7 @@ def validate_match(answer, image_target, screenshot_png):
     # This location is ephemeral and belongs solely to the supplied screenshot.
     x = min(rect["x"]+rect["width"]-1, rect["x"]+int(target["anchor"]["x"]*rect["width"]))
     y = min(rect["y"]+rect["height"]-1, rect["y"]+int(target["anchor"]["y"]*rect["height"]))
-    return {"status": "matched", "x": x, "y": y, "score": score, "rect": dict(rect), "screenshot": screenshot}
+    return {**details, "status": "matched", "x": x, "y": y, "score": score, "rect": dict(rect), "screenshot": screenshot}
 
 
 def match_image(runtime, image_target, screenshot_png):
@@ -131,6 +145,16 @@ def match_image(runtime, image_target, screenshot_png):
     ElementLibrary._reject_link(helper, file=True)
     if not helper.is_file():
         raise OperationError("이미지 도구 실행파일이 없습니다. 전체 배포 ZIP으로 업데이트하세요.", "image_helper_missing")
+    # A fresh capture is mandatory at every caller. Reuse the expensive global
+    # search only when *all* screenshot bytes, template settings and helper
+    # version are identical. Region-only reuse could miss a new duplicate.
+    stat = helper.stat()
+    key = hashlib.sha256((json.dumps(target, sort_keys=True, separators=(",", ":")) + "\0" + screenshot_png
+        + "\0" + str(stat.st_mtime_ns) + ":" + str(stat.st_size)).encode("utf-8")).hexdigest()
+    cache = getattr(runtime, "_image_match_cache", {})
+    if isinstance(cache, dict) and key in cache:
+        runtime.check_active()
+        return {**copy.deepcopy(cache[key]), "search_reused": True}
     root = Path(runtime.run_dir) / "im"
     ElementLibrary._reject_link(root)
     root.mkdir(exist_ok=True)
@@ -159,7 +183,13 @@ def match_image(runtime, image_target, screenshot_png):
         answer = json.loads(response.read_text(encoding="utf-8-sig"))
         if answer.get("nonce") != nonce:
             raise OperationError("다른 이미지 비교 요청의 응답입니다.", "image_match_invalid")
-        return validate_match(answer, target, screenshot_png)
+        validated = validate_match(answer, target, screenshot_png)
+        cache = dict(cache) if isinstance(cache, dict) else {}
+        while len(cache) >= 8:
+            cache.pop(next(iter(cache)))
+        cache[key] = copy.deepcopy(validated)
+        runtime._image_match_cache = cache
+        return {**validated, "search_reused": False}
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         if isinstance(error, OperationError):
             raise

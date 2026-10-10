@@ -8,16 +8,56 @@ import os
 from pathlib import Path
 import time
 import uuid
+import re
+from urllib.parse import urlsplit
 
 import programs
 from settings import validate_config
-from vendor.guard import check_app, _same_windows_user_session
+from program_launch import validate_launch_profile
+from vendor.guard import check_app, _same_windows_user_session, GuardError
 
 
 class RegistrationError(ValueError):
     def __init__(self, code, message):
         super().__init__(message)
         self.code = code
+
+
+def protocol_handler(uri, command_reader=None):
+    """Read association metadata only; never execute its command or trust it
+    as the UI process. Launchers, browsers and updater chains often differ.
+    """
+    validate_launch_profile({'kind': 'uri', 'target': uri})
+    scheme = urlsplit(uri).scheme.lower()
+    info = {'scheme': scheme, 'registered_handler': None, 'handler_is_control_target': False,
+            'registry_modified': False, 'application_launched': False}
+    if scheme in {'http', 'https'}:
+        return {**info, 'status': 'browser_route', 'message': '웹 주소의 처리 프로그램과 업무 창은 다를 수 있습니다. 실제 열린 업무 창을 선택하세요.'}
+    if command_reader is None:
+        if os.name != 'nt':
+            return {**info, 'status': 'unavailable'}
+        def command_reader(scheme):
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, scheme + r'\shell\open\command') as key:
+                value, kind = winreg.QueryValueEx(key, None)
+                if kind not in {winreg.REG_SZ, winreg.REG_EXPAND_SZ}:
+                    raise ValueError('unsupported association')
+                return os.path.expandvars(value) if kind == winreg.REG_EXPAND_SZ else value
+    try:
+        command = command_reader(scheme)
+        if not isinstance(command, str) or len(command) > 32768 or any(ord(c) < 32 for c in command):
+            raise ValueError('invalid command')
+        # Parse only an unambiguous first executable token. Never interpolate
+        # URI placeholders or pass the association through a shell.
+        match = re.match(r'^\s*(?:"([^"\r\n]+)"|([^\s"]+))(?:\s|$)', command)
+        if not match:
+            raise ValueError('ambiguous command')
+        exe = match.group(1) or match.group(2)
+        check_app(exe)
+        info.update(status='association_found', registered_handler=exe)
+    except (OSError, ValueError, GuardError):
+        info.update(status='unavailable', message='주소 연결 정보를 확인하지 못했습니다. 실제 업무 창을 열고 목록에서 선택하면 됩니다.')
+    return info
 
 
 def live_candidates():
@@ -115,7 +155,25 @@ class ProgramRegistration:
         return {"ok": True, "status": "program_candidates", "candidates": items,
                 "expires_in_seconds": self.CANDIDATE_SECONDS, "screen_accessed": False,
                 "window_metadata_read": True, "driver_started": False,
+                "next_tool": "computer_register_program", "input_dispatched": False,
                 "message": "추가할 창의 candidate_id를 computer_register_program에 전달하세요. 같은 이름의 창은 제목으로 구분하세요."}
+
+    def uri_candidates(self, args, cancel_event=None):
+        uri = args['launch_uri']
+        validate_launch_profile({'kind': 'uri', 'target': uri})
+        if args.get('arguments') or args.get('working_directory'):
+            raise RegistrationError('invalid_launch', '주소 실행과 EXE 인자·시작 폴더는 함께 지정하지 않습니다.')
+        # Previously confirmed URI + program identity is already sufficient.
+        known = [p for p in self.manager.config['programs'] if p.get('launch') == {'kind': 'uri', 'target': uri}]
+        if len(known) == 1:
+            return self.register({**args, 'exe': known[0]['exe'], 'program_id': known[0]['id']}, cancel_event)
+        choices = self.list_candidates()
+        association = protocol_handler(uri)
+        return {**choices, 'status': 'choose_program_window', 'saved': False,
+                'applied_to_next_session': False, 'reconnect_required': False,
+                'launch_uri': uri, 'association': association, 'automatic_retry': False,
+                'next_arguments': {'launch_uri': uri, **{key: args[key] for key in ('name', 'program_id', 'hints') if key in args}},
+                'message': '주소를 등록할 실제 업무 창을 목록에서 선택하세요. 선택한 candidate_id와 launch_uri를 함께 전달하면 바로 등록됩니다. 창이 없으면 사용자가 평소 방식으로 한 번 연 뒤 목록을 다시 확인하세요. 설정 파일을 찾거나 편집할 필요가 없습니다.'}
 
     def _options(self, args, loaded):
         if bool(args.get("exe")) == bool(args.get("candidate_id")):
@@ -160,6 +218,8 @@ class ProgramRegistration:
     def register(self, args, cancel_event=None):
         manager = self.manager
         with manager.lock:
+            if args.get('launch_uri') and not args.get('exe') and not args.get('candidate_id'):
+                return self.uri_candidates(args, cancel_event)
             if manager.config_path is None:
                 raise RegistrationError("configuration_untracked", "연결된 설정 파일 경로가 없어 저장할 수 없습니다. 설치 도구로 연결한 MCP에서 다시 요청하세요.")
             loaded = validate_config(copy.deepcopy(manager.config))

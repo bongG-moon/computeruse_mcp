@@ -55,6 +55,12 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 
+def deferred_input(step):
+    """Delivery is checked by the immediately following explicit checkpoint."""
+    return (step.get("operation") in IMAGE_MUTATIONS and not step.get("expect")) or (
+        step.get("operation") in {"click", "double_click", "right_click"} and step.get("completion_mode") == "human")
+
+
 def validate_recipe(steps, variables, program_ids):
     from operations import validate_step
     if not isinstance(variables, dict) or len(variables) > 30:
@@ -79,7 +85,7 @@ def validate_recipe(steps, variables, program_ids):
             and popup_owners.get(target_key(image)) == checkpoint.get("window_ref", "main"))
     def linked_popup_checkpoint(image, wait, checkpoint):
         if not all(isinstance(item, dict) for item in (image, wait, checkpoint)): return False
-        return (image.get("operation") in IMAGE_MUTATIONS and not image.get("expect")
+        return (deferred_input(image)
             and wait.get("operation") == "wait_for_window" and checkpoint.get("operation") == "checkpoint"
             and wait.get("program_id") == image.get("program_id") == checkpoint.get("program_id")
             and wait.get("owner_ref") == image.get("window_ref", "main") == checkpoint.get("opened_from")
@@ -92,12 +98,12 @@ def validate_recipe(steps, variables, program_ids):
         if not isinstance(ref, str) or not WINDOW_REF.fullmatch(ref):
             raise WorkflowError("window_ref는 영문자로 시작하는 1~64자 창 이름이어야 합니다.")
         validate_workflow_step(step)
-        if step["operation"] in IMAGE_MUTATIONS and not step.get("expect"):
+        if deferred_input(step):
             direct = index+1 < len(steps) and linked_image_checkpoint(step, steps[index+1])
             opened = index+2 < len(steps) and linked_popup_checkpoint(step, steps[index+1], steps[index+2])
             if not direct and not opened:
-                raise WorkflowError("이미지 입력 뒤에는 같은 창의 화면 확인 또는 소유 팝업 연결과 해당 팝업의 화면 확인이 필요합니다.")
-        if step.get("return_from") is not None and (index == 0 or steps[index-1].get("operation") not in IMAGE_MUTATIONS
+                raise WorkflowError("직접 확인할 입력 뒤에는 같은 창의 화면 확인 또는 소유 팝업 연결과 해당 팝업의 화면 확인이 필요합니다.")
+        if step.get("return_from") is not None and (index == 0 or not deferred_input(steps[index-1])
                 or not linked_image_checkpoint(steps[index-1], step)):
             raise WorkflowError("돌아온 창 확인은 해당 소유 팝업의 이미지 동작 바로 다음에만 사용할 수 있습니다.")
         if "opened_from" in step and (index < 2 or not linked_popup_checkpoint(steps[index-2], steps[index-1], step)):
@@ -141,7 +147,7 @@ def render_steps(task, inputs):
 class WorkflowRunner:
     FIELDS = {"format", "run_id", "task_id", "revision", "recipe_hash", "inputs_hash", "created_at", "updated_at",
               "completed_steps", "total_steps", "pending_step", "status", "task_verified", "session_id", "duration_ms"}
-    OPTIONAL_FIELDS = {"checkpoint", "image_verification"}
+    OPTIONAL_FIELDS = {"checkpoint", "image_verification", "step_delivery"}
     def __init__(self, state_dir):
         self.root = Path(state_dir) / "workflows"
         from repeat_profiles import RepeatProfiles
@@ -180,18 +186,28 @@ class WorkflowRunner:
                 raise ValueError("metadata")
             if "checkpoint" in value:
                 checkpoint = value["checkpoint"]
-                if (not isinstance(checkpoint, dict) or set(checkpoint) != {"id", "step_index", "capture_available", "target_hash"}
+                if (not isinstance(checkpoint, dict) or not {"id", "step_index", "capture_available", "target_hash"} <= set(checkpoint)
+                        or set(checkpoint)-{"id", "step_index", "capture_available", "target_hash", "source_step_index"}
                         or not isinstance(checkpoint["id"], str) or not re.fullmatch(r"[a-f0-9]{32}", checkpoint["id"])
                         or type(checkpoint["step_index"]) is not int or checkpoint["step_index"] != value["pending_step"]
                         or type(checkpoint["capture_available"]) is not bool
                         or not isinstance(checkpoint["target_hash"], str) or not re.fullmatch(r"[a-f0-9]{64}", checkpoint["target_hash"])):
                     raise ValueError("checkpoint")
+                if "source_step_index" in checkpoint and (type(checkpoint["source_step_index"]) is not int
+                        or not 0 <= checkpoint["source_step_index"] < checkpoint["step_index"]):
+                    raise ValueError("resume_checkpoint")
             if "image_verification" in value:
                 proof = value["image_verification"]
                 if (not isinstance(proof, dict) or set(proof) != {"step_index", "state"}
                         or type(proof["step_index"]) is not int or not 0 <= proof["step_index"] < value["total_steps"]):
                     raise ValueError("image_verification")
                 validate_image_verification(proof["state"])
+            if "step_delivery" in value:
+                proof = value["step_delivery"]
+                if (not isinstance(proof, dict) or set(proof) != {"step_index", "state"}
+                        or type(proof["step_index"]) is not int or not 0 <= proof["step_index"] < value["total_steps"]
+                        or proof["state"] not in {"not_sent", "sent", "unknown"}):
+                    raise ValueError("step_delivery")
             return value
         except (OSError, ValueError, AttributeError, TypeError):
             raise WorkflowError("실행 기록을 읽지 못했습니다. 원본은 유지됩니다.") from None
@@ -399,10 +415,15 @@ class WorkflowRunner:
                     raise WorkflowError("작업 내용이나 입력값이 바뀌었습니다. 이전 실행을 이어갈 수 없습니다.")
                 if acknowledge_checkpoint is not None:
                     checkpoint = record.get("checkpoint", {})
+                    source_index = checkpoint.get("source_step_index", record["pending_step"])
                     if (checkpoint.get("id") != acknowledge_checkpoint or checkpoint.get("capture_available") is not True
-                            or record["pending_step"] is None or steps[record["pending_step"]]["operation"] != "checkpoint"):
+                            or record["pending_step"] is None or type(source_index) is not int
+                            or not 0 <= source_index < len(steps) or steps[source_index]["operation"] != "checkpoint"):
                         raise WorkflowError("현재 대기 중인 화면 확인 ID와 일치하지 않습니다. 최신 체크포인트를 확인하세요.")
-                    current_target = resolve(steps[record["pending_step"]])
+                    if "source_step_index" in checkpoint and record.get("step_delivery") != {
+                            "step_index": record["pending_step"], "state": "not_sent"}:
+                        raise WorkflowError("입력 미전달이 확인되지 않아 이전 화면 확인으로 재실행할 수 없습니다.")
+                    current_target = resolve(steps[source_index])
                     expected_target = digest({"session_id": runtime.id, **current_target})
                     window_resolver = getattr(runtime.guard, "window_resolver", None)
                     if (checkpoint["target_hash"] != expected_target or not callable(window_resolver)
@@ -470,6 +491,10 @@ class WorkflowRunner:
                 save("running")
             def check_step(index):
                 item = steps[index]
+                if deferred_input(item) and item["operation"] not in IMAGE_MUTATIONS:
+                    return {"task_verified": False, "input_dispatched": None,
+                        "diagnostic": {"code": "input_action_uncertain", "automatic_replay": False,
+                            "message": "중단된 입력의 적용 여부가 불명확합니다. 같은 입력을 반복하지 않았습니다."}}
                 if item["operation"] in IMAGE_MUTATIONS:
                     if item.get("expect"):
                         proof = record.get("image_verification", {})
@@ -502,19 +527,26 @@ class WorkflowRunner:
                 for candidate in range(index-1, -1, -1):
                     # A successfully delivered image mutation intentionally
                     # proceeds to its mandatory human screenshot checkpoint.
-                    if steps[candidate]["operation"] in IMAGE_MUTATIONS and not steps[candidate].get("expect"):
+                    if deferred_input(steps[candidate]):
                         return {"task_verified": True, "input_dispatched": False, "verification_deferred": True}
                     if steps[candidate]["operation"] not in {"delay", "checkpoint"}:
                         return check_step(candidate)
                 runtime.check_active()
                 return {"task_verified": True, "input_dispatched": False}
-            def capture_checkpoint(index, target):
-                item = steps[index]
+            def capture_checkpoint(index, target, *, source_index=None):
+                item = steps[index if source_index is None else source_index]
                 checkpoint = {"id": uuid.uuid4().hex, "step_index": index, "capture_available": False,
                               "target_hash": digest({"session_id": runtime.id, **target})}
+                if source_index is not None:
+                    checkpoint["source_step_index"] = source_index
                 record["checkpoint"] = checkpoint
                 save("running")
-                captured = measured(execute_process_step(runtime, operation_step(item), target))
+                prepared = None
+                if delivery_mode == "foreground":
+                    from replay_preflight import prepare_image_foreground
+                    prepared = prepare_image_foreground(runtime, target)
+                captured = measured(prepared if prepared is not None else
+                                    execute_process_step(runtime, operation_step(item), target))
                 checkpoint["capture_available"] = captured.pop("checkpoint_ready", False) is True
                 images = captured.pop("checkpoint_content", [])
                 save("needs_review")
@@ -533,11 +565,31 @@ class WorkflowRunner:
                         if type(pending) is not int or pending != record["completed_steps"] or pending >= len(steps):
                             raise WorkflowError("실행 기록의 진행 지점이 올바르지 않습니다.")
                         special = steps[pending]["operation"] in PROCESS_OPERATIONS | {"wait_for_image", "wait_for_window"}
-                        latest = check_prior(pending) if special else check_step(pending)
+                        proof = record.get("step_delivery", {})
+                        not_sent = (not special and proof.get("step_index") == pending
+                                    and proof.get("state") == "not_sent")
+                        # Only a durable, explicit non-delivery result permits
+                        # this pending step to run. The normal loop resolves the
+                        # current window and freshly observes/matches its target.
+                        latest = check_prior(pending) if not_sent or special else check_step(pending)
                         if latest.get("task_verified") is not True:
                             save("needs_review")
                             return {**record, "last_result": latest, "next_step": "미확인 단계 또는 이전 확인 지점의 현재 결과를 확인하지 못했습니다. 입력을 재실행하지 않았습니다."}
-                        if not special or steps[pending]["operation"] == "checkpoint" and acknowledge_checkpoint is not None:
+                        if not_sent and latest.get("verification_deferred") is True:
+                            # A prior image click has no machine-readable result.
+                            # A stale acknowledgement cannot prove that its
+                            # state survived the pause: show a fresh checkpoint.
+                            prior_checkpoint = next((candidate for candidate in range(pending-1, -1, -1)
+                                if steps[candidate]["operation"] == "checkpoint"), None)
+                            checkpoint = record.get("checkpoint", {})
+                            fresh_ack = (acknowledge_checkpoint is not None
+                                and checkpoint.get("source_step_index") == prior_checkpoint)
+                            if not fresh_ack:
+                                if prior_checkpoint is None:
+                                    raise WorkflowError("앞선 이미지 동작의 현재 결과를 확인할 화면 확인 단계가 없습니다.")
+                                return capture_checkpoint(pending, resolve(steps[prior_checkpoint]), source_index=prior_checkpoint)
+                            record.pop("checkpoint", None)
+                        if not not_sent and (not special or steps[pending]["operation"] == "checkpoint" and acknowledge_checkpoint is not None):
                             record["completed_steps"] += 1
                             record["pending_step"] = None
                             record.pop("checkpoint", None)
@@ -555,6 +607,10 @@ class WorkflowRunner:
                     stage = "window_binding"
                     target = resolve(item) if item["operation"] != "wait_for_window" else None
                     record["pending_step"] = index
+                    # Persist unknown before crossing the operation boundary.
+                    # A process crash must never turn an attempted input into a
+                    # safe retry. Only a returned explicit false can prove it.
+                    record["step_delivery"] = {"step_index": index, "state": "unknown"}
                     record["task_verified"] = False
                     stage = "checkpoint_before_input"
                     save("running")
@@ -573,7 +629,8 @@ class WorkflowRunner:
                         engine = Operations(runtime)
                     elif item["operation"] in IMAGE_OPERATIONS:
                         latest = execute_image_step(runtime, operation_step(item), target,
-                            save_verification=lambda state: save_image_state(index, state))
+                            save_verification=lambda state: save_image_state(index, state),
+                            prepare_foreground=delivery_mode == "foreground")
                         engine = Operations(runtime)
                     elif item["operation"] in PROCESS_OPERATIONS:
                         latest = execute_process_step(runtime, operation_step(item), target)
@@ -581,12 +638,27 @@ class WorkflowRunner:
                     else:
                         latest = engine.execute(operation_step(item), target, delivery_mode=delivery_mode, reuse_verified=True)
                     measured(latest)
+                    sent = latest.get("input_dispatched")
+                    record["step_delivery"] = {"step_index": index,
+                        "state": "sent" if sent is True else "not_sent" if sent is False else "unknown"}
+                    if sent is False and index == 0:
+                        diagnostic = latest.get("diagnostic", {})
+                        source = latest.get("input_result", {}).get("diagnostic", diagnostic)
+                        if source.get("code") in {"image_not_found", "image_ambiguous", "element_not_found"}:
+                            latest = {**latest, "diagnostic": {**source, "code": "start_screen_not_ready",
+                                "cause": source["code"], "automatic_replay": False,
+                                "message": "녹화한 첫 동작의 대상을 현재 화면에서 확인하지 못했습니다. "
+                                    "해당 업무 화면을 연 뒤 같은 실행에서 이어가세요. 아직 업무 입력을 보내지 않았으며 재녹화는 필요하지 않습니다."}}
                     adopt_transition(item, latest)
-                    if latest.get("task_verified") is not True and not (item["operation"] in IMAGE_MUTATIONS
-                            and not item.get("expect") and latest.get("verification_deferred") is True and latest.get("input_dispatched") is True):
+                    if latest.get("task_verified") is not True and not (deferred_input(item)
+                            and latest.get("verification_deferred") is True and latest.get("input_dispatched") is True):
                         progress_event("needs_review", index, item["operation"])
                         save("needs_review")
-                        return {**record, "last_result": latest, "next_step": "현재 화면을 확인하세요. 같은 입력은 자동 반복하지 않습니다. 이어가기는 먼저 미확인 단계의 결과를 다시 검사합니다."}
+                        return {**record, "last_result": latest,
+                            "can_resume_pending_input": record["step_delivery"]["state"] == "not_sent",
+                            "next_step": ("입력을 보내지 않은 단계입니다. 진단 원인을 해결한 뒤 같은 run_id로 이어가면 현재 대상을 새로 확인하고 이 단계부터 실행합니다. 완료한 앞 단계는 반복하지 않습니다."
+                                if record["step_delivery"]["state"] == "not_sent" else
+                                "현재 화면을 확인하세요. 같은 입력은 자동 반복하지 않습니다. 이어가기는 먼저 미확인 단계의 결과를 다시 검사합니다.")}
                     record["completed_steps"] = index + 1
                     record["pending_step"] = None
                     stage = "checkpoint_after_verification"

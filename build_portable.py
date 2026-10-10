@@ -45,6 +45,7 @@ ELEMENT_PICKER_NAME = "Computer Use MCP 요소 선택.exe"
 PROCESS_EDITOR_NAME = "Computer Use MCP 프로세스 만들기.exe"
 VISUAL_TOOLS_NAME = "Computer Use MCP 이미지 도구.exe"
 SCOPED_CONTROLS_NAME = "Computer Use MCP 빠른 확인.exe"
+CHECKPOINT_REVIEW_NAME = "Computer Use MCP 화면 확인.exe"
 APP_FILES = (
     "server.py", "settings.py", "setup.py", "consent.py", "register.py", "README.html", "VALIDATION.html",
     "maintenance.py", "diagnostics.py", "install.py", "programs.py", "INSTALL.md", "vendor/__init__.py", "vendor/guard.py", "vendor/windows.py",
@@ -55,9 +56,11 @@ APP_FILES = (
     "window_transitions.py", "program_registration.py",
     "execution_progress.py", "image_delivery.py", "CHANGES_0.14.0.html", "CHANGES_0.14.1.html",
     "recording_windows.py",
+    "replay_preflight.py", "checkpoint_review.py", "CHANGES_0.15.0.html",
 )
 OPTIONAL_APP_FILES = ()
 SOURCE_SUPPORT_FILES = (
+    "CheckpointReview.cs", "test_client_compatibility.py", "test_recorded_clicks.py", "test_recording_reliability.py", "test_native_recording_capture.py", "test_replay_readiness.py", "test_selector_reuse.py", "acceptance_record_replay015.py",
     "test_capture_geometry.py", "capture_picker_fixture.py",
     "test_execution_progress.py", "acceptance_observation.py", "acceptance_recording_windows.py",
     "test_image_completion.py", "test_recording_windows.py", "test_workflow_windows.py", "acceptance_status014.py", "image_completion_validation.py",
@@ -96,6 +99,12 @@ IMPORT_CHECK = (
     "import tkinter,ssl,json,subprocess,sys,os; "
     "assert os.path.normcase(os.path.realpath(sys.prefix)) == os.path.normcase(os.path.realpath(os.environ['PYTHONHOME'])); "
     "print(json.dumps({'ok':True,'python':sys.version.split()[0],'executable':sys.executable,'prefix':sys.prefix,'tcl':tkinter.Tcl().eval('info patchlevel'),'imports':['tkinter','ssl','json','subprocess']},ensure_ascii=False))"
+)
+APPLICATION_IMPORT_CHECK = (
+    "import server,settings,consent,register,maintenance,diagnostics,install,programs,"
+    "learning,learning_picker,teaching_sessions,process_editor,process_steps,image_targets,image_steps,"
+    "checkpoint_review,image_delivery,replay_preflight,vendor.guard,vendor.windows; "
+    "print('Application imports passed')"
 )
 
 
@@ -224,6 +233,14 @@ def compile_process_editor(destination: Path) -> None:
         print(output.stdout.strip())
 
 
+def compile_checkpoint_review(destination: Path) -> None:
+    references = ["System.dll", "System.Core.dll", "System.Drawing.dll", "System.Windows.Forms.dll", "System.Web.Extensions.dll"]
+    output = run_hidden([str(COMPILER), "/nologo", "/target:winexe", "/platform:anycpu", "/optimize+", "/codepage:65001",
+                         *["/reference:" + ref for ref in references], f"/out:{destination}", str(SOURCE / "CheckpointReview.cs")], cwd=SOURCE)
+    if output.stdout.strip():
+        print(output.stdout.strip())
+
+
 def compile_visual_tools(destination: Path) -> None:
     references = ["System.dll", "System.Core.dll", "System.Drawing.dll", "System.Windows.Forms.dll", "System.Web.Extensions.dll"]
     references.extend(str(COMPILER.parent / "WPF" / name) for name in ("WindowsBase.dll", "UIAutomationClient.dll", "UIAutomationTypes.dll"))
@@ -312,8 +329,12 @@ def main() -> int:
         compile_process_editor(staging / PROCESS_EDITOR_NAME)
         compile_visual_tools(staging / VISUAL_TOOLS_NAME)
         compile_scoped_controls(staging / SCOPED_CONTROLS_NAME)
+        compile_checkpoint_review(staging / CHECKPOINT_REVIEW_NAME)
         result = run_hidden([str(python_root / "python.exe"), "-B", "-s", "-c", IMPORT_CHECK], cwd=staging, env=runtime_environment(python_root))
         print(result.stdout.strip())
+        application_check = run_hidden([str(python_root / "python.exe"), "-B", "-s", "-c", APPLICATION_IMPORT_CHECK],
+                                       cwd=SOURCE, env=runtime_environment(python_root))
+        print(application_check.stdout.strip())
         print(f"Source check passed. Compiler output retained at: {staging}")
         return 0
 
@@ -337,6 +358,7 @@ def main() -> int:
     compile_process_editor(bundle / PROCESS_EDITOR_NAME)
     compile_visual_tools(bundle / VISUAL_TOOLS_NAME)
     compile_scoped_controls(bundle / SCOPED_CONTROLS_NAME)
+    compile_checkpoint_review(bundle / CHECKPOINT_REVIEW_NAME)
     result = run_hidden([str(runtime / "python.exe"), "-B", "-s", "-c", IMPORT_CHECK], cwd=bundle, env=runtime_environment(runtime))
     proof = json.loads(result.stdout)
     if not proof.get("ok"):
@@ -347,8 +369,7 @@ def main() -> int:
     launched = run_hidden([str(bundle / LAUNCHER_NAME), "--self-test"], cwd=bundle, env=launcher_env)
     if not json.loads(launched.stdout).get("ok"):
         raise RuntimeError("Launcher self-test did not return a successful result.")
-    run_hidden([str(runtime / "python.exe"), "-B", "-s", "-c",
-        "import server,settings,consent,register,maintenance,diagnostics,install,programs,learning,learning_picker,teaching_sessions,process_editor,process_steps,image_targets,image_steps,vendor.guard,vendor.windows; print(\"Application imports passed\")"],
+    run_hidden([str(runtime / "python.exe"), "-B", "-s", "-c", APPLICATION_IMPORT_CHECK],
         cwd=bundle, env=runtime_environment(runtime))
     print("Bundled Python, application imports, and launcher checks passed.", flush=True)
     source_zip = write_source_archive(staging, bundle, snapshot, proof)

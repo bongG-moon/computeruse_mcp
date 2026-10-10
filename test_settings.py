@@ -82,7 +82,7 @@ class SettingsTests(unittest.TestCase):
                 value = default_config(Path(tmp) / "config.json")
             self.assertEqual((value["mode"], value["approval"], value["log_detail"]), ("uia", "client", "metadata"))
             self.assertIn("파일 → 저장", value["programs"][0]["hints"])
-        self.assertEqual(VERSION, "0.14.1")
+        self.assertEqual(VERSION, "0.15.0")
 
     def test_loading_saved_approval_choices_does_not_migrate_or_rewrite_them(self):
         with tempfile.TemporaryDirectory() as tmp:

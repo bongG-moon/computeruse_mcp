@@ -12,7 +12,7 @@ from vendor.guard import check_app, normalize_exe, GuardError
 from vendor.windows import discover
 from program_launch import validate_launch_profile
 
-VERSION = "0.14.1"
+VERSION = "0.15.0"
 PROGRAM_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 
 

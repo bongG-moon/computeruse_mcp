@@ -403,6 +403,48 @@ def windows_image_geometry(window_id):
             user.SetThreadDpiAwarenessContext(previous)
 
 
+def windows_image_coordinate_contract(window_id):
+    """Measure legacy-window logical/physical equality on a single 100% monitor.
+
+    Do not change the process, window or compatibility registry. Thread DPI
+    contexts are restored in finally; inability to measure is not permission.
+    """
+    if os.name != "nt":
+        return None
+    user = ctypes.WinDLL("user32", use_last_error=True)
+    user.GetWindowRect.argtypes, user.GetWindowRect.restype = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)], wintypes.BOOL
+    user.GetWindowDpiAwarenessContext.argtypes, user.GetWindowDpiAwarenessContext.restype = [wintypes.HWND], ctypes.c_void_p
+    user.SetThreadDpiAwarenessContext.argtypes, user.SetThreadDpiAwarenessContext.restype = [ctypes.c_void_p], ctypes.c_void_p
+    user.MonitorFromPoint.argtypes, user.MonitorFromPoint.restype = [wintypes.POINT, wintypes.DWORD], wintypes.HANDLE
+    previous = user.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
+    if not previous:
+        return None
+    try:
+        physical, logical = wintypes.RECT(), wintypes.RECT()
+        if not user.GetWindowRect(window_id, ctypes.byref(physical)):
+            return None
+        monitors = {int(user.MonitorFromPoint(wintypes.POINT(x, y), 0) or 0)
+            for x in (physical.left, physical.right-1) for y in (physical.top, physical.bottom-1)}
+        if len(monitors) != 1 or 0 in monitors:
+            return None
+        shcore = ctypes.WinDLL("shcore", use_last_error=True)
+        shcore.GetScaleFactorForMonitor.argtypes = [wintypes.HANDLE, ctypes.POINTER(ctypes.c_int)]
+        shcore.GetScaleFactorForMonitor.restype = ctypes.c_long
+        scale = ctypes.c_int()
+        if shcore.GetScaleFactorForMonitor(next(iter(monitors)), ctypes.byref(scale)) != 0:
+            return None
+        context = user.GetWindowDpiAwarenessContext(window_id)
+        if not context or not user.SetThreadDpiAwarenessContext(context) or not user.GetWindowRect(window_id, ctypes.byref(logical)):
+            return None
+        bounds = lambda rect: [rect.left, rect.top, rect.right, rect.bottom]
+        return {"physical_bounds": bounds(physical), "logical_bounds": bounds(logical),
+                "monitor_scale_percent": scale.value, "single_monitor": True}
+    except (OSError, AttributeError):
+        return None
+    finally:
+        user.SetThreadDpiAwarenessContext(previous)
+
+
 def native_edit_password(class_name, style):
     """Recognize only known native Edit classes; custom fields stay unknown."""
     name = class_name.lower()
@@ -1041,7 +1083,7 @@ class DriverTransport:
 class Guard:
     def __init__(self, policy, transport=None, process_resolver=windows_process_exe,
                  window_resolver=windows_window_pid, discovery_provider=None, checkpoint_ready_resolver=None,
-                 image_geometry_resolver=None, image_focus_resolver=None):
+                 image_geometry_resolver=None, image_focus_resolver=None, image_coordinate_resolver=None):
         self.policy = validate_policy(policy)
         self.run_dir = Path(policy["run_dir"])
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -1051,6 +1093,7 @@ class Guard:
         self.discovery_provider = discovery_provider or discover_allowed_windows
         self.checkpoint_ready_resolver = checkpoint_ready_resolver or windows_checkpoint_ready
         self.image_geometry_resolver = image_geometry_resolver or windows_image_geometry
+        self.image_coordinate_resolver = image_coordinate_resolver or windows_image_coordinate_contract
         self.image_focus_resolver = image_focus_resolver or windows_image_focus
         self.action_count = 0
         self.observed_targets = set()
@@ -1227,16 +1270,22 @@ class Guard:
         from image_steps import validate_image_step
         from image_targets import png_dimensions
         from operations import OperationError
+        from replay_preflight import validate_geometry, input_coordinate_contract
         step = validate_image_step(step)
         before = self.action_count
         visual = None
         expected_focus = None
+        may_have_dispatched = False
+        match_diagnostic = None
+        coordinate_contract = None
         self.observed_targets.clear()
         def result(code, message, *, verified=False, deferred=False):
             return {"operation": step["operation"], "status": "verified" if verified else "needs_review",
-                    "task_verified": verified, "input_dispatched": self.action_count > before,
+                    "task_verified": verified, "input_dispatched": may_have_dispatched,
                     "verification_deferred": deferred,
-                    "diagnostic": {"code": code, "message": message, "automatic_replay": False}}
+                    "diagnostic": {"code": code, "message": message, "automatic_replay": False,
+                        **({"image_match": copy.deepcopy(match_diagnostic)} if match_diagnostic else {}),
+                        **({"coordinate_contract": copy.deepcopy(coordinate_contract)} if coordinate_contract else {})}}
         try:
             check_active()
             if (not isinstance(target, dict) or set(target) != {"pid", "window_id"}
@@ -1246,9 +1295,11 @@ class Guard:
             policy.update(mode="visual", log_detail="metadata")
             validate_arguments("get_window_state", target, policy, self.process_resolver, self.window_resolver)
             executable = _allowed_pid(target["pid"], self.policy, self.process_resolver)
-            geometry = self.image_geometry_resolver(target["window_id"])
-            if not isinstance(geometry, tuple) or len(geometry) != 5 or geometry[4] not in {1, 2}:
-                raise OperationError("이 프로그램의 DPI 비인식 화면은 Driver 캡처와 클릭 좌표가 어긋날 수 있어 이미지 입력을 중지했습니다.", "image_dpi_unsupported")
+            geometry = validate_geometry(self.image_geometry_resolver(target["window_id"]))
+            is_input = step["operation"] != "wait_for_image"
+            coordinate_proof = self.image_coordinate_resolver(target["window_id"]) if is_input and geometry[4] == 0 else None
+            if is_input:
+                coordinate_contract = input_coordinate_contract(geometry, coordinate_proof)
             def ready():
                 check_active()
                 self.check_stop()
@@ -1258,13 +1309,16 @@ class Guard:
                         or _allowed_pid(target["pid"], self.policy, self.process_resolver) != executable
                         or self.image_geometry_resolver(target["window_id"]) != geometry):
                     raise OperationError("이미지를 읽은 뒤 창의 위치·크기·소유 프로그램이 달라졌습니다. 다시 관찰해야 합니다.", "image_target_changed")
+                if is_input and geometry[4] == 0 and self.image_coordinate_resolver(target["window_id"]) != coordinate_proof:
+                    raise OperationError("이미지를 읽은 뒤 화면 배율이나 좌표 대응이 달라졌습니다.", "image_target_changed")
                 if expected_focus is not None and self.image_focus_resolver(target) != expected_focus:
                     raise OperationError("입력 대상의 포커스가 달라졌습니다. 후속 키와 글자는 보내지 않았습니다.", "image_focus_changed")
             ready()
             visual = Guard(policy, transport=self.transport, process_resolver=self.process_resolver,
                            window_resolver=self.window_resolver, discovery_provider=self.discovery_provider,
                            checkpoint_ready_resolver=self.checkpoint_ready_resolver,
-                           image_geometry_resolver=self.image_geometry_resolver, image_focus_resolver=self.image_focus_resolver)
+                           image_geometry_resolver=self.image_geometry_resolver, image_focus_resolver=self.image_focus_resolver,
+                           image_coordinate_resolver=self.image_coordinate_resolver)
             visual.action_count = self.action_count
             def approve(name, args, call_id, *, request_deadline=None):
                 self.approve(name, args, call_id,
@@ -1272,6 +1326,7 @@ class Guard:
                 ready()  # Human approval may have changed the foreground/geometry.
             visual.approve = approve
             def observe_image():
+                nonlocal coordinate_contract
                 ready()
                 answer = visual.call("get_window_state", target)
                 ready()
@@ -1284,14 +1339,23 @@ class Guard:
                 if (any(metadata.get(k) != v for k, v in target.items())
                         or metadata.get("screenshot_width") != width or metadata.get("screenshot_height") != height):
                     raise OperationError("Driver 캡처의 대상 또는 실제 이미지 크기가 일치하지 않습니다.", "image_coordinate_mismatch")
+                if is_input:
+                    coordinate_contract = input_coordinate_contract(geometry, coordinate_proof, (width, height))
                 return png, width, height
             def locate():
+                nonlocal match_diagnostic
                 png, width, height = observe_image()
                 matched = matcher(step["image_target"], png)
+                match_diagnostic = {key: copy.deepcopy(matched[key]) for key in
+                    ("status", "code", "score", "second_score", "candidate_count", "scale", "screenshot",
+                     "capture_window", "threshold", "ambiguity_margin", "low_detail", "search_reused") if key in matched}
                 ready()
                 if matched.get("status") != "matched":
-                    code = "image_ambiguous" if matched.get("status") == "ambiguous" else "image_not_found"
-                    raise OperationError("같은 이미지가 여러 곳에 있습니다. 주변의 구별되는 내용까지 다시 선택하세요." if code == "image_ambiguous" else "현재 화면에서 저장한 이미지를 찾지 못했습니다.", code)
+                    code = "image_ambiguous" if matched.get("status") == "ambiguous" else "image_template_low_detail" if matched.get("low_detail") else "image_not_found"
+                    messages = {"image_ambiguous": "같은 이미지가 여러 곳에 있습니다. 주변의 구별되는 내용까지 다시 선택하세요.",
+                        "image_template_low_detail": "선택한 이미지에 구별할 내용이 부족합니다. 버튼의 글자나 아이콘을 함께 선택하세요.",
+                        "image_not_found": "현재 화면에서 저장한 이미지를 찾지 못했습니다. 해당 업무 화면이 열려 있는지 먼저 확인하세요."}
+                    raise OperationError(messages[code], code)
                 if (matched.get("screenshot") != {"width": width, "height": height}
                         or any(type(matched.get(k)) is not int for k in ("x", "y"))
                         or not 0 <= matched["x"] < width or not 0 <= matched["y"] < height):
@@ -1302,11 +1366,32 @@ class Guard:
                 return result("image_appeared", "현재 창에서 저장한 이미지를 하나로 확인했습니다.", verified=True)
             operation = step["operation"][6:]
             def dispatch(name, args, *, require_same_window_after=True):
+                nonlocal may_have_dispatched
                 ready()
+                previously_dispatched = may_have_dispatched
+                dispatch_count = visual.action_count
                 try:
                     answer = visual.call(name, {**target, "delivery_mode": "foreground", **args})
                 finally:
                     self.action_count = visual.action_count
+                    if visual.action_count > dispatch_count:
+                        may_have_dispatched = True
+                sources = [answer.get("structuredContent", {})]
+                for row in answer.get("content", []):
+                    if isinstance(row, dict) and row.get("type") == "text":
+                        try:
+                            sources.append(json.loads(row.get("text", "")))
+                        except (ValueError, TypeError):
+                            pass
+                sources = [row for row in sources if isinstance(row, dict)]
+                # A count is an attempted call, not proof of delivered input.
+                # Only explicit, non-contradictory Driver non-delivery can
+                # restore the earlier state. Never clear an earlier focus click.
+                if (any(row.get("input_sent") is False for row in sources)
+                        and not any(row.get("input_sent") is True or
+                            (isinstance(row.get("delivery"), dict) and type(row["delivery"].get("delivered_count")) is int
+                             and row["delivery"]["delivered_count"] > 0) for row in sources)):
+                    may_have_dispatched = previously_dispatched
                 if answer.get("isError"):
                     raise OperationError("이미지 대상의 입력 전달을 확인하지 못했습니다. 같은 동작을 반복하지 않습니다.", "image_input_unconfirmed")
                 if require_same_window_after:

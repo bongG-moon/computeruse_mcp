@@ -57,7 +57,8 @@ def validate_image_step(step):
     return copy.deepcopy(step)
 
 
-def execute_image_step(runtime, step, target, *, verification_state=None, save_verification=None, verify_only=False):
+def execute_image_step(runtime, step, target, *, verification_state=None, save_verification=None, verify_only=False,
+                       prepare_foreground=False):
     step = validate_image_step(step)
     runtime.check_active()
     if (not isinstance(target, dict) or set(target) != {"pid", "window_id"}
@@ -68,6 +69,11 @@ def execute_image_step(runtime, step, target, *, verification_state=None, save_v
     action = getattr(runtime, "image_action", None)
     if not callable(action):
         raise OperationError("이 실행 환경에 이미지 실행 기능이 없습니다.", "image_unavailable")
+    if prepare_foreground and not verify_only and step["operation"] in IMAGE_MUTATIONS:
+        from replay_preflight import prepare_image_foreground
+        prepared = prepare_image_foreground(runtime, target)
+        if prepared is not None:
+            return prepared
     if step["operation"] in IMAGE_MUTATIONS and step.get("expect"):
         return _automatic_image(runtime, step, target, verification_state, save_verification, verify_only)
     if verify_only:

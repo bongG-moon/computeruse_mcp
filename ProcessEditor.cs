@@ -161,8 +161,9 @@ internal static class ProcessEditor
         string ActionCode { get { var choice = action.SelectedItem as Choice; return choice == null ? "" : choice.Code; } }
         bool IsImage { get { return Str(selection, "recognition", "") == "image"; } }
         bool ImageMutation { get { return IsImage && ActionCode != "wait_for_element" && ActionCode != "delay" && ActionCode != "checkpoint" && ActionCode != "wait_for_state"; } }
-        bool AutomaticImage { get { var choice = imageCompletion.SelectedItem as Choice; return ImageMutation && choice != null && choice.Code == "automatic"; } }
-        bool NeedsExpect { get { string code = ActionCode; return AutomaticImage || code == "wait_for_state" || !IsImage && (code == "click" || code == "double_click" || code == "right_click" || code == "press_key" || code == "hotkey"); } }
+        bool ElementClick { get { return !IsImage && (ActionCode == "click" || ActionCode == "double_click" || ActionCode == "right_click"); } }
+        bool AutomaticImage { get { var choice = imageCompletion.SelectedItem as Choice; return (ImageMutation || ElementClick) && choice != null && choice.Code == "automatic"; } }
+        bool NeedsExpect { get { string code = ActionCode; return AutomaticImage || code == "wait_for_state" || !IsImage && (code == "press_key" || code == "hotkey"); } }
         bool NeedsElement { get { return ActionCode != "delay" && ActionCode != "checkpoint" && ActionCode != "wait_for_state"; } }
 
         internal EditorForm(Dictionary<string, object> request, string response)
@@ -214,7 +215,7 @@ internal static class ProcessEditor
             AddSection(timeSection, 74); timeCaption.Bounds = Box(0, 0, 394, 25); timeCaption.ForeColor = muted; timeCaption.Font = new Font(Font.FontFamily, 9, FontStyle.Bold); timeSection.Controls.Add(timeCaption);
             seconds.DecimalPlaces = 0; seconds.Minimum = 0; seconds.Maximum = 60; seconds.Value = 20; Input(seconds, "StepSeconds", Box(0, 29, 130, 34), timeSection);
             timeUnit.Text = "초"; timeUnit.Bounds = Box(142, 32, 80, 28); timeUnit.ForeColor = muted; timeSection.Controls.Add(timeUnit);
-            AddSection(completionSection, 118); Caption("이미지 동작의 완료 확인", 0, completionSection);
+            AddSection(completionSection, 118); Caption("동작의 완료 확인", 0, completionSection);
             ConfigureCombo(imageCompletion); imageCompletion.Items.AddRange(new object[] { new Choice { Code = "human", Label = "화면을 보고 직접 확인" }, new Choice { Code = "automatic", Label = "선택한 요소의 변화로 자동 확인" } });
             Input(imageCompletion, "ImageVerificationMode", Box(0, 29, 394, 34), completionSection); imageCompletion.SelectedIndex = 0;
             completionSection.Controls.Add(new Label { Text = "자동 확인은 아래 요소의 값이 동작 전과 달라지고\n예상 내용과 일치하면 멈추지 않고 이어갑니다.", ForeColor = muted, Font = new Font(Font.FontFamily, 8), Bounds = Box(0, 74, 394, 36) });
@@ -297,7 +298,7 @@ internal static class ProcessEditor
         {
             string code = ActionCode;
             valueSection.Visible = code == "set_value" || code == "select_option" || code == "press_key" || code == "hotkey" || code == "checkpoint" || code == "scroll";
-            optionSection.Visible = code == "select_option"; timeSection.Visible = code == "delay" || code == "wait_for_element" || code == "wait_for_state" || code == "scroll"; completionSection.Visible = ImageMutation; expectSection.Visible = NeedsExpect;
+            optionSection.Visible = code == "select_option"; timeSection.Visible = code == "delay" || code == "wait_for_element" || code == "wait_for_state" || code == "scroll"; completionSection.Visible = ImageMutation || ElementClick; expectSection.Visible = NeedsExpect;
             valueCaption.Text = code == "set_value" ? (IsImage ? "입력칸 전체를 바꿀 내용 (Ctrl+A 후 입력)" : "입력할 내용") : code == "select_option" ? "선택할 항목의 정확한 이름" : code == "press_key" ? "누를 키 이름 (예: Enter, Tab)" : code == "hotkey" ? "동시에 누를 키 (예: Ctrl+S)" : code == "scroll" ? "스크롤 방향 (up / down / left / right)" : "확인 지점 설명";
             timeCaption.Text = code == "delay" ? "기다릴 시간 (초)" : code == "scroll" ? "스크롤 양 (1~20)" : "요소가 나타나기를 기다릴 최대 시간 (초)";
             timeUnit.Text = code == "scroll" ? "칸" : "초"; seconds.Minimum = code == "scroll" ? 1 : 0; seconds.Maximum = code == "scroll" ? 20 : 60;
@@ -375,6 +376,8 @@ internal static class ProcessEditor
         void ShowStepPreview(Dictionary<string, object> item)
         {
             bool replace = false;
+            string repairAction = Str(item, "repair_action", ""), repairValue = "", repairMethod = "auto";
+            bool manual = Str(item, "action", "") == "manual_entry";
             using (Form dialog = new Form()) {
                 dialog.Text = "기록한 동작과 대상 확인"; dialog.Font = Font; dialog.BackColor = Color.FromArgb(245, 247, 251);
                 dialog.StartPosition = FormStartPosition.CenterParent; dialog.FormBorderStyle = FormBorderStyle.FixedDialog; dialog.MaximizeBox = dialog.MinimizeBox = false; dialog.ClientSize = new Size(Px(540), Px(360));
@@ -383,16 +386,38 @@ internal static class ProcessEditor
                     dialog.Controls.Add(picture); string encoded = Str(item, "thumbnail_png", "");
                     try { if (encoded.Length > 0 && encoded.Length <= 1500000) using (var stream = new MemoryStream(Convert.FromBase64String(encoded))) using (Image source = Image.FromStream(stream)) picture.Image = new Bitmap(source); }
                     catch (ArgumentException) { } catch (FormatException) { }
-                    if (picture.Image == null) dialog.Controls.Add(new Label { Text = Str(item, "label", "현재 창") + "\n인식 방식: " + Str(item, "recognition", "uia"), Bounds = Box(40, 142, 460, 100), ForeColor = muted, BackColor = Color.White });
+                    if (picture.Image == null && !manual) dialog.Controls.Add(new Label { Text = Str(item, "label", "현재 창") + "\n인식 방식: " + Str(item, "recognition", "uia"), Bounds = Box(40, 142, 460, 100), ForeColor = muted, BackColor = Color.White });
                     var close = new Button(); ButtonStyle(close, "CloseStepPreview", "확인", Box(404, 307, 112, 34), true, dialog); close.DialogResult = DialogResult.OK; dialog.AcceptButton = close; dialog.CancelButton = close;
-                    if (encoded.Length > 0) {
-                        var choose = new Button(); ButtonStyle(choose, "RetargetStep", "이미지 대상 다시 선택", Box(24, 307, 244, 34), false, dialog);
-                        choose.Click += delegate { replace = true; dialog.DialogResult = DialogResult.OK; dialog.Close(); };
+                    if (Object.Equals(item.ContainsKey("repairable") ? item["repairable"] : null, true)) {
+                        ComboBox repairKind = null; TextBox repairText = null;
+                        if (manual) {
+                            picture.Visible = false;
+                            dialog.Controls.Add(new Label { Text = "이 단계에서 실행할 동작을 고르고 대상을 다시 지정하세요.\n다른 단계와 프로그램·팝업 연결은 유지합니다.", Bounds = Box(24, 110, 492, 54), ForeColor = ink });
+                            repairKind = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Bounds = Box(24, 170, 260, 30), DisplayMember = "Label" };
+                            repairKind.Items.Add(new Choice { Code = "click", Label = "클릭" }); repairKind.Items.Add(new Choice { Code = "double_click", Label = "두 번 클릭" }); repairKind.Items.Add(new Choice { Code = "right_click", Label = "오른쪽 클릭" }); repairKind.Items.Add(new Choice { Code = "set_value", Label = "글자 입력 (전체 바꾸기)" });
+                            for (int index = 0; index < repairKind.Items.Count; index++) if (((Choice)repairKind.Items[index]).Code == repairAction) repairKind.SelectedIndex = index;
+                            dialog.Controls.Add(repairKind);
+                            repairText = new TextBox { Multiline = true, MaxLength = 16000, Bounds = Box(24, 210, 492, 72), Visible = false }; dialog.Controls.Add(repairText);
+                            repairKind.SelectedIndexChanged += delegate { repairText.Visible = repairKind.SelectedItem != null && ((Choice)repairKind.SelectedItem).Code == "set_value"; };
+                        }
+                        Action<string> confirmRepair = delegate(string method) {
+                            if (manual && repairKind.SelectedItem == null) { repairKind.Focus(); return; }
+                            if (manual) { repairAction = ((Choice)repairKind.SelectedItem).Code; repairValue = repairText.Text; }
+                            repairMethod = method; replace = true; dialog.DialogResult = DialogResult.OK; dialog.Close();
+                        };
+                        var choose = new Button(); ButtonStyle(choose, "RetargetStep", "이 단계만 다시 지정", Box(24, 307, manual ? 184 : 244, 34), false, dialog);
+                        choose.Click += delegate { confirmRepair("auto"); };
+                        if (manual) { var image = new Button(); ButtonStyle(image, "RetargetImageStep", "이미지로 다시 지정", Box(216, 307, 180, 34), false, dialog); image.Click += delegate { confirmRepair("image"); }; }
                     }
                     dialog.ShowDialog(this); if (picture.Image != null) picture.Image.Dispose();
                 }
             }
-            if (replace) { Send("retarget_step", new Dictionary<string, object> { { "index", Num(item, "index", -1) } }, null); if (busy) { hiddenForPicker = true; Hide(); } }
+            if (replace) {
+                var repair = new Dictionary<string, object> { { "index", Num(item, "index", -1) } };
+                if (repairMethod == "image") repair["method"] = "image";
+                if (manual) { repair["action"] = repairAction; if (repairAction == "set_value") repair["value"] = repairValue; }
+                Send("retarget_step", repair, null); if (busy) { hiddenForPicker = true; Hide(); }
+            }
         }
         void SetRecordingReview(Dictionary<string, object> value) {
             recordingReview = value;
@@ -421,7 +446,7 @@ internal static class ProcessEditor
             if (NeedsElement && selection == null) { ShowError("먼저 동작할 요소를 직접 선택해 주세요."); return; }
             if (NeedsExpect && expectation == null) { ShowError("동작 뒤 확인할 요소를 선택해 주세요."); return; }
             var payload = Target(); string code = ActionCode; payload["action"] = code;
-            if (ImageMutation) payload["completion_mode"] = AutomaticImage ? "automatic" : "human";
+            if (ImageMutation || ElementClick) payload["completion_mode"] = AutomaticImage ? "automatic" : "human";
             if (NeedsElement) payload["selection_id"] = Str(selection, "selection_id", "");
             if (code == "set_value" || code == "select_option" || code == "checkpoint") payload["value"] = value.Text;
             if (code == "press_key") payload["key"] = value.Text.Trim();

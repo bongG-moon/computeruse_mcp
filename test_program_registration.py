@@ -133,6 +133,34 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(answer["program"]["exe"], str(self.app))
         self.assertEqual(self.manager.registration.candidate_source.call_count, 2)
 
+    def test_uri_only_offers_actual_windows_without_registering_handler(self):
+        self.manager.registration.candidate_source = Mock(return_value=[self.row()])
+        before = self.config_path.read_bytes()
+        with patch('program_registration.protocol_handler', return_value={'registered_handler': 'UnrelatedLauncher.exe', 'handler_is_control_target': False}):
+            answer = self.call(launch_uri='company-test://server/menu')
+        self.assertEqual(answer['status'], 'choose_program_window')
+        self.assertFalse(answer['saved'])
+        self.assertFalse(answer['input_dispatched'])
+        self.assertEqual(self.config_path.read_bytes(), before)
+        selected = self.call(candidate_id=answer['candidates'][0]['candidate_id'], launch_uri=answer['launch_uri'])
+        self.assertEqual(selected['status'], 'registered')
+        self.assertEqual(selected['program']['exe'], str(self.app))
+        self.assertEqual(selected['program']['launch'], {'kind': 'uri', 'target': 'company-test://server/menu'})
+        self.assertFalse(selected['reconnect_required'])
+
+    def test_previously_confirmed_uri_does_not_require_reselecting_window(self):
+        first = self.call(exe=str(self.app), launch_uri='company-test://server/menu')
+        self.manager.registration.candidate_source = Mock(side_effect=AssertionError('no rediscovery'))
+        again = self.call(launch_uri='company-test://server/menu')
+        self.assertEqual(again['status'], 'already_present')
+        self.assertEqual(again['program'], first['program'])
+
+    def test_missing_program_returns_next_tool_not_configuration_hunt(self):
+        answer = self.manager.call('computer_register_program', {})['structuredContent']
+        self.assertEqual(answer['next_tool'], 'computer_program_candidates')
+        self.assertFalse(answer['input_dispatched'])
+        self.assertEqual(answer['diagnostic']['stage'], 'program_registration')
+
     def test_stale_ambiguous_and_pid_reused_candidates_never_write(self):
         source = Mock(return_value=[self.row()])
         self.manager.registration.candidate_source = source

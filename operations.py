@@ -56,6 +56,7 @@ OPERATION_SCHEMA = {
         "edit_selector": SELECTOR_SCHEMA,
         "commit_key": {"enum": ["ENTER", "TAB"]},
         "expect": {"type": "array", "minItems": 1, "maxItems": 20, "items": ASSERTION_SCHEMA},
+        "completion_mode": {"enum": ["human"], "description": "Explicit recorded click/double_click/right_click only: dispatch once and defer completion to a separate human screenshot checkpoint. Never returns task_verified. Cannot combine with expect or window_transition."},
         "window_transition": WINDOW_TRANSITION_SCHEMA,
         "verification_timeout_ms": {"type": "integer", "minimum": 0, "maximum": 60000,
             "description": "Completion observation/polling deadline, default 10000ms. A running observation keeps its normal read budget within step_timeout_ms; late results do not pass. Zero means one normal bounded read."},
@@ -108,6 +109,10 @@ def validate_step(step):
     if operation not in OPERATION_SCHEMA["properties"]["operation"]["enum"]:
         raise OperationError("지원하지 않는 작업 종류입니다.")
     result = copy.deepcopy(step)
+    human_completion = step.get("completion_mode") == "human"
+    if "completion_mode" in step and (not human_completion or operation not in ("click", "double_click", "right_click")
+            or "expect" in step or "window_transition" in step):
+        raise OperationError("직접 화면 확인은 클릭 동작에만 지정하며 expect 또는 window_transition과 함께 사용할 수 없습니다.")
     if "window_transition" in step:
         try:
             result["window_transition"] = validate_transition(step["window_transition"])
@@ -169,7 +174,7 @@ def validate_step(step):
         result["edit_selector"] = validate_selector(step.get("edit_selector"))
     if "expect" in step:
         result["expect"] = validate_assertions(step["expect"])
-    if operation in ("click", "double_click", "right_click", "press_key", "hotkey", "assert") and not step.get("expect"):
+    if operation in ("click", "double_click", "right_click", "press_key", "hotkey", "assert") and not step.get("expect") and not human_completion:
         raise OperationError("클릭, 키 입력, assert에는 실제 완료를 확인할 expect 조건이 필요합니다.")
     timeout = step.get("verification_timeout_ms", 10000)
     if type(timeout) is not int or not 0 <= timeout <= 60000:
@@ -184,6 +189,8 @@ def validate_step(step):
 def verification_step(step):
     """Return a read-only recheck; useful when resuming without replaying input."""
     step = validate_step(step)
+    if step.get("completion_mode") == "human":
+        raise OperationError("직접 확인 방식의 입력은 화면 확인 지점에서 결과를 확인하세요. 입력을 자동 반복하지 않습니다.", "human_review_required")
     checks = copy.deepcopy(step.get("expect", []))
     if step["operation"] in ("set_value", "select_option"):
         checks.insert(0, {"selector": step["selector"], "property": "value", "equals": step["value"]})
@@ -842,7 +849,8 @@ class _Execution:
                 **({"transition": self.transition} if self.transition is not None else {})}
 
     def run(self):
-        assertions = verification_step(self.step)["expect"]
+        human_completion = self.step.get("completion_mode") == "human"
+        assertions = [] if human_completion else verification_step(self.step)["expect"]
         try:
             self.runtime.check_active()
             if self.step["operation"] == "assert":
@@ -861,7 +869,7 @@ class _Execution:
                 self._baseline(snapshot, assertions)
                 requires_change = any(check.get("require_change") for check in assertions)
                 element = None if window_key else _unique(snapshot, selector)
-                if self.transition_spec["mode"] != "same_window":
+                if not human_completion and self.transition_spec["mode"] != "same_window":
                     self.transition_tracker = WindowTransition(self.runtime, self.target, self.transition_spec)
                     self.transition_tracker.prepare()
                     self._remaining()
@@ -878,6 +886,12 @@ class _Execution:
                     self._mutate("set_value", element, snapshot, value=self.step["value"])
                 elif operation in ("click", "double_click", "right_click"):
                     self._mutate(operation, element, snapshot)
+                    if human_completion:
+                        answer = self._result("needs_review" if self.dispatched else "failed",
+                            "human_review_required" if self.dispatched else "input_not_dispatched",
+                            "클릭을 전달했습니다. 다음 화면 확인에서 결과를 확인하세요." if self.dispatched else "클릭이 전달되지 않았습니다.")
+                        answer["verification_deferred"] = self.dispatched
+                        return answer
                 elif operation in ("press_key", "hotkey"):
                     arguments = ({"key": self.step["key"], **({"modifiers": self.step["modifiers"]} if "modifiers" in self.step else {})}
                                  if operation == "press_key" else {"keys": self.step["keys"]})
@@ -972,7 +986,7 @@ class _Execution:
                     code = getattr(error, "code", "session_unavailable")
             # One read-only recovery attempt can document current conditions;
             # even if they match, an errored mutation stays unknown, never replayed.
-            if self.dispatched and not self.no_parent_recovery and not self.read_failed and not code.startswith("transition_") and code not in ("observation_error", "driver_timeout", "stopped", "session_unavailable", "step_timeout", "verification_timeout"):
+            if self.dispatched and not human_completion and not self.no_parent_recovery and not self.read_failed and not code.startswith("transition_") and code not in ("observation_error", "driver_timeout", "stopped", "session_unavailable", "step_timeout", "verification_timeout"):
                 try:
                     snapshot = self._observe([a["selector"] for a in assertions])
                     self._evaluate(snapshot, assertions)
