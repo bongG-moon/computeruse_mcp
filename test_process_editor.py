@@ -113,6 +113,81 @@ class DraftTests(unittest.TestCase):
         with self.assertRaises(OperationError):
             ProcessDraft([self.program], original)
 
+    def test_edit_value_preserves_other_steps_and_updates_its_own_verification(self):
+        self.add("set_value", value="W", expect={"selection_id": self.selection["selection_id"], "property": "value", "equals": "W"})
+        self.add("delay", seconds=2)
+        original = copy.deepcopy(self.draft.steps)
+        self.draft.edit({"index": 0, "value": "N"})
+        self.assertEqual(self.draft.steps[0]["value"], "N")
+        self.assertEqual(self.draft.steps[0]["expect"][0]["equals"], "N")
+        self.assertEqual(self.draft.steps[0]["selector"], original[0]["selector"])
+        self.assertEqual(self.draft.steps[1:], original[1:])
+
+    def test_edit_variable_binds_input_and_result_and_has_default(self):
+        self.add("set_value", value="W", expect={"selection_id": self.selection["selection_id"], "property": "value", "equals": "W"})
+        self.draft.edit({"index": 0, "value": "N", "variable": "condition", "variable_label": "조회 조건"})
+        self.assertEqual(self.draft.steps[0]["value"], "${condition}")
+        self.assertEqual(self.draft.steps[0]["expect"][0]["equals"], "${condition}")
+        self.assertEqual(self.draft.variables["condition"]["default"], "N")
+        self.assertEqual(self.draft.variables["condition"]["description"], "조회 조건")
+        self.draft.edit({"index": 0, "value": "W", "variable": ""})
+        self.assertEqual(self.draft.steps[0]["value"], "W")
+        self.assertEqual(self.draft.steps[0]["expect"][0]["equals"], "W")
+
+    def test_invalid_partial_edit_rolls_back_both_steps_and_variables(self):
+        self.add("set_value", value="W")
+        before = copy.deepcopy(self.draft.steps)
+        for change in ({"value": 42}, {"seconds": 10}, {"variable": "not allowed"}, {"selector": {"name": "unobserved"}}):
+            with self.subTest(change=change), self.assertRaises(OperationError):
+                self.draft.edit({"index": 0, **change})
+            self.assertEqual(self.draft.steps, before)
+            self.assertEqual(self.draft.variables, {})
+
+    def test_retarget_uia_input_updates_self_check_without_changing_value(self):
+        self.add("set_value", value="W", expect={"selection_id": self.selection["selection_id"], "property": "value", "equals": "W"})
+        original = copy.deepcopy(self.draft.steps[0])
+        self.draft.selections[self.selection["selection_id"]]["selector"] = {"automation_id": "replacement", "role": "Edit"}
+        self.draft.repair(0, self.selection)
+        self.assertEqual(self.draft.steps[0]["value"], "W")
+        self.assertEqual(self.draft.steps[0]["selector"]["automation_id"], "replacement")
+        self.assertEqual(self.draft.steps[0]["expect"][0]["selector"], self.draft.steps[0]["selector"])
+        self.assertNotEqual(self.draft.steps[0]["selector"], original["selector"])
+
+    def test_completion_removes_only_paired_deferred_checkpoint(self):
+        self.add("click", completion_mode="human")
+        self.add("delay", seconds=2)
+        tail = copy.deepcopy(self.draft.steps[2])
+        self.draft.completion({"index": 0, "selection_id": self.selection["selection_id"], "property": "value", "equals": "done"})
+        self.assertEqual(len(self.draft.steps), 2)
+        self.assertNotIn("completion_mode", self.draft.steps[0])
+        self.assertEqual(self.draft.steps[0]["expect"][0]["equals"], "done")
+        self.assertEqual(self.draft.steps[1], tail)
+
+    def test_completion_preserves_explicit_checkpoint_after_verified_input(self):
+        self.add("set_value", value="W")
+        self.add("checkpoint", value="추가 업무 확인")
+        self.draft.completion({"index": 0, "selection_id": self.selection["selection_id"], "property": "value", "equals": "W"})
+        self.assertEqual(len(self.draft.steps), 2)
+        self.assertEqual(self.draft.steps[1]["message"], "추가 업무 확인")
+
+    def test_visual_completion_is_explicit_and_existing_checks_remain_human(self):
+        self.add("click", completion_mode="human")
+        self.add("click", completion_mode="visual")
+        self.assertNotIn("review_mode", self.draft.steps[1])
+        self.assertEqual(self.draft.steps[3]["review_mode"], "visual")
+
+    def test_existing_repeat_group_survives_editor_reorder_and_save_draft(self):
+        task = {"id": "a" * 32, "variables": {"devices": {"type": "list", "items": {"type": "text"}, "default": ["first", "second"]}},
+                "steps": [{"operation": "foreach", "step_id": "device-group", "input": "devices", "item": "device", "steps": [
+                    {"operation": "set_value", "program_id": "editor", "selector": FIELD_SELECTOR, "value": "${device}"}]},
+                    {"operation": "delay", "program_id": "editor", "duration_ms": 100}]}
+        draft = ProcessDraft([self.program], task)
+        group = copy.deepcopy(draft.steps[0])
+        self.assertEqual(draft.summaries()[0]["action_label"], "목록 반복")
+        draft.change("move_step", {"index": 1, "direction": -1})
+        self.assertEqual(draft.steps[1], group)
+        draft.validate()
+
 
 class RecordingSemanticTests(unittest.TestCase):
     def setUp(self):
@@ -164,6 +239,127 @@ class RecordingSemanticTests(unittest.TestCase):
         self.draft.recorded([{**image_choice(), "program_id": "editor", "operation": "click"}])
         self.assertEqual([s["operation"] for s in self.draft.steps], ["image_click", "checkpoint"])
         self.assertNotIn("expect", self.draft.steps[0])
+
+    def test_native_toggle_button_keeps_real_pointer_click_when_driver_has_no_semantic_target(self):
+        event, snapshots = self.event("set_checked", True)
+        event["native_target"]["element"]["role"] = "Button"
+        snapshots[("editor", "main")]["elements"][0].update(role="Button", actions=["click"])
+        event.update(requested_operation="click", pointer_evidence={"source": "native_mouse_hook", "operation": "click", "before_input": True})
+        self.draft.recorded([event], snapshots=snapshots, review_mode="visual")
+        self.assertEqual([s["operation"] for s in self.draft.steps], ["image_click", "checkpoint"])
+        self.assertEqual(self.draft.steps[0]["image_target"]["template_png"], event["template_png"])
+        self.assertNotIn("checked", self.draft.steps[0]); self.assertNotIn("expect", self.draft.steps[0])
+        self.assertEqual(self.draft.steps[1]["review_mode"], "visual")
+        self.assertEqual(self.draft.recording_import_diagnostics[0]["fallback"], "recorded_image_click")
+        self.assertEqual(self.draft.recording_warnings, [])
+        self.assertNotIn("신청자", json.dumps(self.draft.recording_import_diagnostics, ensure_ascii=False))
+
+    def test_toggle_fallback_requires_own_preinput_pixels_and_cannot_bypass_protected_control(self):
+        for failure in ("no_proof", "not_preinput", "no_pixels", "protected", "drag", "keyboard"):
+            event, snapshots = self.event("set_checked", True)
+            event.update(requested_operation="click", pointer_evidence={"source": "native_mouse_hook", "operation": "click", "before_input": True})
+            snapshots[("editor", "main")]["elements"][0]["actions"] = []
+            if failure == "no_proof": event.pop("pointer_evidence")
+            elif failure == "not_preinput": event["pointer_evidence"]["before_input"] = False
+            elif failure == "no_pixels": event.pop("template_png")
+            elif failure == "protected": snapshots[("editor", "main")]["elements"][0]["is_password"] = True
+            elif failure == "drag": event["reason"] = "drag_requires_manual_setup"
+            else: event["input_method"] = "keyboard_unverified"
+            draft = ProcessDraft([self.program])
+            with self.subTest(failure=failure):
+                draft.recorded([event], snapshots=snapshots)
+                self.assertEqual(draft.steps[0]["operation"], "manual_entry")
+
+    def test_historical_checked_value_survives_later_recorded_radio_side_effect(self):
+        first, snapshots = self.event("set_checked", True)
+        second = copy.deepcopy(first)
+        second["native_target"]["element"].update(automation_id="second", name="Second")
+        first["event_evidence"] = {"source": "uia_recording", "identity": "first-runtime", "after_input": True}
+        second["event_evidence"] = {"source": "uia_recording", "identity": "second-runtime", "after_input": True}
+        for event in (first, second):
+            event.update(requested_operation="click", pointer_evidence={"source": "native_mouse_hook", "operation": "click", "before_input": True})
+        element = snapshots[("editor", "main")]["elements"][0]
+        snapshots[("editor", "main")]["elements"].append({**element, "element_index": 2, "automation_id": "second", "name": "Second"})
+        element["selected"] = False
+        self.draft.recorded([first, second], snapshots=snapshots)
+        self.assertEqual([s["operation"] for s in self.draft.steps], ["set_checked", "set_checked"])
+        self.assertTrue(all(s["checked"] is True and s["expect"][0]["equals"] is True for s in self.draft.steps))
+
+    def test_failed_native_semantics_preserve_actual_capture_failure_without_promoting_rejected_pixels(self):
+        event, snapshots = self.event("set_checked", True)
+        event.pop("template_png")
+        event.update(capture_issue="template_low_detail", rejected_capture={"png": "PRIVATE_REJECTED_PIXELS"},
+            requested_operation="click", pointer_evidence={"source": "native_mouse_hook", "operation": "click", "before_input": False})
+        self.draft.recorded([event], snapshots={})
+        self.assertEqual(self.draft.steps[0]["manual_reason"], "template_low_detail")
+        self.assertEqual(self.draft.steps[0]["repair_action"], "click")
+        self.assertEqual(self.draft.recording_import_diagnostics[0]["capture_issue"], "template_low_detail")
+        self.assertNotIn("PRIVATE_REJECTED_PIXELS", json.dumps(self.draft.steps))
+        self.assertNotIn("PRIVATE_REJECTED_PIXELS", json.dumps(self.draft.recording_import_diagnostics))
+        self.assertNotIn("image_target", self.draft.steps[0])
+        with self.assertRaises(OperationError): self.draft.validate()
+
+    def test_explicit_target_repairs_clear_only_the_associated_warning_after_last_step(self):
+        event, _ = self.event("set_checked", True)
+        event.pop("template_png")
+        event.update(requested_operation="click", capture_issue="template_low_detail")
+        with mock.patch.object(self.draft, "_semantic_step", side_effect=OperationError("missing target", "picker_not_found")):
+            self.draft.recorded([event, copy.deepcopy(event)])
+        ids = [self.draft.steps[i]["step_id"] for i in (0, 2)]
+        self.assertNotEqual(*ids)
+        selection = self.draft.remember_image(self.program, image_choice())
+        self.draft.repair(0, selection, action="click")
+        self.assertEqual(self.draft.recording_warnings, ["semantic_target_unverified"])
+        self.assertFalse(self.draft.recording_acknowledged)
+        with self.assertRaises(OperationError): self.draft.validate()
+        self.draft.repair(2, selection, action="click")
+        self.assertEqual(self.draft.recording_warnings, [])
+        self.assertFalse(self.draft.recording_acknowledged, "Target repair is not a fabricated warning acknowledgement")
+        self.assertFalse(self.draft.recording_review()["partial"])
+        self.draft.validate()
+
+    def test_target_repair_preserves_missing_keyboard_and_inherited_semantic_warnings(self):
+        for warning in ("outside_target_not_recorded", "recording_event_limit", "recording_timeout_partial",
+                        "recording_keyboard_failed", "recording_method_unverified", "semantic_target_unverified"):
+            with self.subTest(warning=warning):
+                draft = ProcessDraft([self.program])
+                event, _ = self.event("set_checked", True)
+                event.pop("template_png"); event["requested_operation"] = "click"
+                with mock.patch.object(draft, "_semantic_step", side_effect=OperationError("missing target", "picker_not_found")):
+                    draft.recorded([event], warning_codes=[warning])
+                chosen = draft.remember_image(self.program, image_choice())
+                draft.repair(0, chosen, action="click")
+                self.assertEqual(draft.recording_warnings, [warning])
+                self.assertFalse(draft.recording_acknowledged)
+                with self.assertRaises(OperationError) as failed: draft.validate()
+                self.assertEqual(failed.exception.code, "recording_review_required")
+
+    def test_target_repair_does_not_resolve_unrelated_unverified_value_or_deleted_issue(self):
+        for mode in ("value", "deleted", "missing_native"):
+            with self.subTest(mode=mode):
+                draft = ProcessDraft([self.program]); event, _ = self.event("set_checked", True)
+                event.pop("template_png"); event["requested_operation"] = "click"
+                with mock.patch.object(draft, "_semantic_step", side_effect=OperationError("missing target", "picker_not_found")):
+                    draft.recorded([event])
+                if mode == "value":
+                    with mock.patch.object(draft, "_semantic_step", side_effect=OperationError("unknown value", "recording_final_value_unconfirmed")):
+                        draft.recorded([event])
+                elif mode == "missing_native":
+                    other = copy.deepcopy(event); other.pop("native_target"); draft.recorded([other])
+                else:
+                    with mock.patch.object(draft, "_semantic_step", side_effect=OperationError("missing target", "picker_not_found")):
+                        draft.recorded([event])
+                    draft.change("remove_step", {"index": 2})
+                chosen = draft.remember_image(self.program, image_choice())
+                draft.repair(0, chosen, action="click")
+                self.assertIn("semantic_target_unverified", draft.recording_warnings)
+
+    def test_historical_value_without_owned_after_input_evidence_is_still_unverified(self):
+        event, snapshots = self.event("set_checked", True)
+        snapshots[("editor", "main")]["elements"][0]["selected"] = False
+        later = {**image_choice(), "program_id": "editor", "operation": "click"}
+        self.draft.recorded([event, later], snapshots=snapshots)
+        self.assertEqual(self.draft.steps[0]["operation"], "manual_entry")
 
     def test_typed_combo_final_value_does_not_invent_the_successful_input_method(self):
         event, snapshots = self.event("select_option", "typed result")
@@ -417,6 +613,121 @@ class EditorIPCTests(unittest.TestCase):
         self.assertEqual(self.manager.tasks.all(), [])
         self.assertEqual(self.runtime.calls, [])
         self.assertFalse(any(path.exists() for path in self.paths.values()))
+
+    def test_hosted_identity_is_pinned_for_selection_and_child_replacement_is_rejected(self):
+        identity = {"app_pid": 12, "app_started": 50, "app_window_id": 23}
+        self.runtime.guard.hosted_target = mock.Mock(side_effect=lambda target: copy.deepcopy(identity))
+        self.context()
+        opened = self.start()
+        job = self.editors.jobs[opened["editor_id"]]
+        self.assertEqual(job["hosted_targets"][(TARGET["pid"], TARGET["window_id"])], identity)
+        identity["app_started"] = 60
+        with mock.patch.object(self.editors, "_visual") as visual:
+            answer = self.command("pick_target", {**self.args["targets"][0], "purpose": "action"})
+        self.assertEqual(answer["status"], "error")
+        self.assertEqual(answer["code"], "editor_target_changed")
+        visual.assert_not_called()
+        self.status(opened, cancel=True)
+        self.terminal(opened)
+
+    def test_unified_target_selection_uses_same_choice_without_f8_fallback(self):
+        self.context(); self.start()
+        with mock.patch.object(self.editors, "_visual", return_value=image_choice()) as visual, mock.patch("process_editor._run_helper") as old_picker:
+            answer = self.command("pick_target", {**self.args["targets"][0], "purpose": "action"})
+        self.assertEqual(answer["status"], "ok", answer)
+        self.assertEqual(answer["selection"]["recognition"], "image")
+        old_picker.assert_not_called()
+        self.assertTrue(visual.call_args.args[2]["auto_capture"])
+        self.assertTrue(visual.call_args.args[2]["include_native"])
+
+    def test_unified_target_uses_native_candidate_only_after_driver_match(self):
+        self.context(); self.start()
+        with mock.patch.object(self.editors, "_visual", return_value=image_choice(native_target=native_choice())), mock.patch("process_editor._run_helper") as old_picker:
+            answer = self.command("pick_target", {**self.args["targets"][0], "purpose": "action"})
+        self.assertEqual(answer["status"], "ok", answer)
+        self.assertEqual(answer["selection"]["recognition"], "uia")
+        old_picker.assert_not_called()
+
+    def test_trial_uses_isolated_draft_does_not_save_or_claim_unknown_success(self):
+        self.context(); job = self.start()
+        self.command("add_step", {**self.args["targets"][0], "action": "delay", "seconds": .1})
+        before = copy.deepcopy(self.editors.jobs[job["editor_id"]]["draft"].steps)
+        def trial(runtime, task, targets):
+            self.assertIs(runtime, self.runtime)
+            self.assertEqual(targets, self.args["targets"])
+            task["steps"][0]["duration_ms"] = 990
+            return {"status": "awaiting_checkpoint", "task_verified": False, "run_id": "test-run", "content": [{"type": "image", "data": "private"}]}
+        self.editors.test_runner = trial
+        answer = self.command("test_run", {"name": "trial", "description": ""})
+        self.assertEqual(answer["status"], "ok", answer)
+        self.assertFalse(answer["test_result"]["task_verified"])
+        self.assertNotIn("content", answer["test_result"])
+        self.assertEqual(self.manager.tasks.all(), [])
+        self.assertEqual(self.editors.jobs[job["editor_id"]]["draft"].steps, before)
+        self.assertEqual(self.status(job)["last_test"]["run_id"], "test-run")
+
+    def test_trial_resume_retains_original_draft_and_requires_native_ready(self):
+        self.context(); job = self.start()
+        self.command("add_step", {**self.args["targets"][0], "action": "delay", "seconds": .1})
+        self.editors.test_runner = mock.Mock(return_value={"status": "needs_review", "task_verified": False, "run_id": "trial-one"})
+        self.command("test_run", {"name": "trial", "description": ""})
+        self.command("edit_step", {"index": 0, "seconds": .9})
+        self.editors.test_runner.return_value = {"status": "verified", "task_verified": True, "run_id": "trial-one"}
+        review = {"token": "observed"}
+        with mock.patch.object(self.editors, "_trial_signal") as signal:
+            result = self.editors.resume_test(job["editor_id"], self.runtime, observation_review=review)
+        call = self.editors.test_runner.call_args
+        self.assertEqual(call.args[1]["steps"][0]["duration_ms"], 100)
+        self.assertEqual(call.kwargs["resume_run_id"], "trial-one")
+        self.assertEqual(call.kwargs["observation_review"], review)
+        self.assertEqual([call.args[1] for call in signal.call_args_list], ["running", "finished"])
+        self.assertTrue(result["last_test"]["task_verified"])
+        self.assertEqual(self.manager.tasks.all(), [])
+        count = self.editors.test_runner.call_count
+        with mock.patch.object(self.editors, "_trial_signal") as signal, self.assertRaises(OperationError):
+            self.editors.resume_test(job["editor_id"], self.runtime, observation_review=review)
+        signal.assert_not_called()
+        self.assertEqual(self.editors.test_runner.call_count, count)
+
+    def test_trial_resume_hidden_ack_failure_does_not_dispatch_or_mask_error(self):
+        self.context(); job = self.start()
+        self.command("add_step", {**self.args["targets"][0], "action": "delay", "seconds": .1})
+        self.editors.test_runner = mock.Mock(return_value={"status": "needs_review", "task_verified": False, "run_id": "trial-one"})
+        self.command("test_run", {"name": "trial", "description": ""})
+        count = self.editors.test_runner.call_count
+        with mock.patch.object(self.editors, "_trial_signal", side_effect=[OperationError("not hidden", "editor_test_not_ready"), OSError("helper already closed")]):
+            with self.assertRaises(OperationError) as caught:
+                self.editors.resume_test(job["editor_id"], self.runtime, observation_review={"token": "observed"})
+        self.assertEqual(caught.exception.code, "editor_test_not_ready")
+        self.assertEqual(self.editors.test_runner.call_count, count)
+        lock = self.editors.jobs[job["editor_id"]]["interaction_lock"]
+        self.assertTrue(lock.acquire(blocking=False))
+        lock.release()
+
+    def test_trial_status_never_sends_screenshots_to_unverified_client(self):
+        self.context(); job = self.start()
+        self.command("add_step", {**self.args["targets"][0], "action": "delay", "seconds": .1})
+        self.editors.test_runner = mock.Mock(return_value={"status": "needs_review", "task_verified": False, "run_id": "trial-one",
+            "visual_review": {"id": "review"}, "observation_content": [{"type": "image", "data": "localpixels"}]})
+        self.command("test_run", {"name": "trial", "description": ""})
+        self.assertNotIn("observation_content", self.editors.status(job["editor_id"]))
+        self.editors.visual_review_enabled = lambda runtime: True
+        self.assertEqual(self.editors.status(job["editor_id"])["observation_content"][0]["data"], "localpixels")
+        self.editors.visual_review_enabled = lambda runtime: False
+        self.assertNotIn("observation_content", self.editors.status(job["editor_id"]))
+
+    def test_trial_human_review_retains_private_capture_for_facade(self):
+        self.context(); job = self.start()
+        self.command("add_step", {**self.args["targets"][0], "action": "delay", "seconds": .1})
+        content = [{"type": "image", "data": "local-review-only"}]
+        self.editors.test_runner = mock.Mock(return_value={"status": "needs_review", "task_verified": False, "run_id": "trial-one",
+            "checkpoint_id": "human-review", "checkpoint_content": content})
+        reply = self.command("test_run", {"name": "trial", "description": ""})
+        self.assertNotIn("checkpoint_content", reply["test_result"])
+        response = self.editors.status(job["editor_id"])
+        self.assertEqual(response["checkpoint_content"], content)
+        response["checkpoint_content"][0]["data"] = "mutated"
+        self.assertEqual(self.editors.status(job["editor_id"])["checkpoint_content"], content)
 
     def test_different_duplicate_reports_busy_without_opening_a_second_editor(self):
         self.context(); job = self.start()
@@ -751,6 +1062,68 @@ class EditorIPCTests(unittest.TestCase):
         atomic_json(self.paths["response"], {"nonce": self.nonce, "status": "saved"})
         self.terminal(job)
 
+    def test_refused_recording_preflight_never_opens_unusable_recorder_and_keeps_draft(self):
+        self.context(); job = self.start()
+        self.command("add_step", {**self.args["targets"][0], "action": "delay", "seconds": .1})
+        draft = self.editors.jobs[job["editor_id"]]["draft"]
+        previous = copy.deepcopy(draft.steps)
+        blocked = {"status": "blocked", "ready_for_input": False, "capture_verified": False,
+            "diagnostic": {"code": "image_capture_refused", "message": "Driver session expired"}}
+        with mock.patch("replay_preflight.image_replay_preflight", return_value=blocked), \
+                mock.patch.object(self.editors, "_visual") as visual:
+            answer = self.command("record", {})
+        self.assertEqual(answer["code"], "image_capture_refused")
+        self.assertIn("Driver session expired", answer["message"])
+        self.assertIn("아직 녹화를 시작하지 않았습니다", answer["message"])
+        visual.assert_not_called()
+        self.assertEqual(draft.steps, previous)
+        self.assertEqual(self.status(job)["recording_preflight"][0]["diagnostic"], blocked["diagnostic"])
+
+    def test_recording_receipt_reanalysis_is_readonly_and_never_duplicates_or_overwrites_edits(self):
+        self.context(); opened = self.start(); job = self.editors.jobs[opened["editor_id"]]
+        event = {**image_choice(), "program_id": "editor", "operation": "click"}
+        with mock.patch("replay_preflight.image_replay_preflight", return_value={"ready_for_input": True}), \
+                mock.patch.object(self.editors, "_visual", return_value={"events": [event]}):
+            result = self.command("record", {})
+        self.assertEqual(result["status"], "ok")
+        original = copy.deepcopy(job["draft"].steps)
+        receipt = job["last_recording"]
+        raw = receipt["path"].read_bytes()
+        with mock.patch.object(self.editors, "_visual") as visual:
+            reimported = self.command("reimport_recording", {})
+        self.assertEqual(reimported["status"], "ok"); visual.assert_not_called()
+        self.assertEqual(job["draft"].steps, original)
+        self.assertEqual(receipt["path"].read_bytes(), raw)
+        self.assertNotIn("template_png", json.dumps(self.status(opened)))
+        self.assertFalse(self.status(opened)["recording_import"]["input_dispatched"])
+        self.command("add_step", {**self.args["targets"][0], "action": "delay", "seconds": .1})
+        edited = copy.deepcopy(job["draft"].steps)
+        self.assertEqual(self.command("reimport_recording", {})["code"], "recording_draft_changed")
+        self.assertEqual(job["draft"].steps, edited)
+        self.assertEqual(self.runtime.mutations, [])
+        self.status(opened, cancel=True); self.terminal(opened)
+        self.assertTrue(receipt["path"].is_file())
+
+    def test_failed_normalization_preserves_original_receipt_and_draft_for_retry(self):
+        self.context(); opened = self.start(); job = self.editors.jobs[opened["editor_id"]]
+        event = {**image_choice(), "program_id": "editor", "operation": "click"}
+        before = copy.deepcopy(job["draft"].__dict__)
+        with mock.patch("replay_preflight.image_replay_preflight", return_value={"ready_for_input": True}), \
+                mock.patch.object(self.editors, "_visual", return_value={"events": [event]}), \
+                mock.patch.object(ProcessDraft, "recorded", side_effect=OperationError("normalizer failed", "test_failure")):
+            result = self.command("record", {})
+        self.assertEqual(result["code"], "test_failure")
+        self.assertTrue(result["recording_receipt_available"])
+        self.assertEqual(job["draft"].__dict__, before)
+        receipt = job["last_recording"]
+        self.assertEqual(json.loads(receipt["path"].read_text(encoding="utf-8"))["recording"]["events"], [event])
+        with mock.patch.object(self.editors, "_visual") as visual:
+            recovered = self.command("reimport_recording", {})
+        self.assertEqual(recovered["status"], "ok"); visual.assert_not_called()
+        self.assertEqual([s["operation"] for s in job["draft"].steps], ["image_click", "checkpoint"])
+        self.assertEqual(self.runtime.mutations, [])
+        self.status(opened, cancel=True); self.terminal(opened)
+
     def test_recorded_closed_popup_updates_editor_choices_and_saves_without_raw_handles(self):
         self.context(); job = self.start()
         window = {"program_id": "editor", "window_ref": "popup_1", "owner_ref": "main", "pid": TARGET["pid"],
@@ -776,6 +1149,7 @@ class EditorIPCTests(unittest.TestCase):
         self.context(); job = self.start()
         draft = self.editors.jobs[job["editor_id"]]["draft"]
         draft.recorded([{"program_id": "editor", "operation": "manual_entry", "reason": "image_capture_required", "requested_operation": "click"}])
+        self.editors.jobs[job["editor_id"]]["result"]["recording_import"] = {"unresolved_steps": 1, "diagnostics": [{"code": "image_capture_required"}]}
         old_checkpoint = copy.deepcopy(draft.steps[1])
         with mock.patch("process_editor._run_helper") as native, mock.patch.object(self.editors, "_visual", return_value=image_choice()) as visual:
             for invalid in ("wrong", None, {"method": "image"}):
@@ -787,6 +1161,11 @@ class EditorIPCTests(unittest.TestCase):
             native.assert_not_called(); self.assertEqual(visual.call_count, 1)
         self.assertEqual(draft.steps[0]["operation"], "image_click")
         self.assertEqual(draft.steps[1], old_checkpoint)
+        imported = self.status(job)["recording_import"]
+        self.assertEqual(imported["unresolved_steps"], 0)
+        self.assertEqual(imported["unresolved_at_import"], 1)
+        self.assertEqual(imported["diagnostics_phase"], "original_import")
+        self.assertEqual(imported["diagnostics"], [{"code": "image_capture_required"}])
         self.assertEqual(self.runtime.mutations, [])
         self.status(job, cancel=True); self.terminal(job)
 
@@ -931,18 +1310,21 @@ class EditorIPCTests(unittest.TestCase):
         self.assertNotIn("checkpoint_content", response["structuredContent"])
         self.assertEqual(run.call_args.kwargs["acknowledge_checkpoint"], "earlier-reviewed-id")
 
-    def test_loading_and_saving_makes_new_copy_and_cancel_after_save_keeps_it(self):
+    def test_loading_and_saving_preserves_identity_as_new_revision(self):
         original = self.manager.tasks.save({"name": "original", "instructions": "old", "expected": "old",
             "program_ids": ["editor"], "steps": [{"operation": "delay", "program_id": "editor", "duration_ms": 100}], "variables": {}})
         self.context(); job = self.start(task_id=original["id"])
         saved = self.command("save", {"name": "copy", "description": "new"})
-        self.assertNotEqual(saved["saved_task"]["id"], original["id"])
+        self.assertEqual(saved["status"], "ok", saved)
+        self.assertEqual(saved["saved_task"]["id"], original["id"], saved)
+        self.assertEqual(saved["saved_task"]["revision"], original.get("revision", 1) + 1)
         self.status(job, cancel=True)
         done = self.terminal(job)
         self.assertEqual(done["status"], "saved")
-        self.assertEqual(self.manager.tasks.get(original["id"]), original)
-        self.assertEqual(len(self.manager.tasks.all()), 2)
+        self.assertEqual(self.manager.tasks.get(original["id"])["name"], "copy")
+        self.assertEqual(len(self.manager.tasks.all()), 1)
 
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -115,6 +115,12 @@ class ScopedControls:
         def check():
             runtime.check_active()
             validate_arguments("get_window_state", target, guard.policy, guard.process_resolver, guard.window_resolver)
+            hosted = getattr(guard, "hosted_target", None)
+            if callable(hosted) and hosted(target) is not None:
+                # Native helper deliberately enforces one UIA process. A UWP
+                # frame and its registered child have different PIDs; let the
+                # caller use the guarded Driver tree for this exact frame.
+                raise NotImplementedError("hosted_scoped_helper_unavailable")
         with self.lock:
             check()
             if self.process is None:

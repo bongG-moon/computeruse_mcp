@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -28,11 +29,64 @@ class SessionError(RuntimeError):
     pass
 
 
-def manifest_for(paths, minutes):
-    return {"version": 3, "expires_after": f"{minutes}m", "idle_timeout": f"{minutes}m",
-            "allow": {"tools": sorted(SAFE_TOOLS)},
+def _hosted_window_exists(window_id):
+    import ctypes
+    from ctypes import wintypes
+    user = ctypes.WinDLL('user32', use_last_error=True)
+    user.IsWindow.argtypes, user.IsWindow.restype = [wintypes.HWND], wintypes.BOOL
+    return bool(user.IsWindow(window_id))
+
+
+def manifest_for(paths, minutes, hosted_windows=()):
+    manifest = {"version": 3, "expires_after": f"{minutes}m", "idle_timeout": f"{minutes}m",
+            # Private lifecycle recovery only. This tool is not exposed to the
+            # model and cannot widen the immutable manifest or renew its TTL.
+            "allow": {"tools": sorted(SAFE_TOOLS | {"start_session"})},
             "resources": {"apps": [{"executable": path, "launch": False, "windows": "all"} for path in paths],
                           "desktop": {"display": False}}}
+    if hosted_windows:
+        manifest['resources']['desktop']['windows'] = [
+            {key: frame[key] for key in ('pid', 'window_id')} for frame in hosted_windows]
+    return manifest
+
+
+class HostedWindowProbe:
+    """Identity of one package frame, without enumerating sibling hosted apps."""
+    def __init__(self, guard, target):
+        self.guard, self.target = guard, copy.deepcopy(target)
+        self.record = guard.hosted_target(target)
+        if self.record is None: raise SessionError('호스트 앱 창 연결을 확인하지 못했습니다.')
+        self.closed = False
+
+    def capture(self):
+        if self.guard.hosted_target(self.target) != self.record:
+            raise SessionError('호스트 앱 창이 바뀌었습니다.')
+        return self.snapshot()
+
+    def snapshot(self):
+        from vendor.guard import _win32_window_metadata
+        if self.closed: raise SessionError('창 식별 연결이 종료되었습니다.')
+        try: owner = self.guard.window_resolver(self.target['window_id'])
+        except (OSError, GuardError) as error:
+            if _hosted_window_exists(self.target['window_id']):
+                raise SessionError('호스트 창의 소유권을 읽지 못했습니다. 종료됐다고 확인할 수 없습니다.') from error
+            owner = 0
+        if not owner and _hosted_window_exists(self.target['window_id']):
+            raise SessionError('호스트 창은 남아 있지만 소유권을 확인하지 못했습니다.')
+        rows = []
+        if owner:
+            if owner != self.target['pid'] or self.guard.hosted_target(self.target) != self.record:
+                raise SessionError('호스트 창 안의 앱 또는 창 소유권이 바뀌었습니다.')
+            metadata = _win32_window_metadata(self.target['window_id'])
+            if self.guard.hosted_target(self.target) != self.record:
+                raise SessionError('호스트 창을 읽는 동안 앱이 바뀌었습니다.')
+            rows = [{**self.target, 'thread_id': self.record['host_thread'], 'class_name': 'ApplicationFrameWindow',
+                     'owner_window_id': 0, 'root_owner_window_id': self.target['window_id'],
+                     **{key: metadata[key] for key in ('title', 'bounds', 'minimized', 'is_on_screen')}}]
+        return {'process_exited': False, 'target_present': bool(rows), 'windows': rows,
+                'creation_time': self.record['host_started'], 'executable': self.record['exe']}
+
+    def close(self): self.closed = True
 
 
 class ConsentGuard(Guard):
@@ -47,7 +101,7 @@ class ConsentGuard(Guard):
         if self.session_runtime.config["approval"] != "each":
             return
         label = ACTION_LABELS.get(name, name)
-        target = self.process_resolver(args["pid"]) if "pid" in args else ""
+        target = self.target_executable(args) if "pid" in args and "window_id" in args else ""
         okay = self.session_runtime.confirm("action", "화면 조작 승인 — " + label,
             f"실행할 동작: {label}\n대상 실행파일: {target}\n"
             f"대상 창: PID {args.get('pid')} / 창 번호 {args.get('window_id')}\n\n"
@@ -90,7 +144,10 @@ class SessionRuntime:
         self.id = uuid.uuid4().hex
         self.run_dir = Path(config["state_dir"]) / "runs" / self.id
         self.run_dir.mkdir(parents=True, exist_ok=False)
-        self.stop_event = cancel_event or threading.Event()
+        # Ending a bounded session internally must not mark its caller's tool
+        # request as cancelled (a newly launched hosted frame may need renewal).
+        self.request_cancel_event = cancel_event
+        self.stop_event = threading.Event()
         self.stop_complete = threading.Event()
         self.stop_recorded = False
         self.resource_lock = threading.RLock()
@@ -125,7 +182,8 @@ class SessionRuntime:
             callback(stage, **fields)
 
     def _check_not_stopped(self):
-        if self.stop_event.is_set() or (self.run_dir / "stop.flag").exists():
+        if (self.stop_event.is_set() or self.request_cancel_event is not None and self.request_cancel_event.is_set()
+                or (self.run_dir / "stop.flag").exists()):
             self.stop(self.reason or "중지됨")
             raise SessionError(self.reason or "세션이 중지되었습니다.")
         if time.monotonic() >= self.deadline:
@@ -181,17 +239,22 @@ class SessionRuntime:
                 raise SessionError("사용자가 화면 작업 시작을 거절했습니다.")
             self._check_not_stopped()
             manifest_path = self.run_dir / "capabilities.json"
-            atomic_json(manifest_path, manifest_for(paths, self.minutes))
+            from hosted_windows import discover, validate
+            hosted_frames = [frame for frame in discover(paths) if validate(frame, paths)]
+            atomic_json(manifest_path, manifest_for(paths, self.minutes, hosted_frames))
             policy = {"driver": self.config["driver"], "allowed_apps": paths, "mode": self.mode,
                 "approval_mode": "run", "run_dir": str(self.run_dir), "max_actions": self.max_actions,
                 "log_detail": self.config.get("log_detail", "metadata"),
                 "observation_timeout_seconds": self.config.get("observation_timeout_seconds", 20),
                 "driver_env": {"CUA_DRIVER_PERMISSION_MODE": "bounded", "CUA_DRIVER_CAPABILITY_MANIFEST_FILE": str(manifest_path),
                                "CUA_DRIVER_CAPABILITY_MANIFEST_APPROVED": "1"}}
+            if hosted_frames:
+                policy['hosted_windows'] = hosted_frames
             atomic_json(self.run_dir / "policy.json", policy)
             with self.resource_lock:
                 self._check_not_stopped()
                 self.transport = self.transport_factory(policy)
+                self.transport.readonly_recovery_scope = self._driver_lifecycle_scope
                 self.guard = self.guard_factory(policy, self.transport, self)
             self.guard.handle({"method": "initialize", "params": {"protocolVersion": "2024-11-05", "capabilities": {},
                 "clientInfo": {"name": "company-computer-use", "version": VERSION}}})
@@ -217,6 +280,9 @@ class SessionRuntime:
 
     def _watch_deadline(self):
         while not self.stop_event.wait(0.05):
+            if self.request_cancel_event is not None and self.request_cancel_event.is_set():
+                self.stop('화면 작업을 시작한 요청이 취소되었습니다.')
+                return
             if (self.run_dir / "stop.flag").exists():
                 self.stop("로컬 중지 버튼으로 화면 작업을 중지했습니다.")
                 return
@@ -239,6 +305,28 @@ class SessionRuntime:
 
     def call(self, name, arguments):
         return self._call(name, arguments)
+
+    @contextmanager
+    def _driver_lifecycle_scope(self, target):
+        """Pin the same process/window while an idle read-only lease revives."""
+        self.check_active()
+        probe = self.create_transition_probe(target)
+        def identity(state):
+            if state.get('process_exited') is not False or state.get('target_present') is not True:
+                raise SessionError('읽기 연결 복구 중 대상 프로그램이나 창이 종료됐습니다. 현재 창을 다시 연결하세요.')
+            row = next((row for row in state.get('windows', []) if row.get('window_id') == target['window_id']), None)
+            if row is None: raise SessionError('읽기 연결 복구 대상 창을 확인하지 못했습니다.')
+            return (state.get('creation_time'), state.get('executable'),
+                    *(row.get(key) for key in ('pid', 'window_id', 'class_name', 'thread_id', 'owner_window_id')))
+        try:
+            original = identity(probe.capture())
+            def verify():
+                self.check_active()
+                if identity(probe.snapshot()) != original:
+                    raise SessionError('읽기 연결 복구 중 창의 소유권이 바뀌었습니다. 입력을 보내지 않았습니다.')
+            yield verify
+        finally:
+            probe.close()
 
     def call_with_timeout(self, name, arguments, *, timeout_ms):
         if type(timeout_ms) is not int or not 1 <= timeout_ms <= 120000:
@@ -312,10 +400,17 @@ class SessionRuntime:
         """Cheap native identity baseline; no input, UIA traversal or new approval."""
         from closing import NativeClosureProbe
         self.check_active()
-        if (self.guard.window_resolver(target["window_id"]) != target["pid"]
-                or check_app(self.guard.process_resolver(target["pid"])) not in self.guard.policy["allowed_apps"]):
-            raise SessionError("현재 승인한 프로그램의 창인지 확인하지 못했습니다.")
+        self.guard.target_executable(target)
+        if self.guard.hosted_target(target) is not None:
+            return HostedWindowProbe(self.guard, target)
         return NativeClosureProbe(target["pid"], target["window_id"])
+
+    def hosted_scope_needs_refresh(self):
+        """Only newly proved frames of already approved packages can renew scope."""
+        from hosted_windows import discover
+        self.check_active()
+        known = self.guard.policy.get('hosted_windows', [])
+        return any(frame not in known for frame in discover(self.guard.policy['allowed_apps']))
 
     def image_action(self, step, target):
         """Only saved, validated image recipe steps can reach the private guard."""

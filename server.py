@@ -44,7 +44,7 @@ MANAGEMENT_TOOLS = [
     tool("computer_programs", "List registered programs. To add an app at the user's request use computer_register_program, or computer_program_candidates if its path is unknown. No config-file search or shell editing is needed.", object_schema(), True),
     tool("computer_program_candidates", "Read visible top-level window titles and executable paths for this Windows user and login session, without screenshots/UIA or input. For an explicitly requested app registration use the matching candidate_id with computer_register_program. Duplicate app names must be distinguished by window title; never select an arbitrary candidate. References expire after five minutes and are revalidated when registered.", object_schema(), True),
     tool("computer_register_program", "Register a program only when the user asks to add it. Supply its exact exe path or a candidate_id from computer_program_candidates. A launch_uri alone safely returns open-window choices plus read-only protocol association metadata: select the actual business window then resubmit candidate_id with that URI. Never assume the URI handler/launcher is the controlled program. Optional name defaults to executable name; arguments are individual EXE arguments, working_directory is its start folder. Saves just this addition and makes it available for the next computer_begin without reconnecting. Does not launch an app or expand an active session. Existing differing registrations are not overwritten. Do not search or edit config files; follow next_tool.",
-         object_schema({"exe": STRING, "candidate_id": STRING, "name": {"type": "string", "minLength": 1, "maxLength": 100},
+         object_schema({"exe": STRING, "candidate_id": STRING, "builtin": {"type": "string", "enum": ["notepad", "calculator", "store", "chrome"], "description": "Discover and register this installed built-in app for the current Windows user, without manual executable paths."}, "name": {"type": "string", "minLength": 1, "maxLength": 100},
                         "program_id": STRING, "arguments": {"type": "array", "items": {"type": "string", "minLength": 0, "maxLength": 4096}, "minItems": 0, "maxItems": 32, "uniqueItems": False},
                         "working_directory": STRING, "launch_uri": STRING,
                         "control_exes": {"type": "array", "items": STRING, "minItems": 0, "maxItems": 32, "uniqueItems": True},
@@ -201,7 +201,7 @@ for item in [
          object_schema({"pid": {"type": "integer", "minimum": 1}, "window_id": {"type": "integer", "minimum": 1},
                         "selectors": {"type": "array", "minItems": 1, "maxItems": 40, "items": SELECTOR_SCHEMA},
                         "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 10000}}, ["pid", "window_id", "selectors"]), True),
-    tool("computer_process_editor", "Open a visible native process editor. The human picks UIA elements or image regions, chooses actions and completion conditions, waits/delays and screenshot-review checkpoints, reorders and saves. If UIA matching fails, a visible image picker offers a fallback. Record actions captures human interactions in approved windows and uniquely related same-process owned popups; unresolved windows/input remain warnings. Stop returns an editable draft, never saves or replays automatically. Image input can use explicit automatic UIA completion with a required before/after change; otherwise it pauses for human screenshot review. Returns editor_id; poll computer_process_status using the same ID, do not repeatedly reopen. Optional task_id opens a NEW editable copy. Manual picking/editing does not execute steps. Recording observes real human clicks and typing: these DO affect the business app.",
+    tool("computer_process_editor", "Open a visible native process editor. The human uses one screen picker, with verified UIA or image fallback, and chooses actions and completion conditions, waits/delays and screenshot-review checkpoints, reorders and saves. If UIA matching fails, a visible image picker offers a fallback. Record actions captures human interactions in approved windows and uniquely related same-process owned popups; unresolved windows/input remain warnings. Stop returns an editable draft, never saves or replays automatically. Image input can use explicit automatic UIA completion with a required before/after change; otherwise it pauses for human screenshot review. Returns editor_id; poll computer_process_status using the same ID, do not repeatedly reopen. Optional task_id edits the same process with a checked new revision; existing steps and assets are preserved. Manual picking/editing does not execute steps. Recording observes real human clicks and typing: these DO affect the business app.",
          object_schema({"targets": {"type": "array", "minItems": 1, "maxItems": 10, "items": object_schema({
              "program_id": STRING, "pid": {"type": "integer", "minimum": 1}, "window_id": {"type": "integer", "minimum": 1},
              "window_ref": STRING}, ["program_id", "pid", "window_id"])}, "name": {"type": "string", "minLength": 1, "maxLength": 100},
@@ -276,7 +276,7 @@ class TaskStore:
     MAX_TASKS = 1000
     LOCK_TIMEOUT = 5
     TASK_FIELDS = {"id", "name", "instructions", "expected", "program_ids", "updated_at"}
-    OPTIONAL_FIELDS = {"steps", "variables", "revision", "recording_review"}
+    OPTIONAL_FIELDS = {"steps", "variables", "revision", "recording_review", "revision_history"}
 
     def __init__(self, state_dir, config):
         self.path = Path(state_dir) / "tasks.json"
@@ -293,7 +293,9 @@ class TaskStore:
         if not isinstance(item, dict) or not cls.TASK_FIELDS <= set(item) or set(item) - cls.TASK_FIELDS - cls.OPTIONAL_FIELDS:
             raise SessionError("저장된 작업 항목의 필수 내용 또는 형식이 올바르지 않습니다. 기존 파일은 보존됩니다.")
         cls._validate_id(item["id"])
-        validate_management("computer_save_task", {k: v for k, v in item.items() if k not in {"updated_at", "revision"}})
+        validate_management("computer_save_task", {k: v for k, v in item.items() if k not in {"updated_at", "revision", "revision_history"}})
+        from task_revision import validate_history
+        validate_history(item.get("revision_history", []))
         if type(item.get("revision", 1)) is not int or item.get("revision", 1) < 1:
             raise SessionError("작업 버전이 올바르지 않습니다.")
         if "recording_review" in item:
@@ -407,8 +409,9 @@ class TaskStore:
         atomic_json(self.path, value)
 
     def all(self):
+        from task_revision import stable_task
         with self._locked():
-            return copy.deepcopy(self._read())
+            return [stable_task(task) for task in self._read()]
 
     def get(self, task_id):
         self._validate_id(task_id)
@@ -433,7 +436,9 @@ class TaskStore:
             for key in ("steps", "variables", "recording_review"):
                 if key in args or key in previous:
                     entry[key] = copy.deepcopy(args.get(key, previous.get(key)))
-            entry["revision"] = previous.get("revision", 0) + 1
+            entry["revision"] = (previous.get("revision", 1) if previous else 0) + 1
+            from task_revision import TaskRevisions
+            entry = TaskRevisions(self).prepare_saved_entry(previous, entry)
             self._validate_entry(entry)
             tasks = [t for t in tasks if t["id"] != task_id] + [entry]
             self._write(tasks)
@@ -482,6 +487,11 @@ class ComputerManager:
         from checkpoint_review import CheckpointReviews
         self.checkpoint_reviews = CheckpointReviews()
         self.progress_reporter = None
+        from easy_api import EasyApi
+        self.easy = EasyApi(self)
+        self.process_editors.test_runner = lambda runtime, task, targets, **kwargs: self.workflows.run(
+            runtime, task, {}, targets, delivery_mode="foreground", image_delivery_enabled=self.image_delivery.status()["delivery_mode"] == "vision", **kwargs)
+        self.process_editors.visual_review_enabled = lambda runtime: self.image_delivery.status()["delivery_mode"] == "vision"
 
     def status(self):
         from configuration_state import configuration_status
@@ -608,6 +618,9 @@ class ComputerManager:
                 return []
 
     def tools_list(self, cancel_event=None):
+        if self.config.get("tool_profile") == "simple":
+            from easy_api import schemas
+            return {"tools": schemas(MANAGEMENT), "_meta": {"tool_profile": "simple"}}
         tools = copy.deepcopy(MANAGEMENT_TOOLS) + self.lowlevel_schemas(cancel_event)
         if self.schema_error:
             tools[0]["description"] += " Driver unavailable: " + self.schema_error
@@ -657,6 +670,8 @@ class ComputerManager:
         self.checkpoint_reviews.stop(current)
         if current is not None:
             current.stop(reason)
+        self.easy.close()
+        self.workflows.close()
         probe_stopped = self._close_probe(probe) if probe is not None else True
         teaching_pending = self.teachings.pending(current) is not None
         editor_pending = self.process_editors.pending(current) is not None
@@ -679,12 +694,19 @@ class ComputerManager:
             raise SessionError("화면 작업 중지를 요청했지만 종료 상태 기록을 제한 시간 안에 확인하지 못했습니다.")
 
     def call(self, name, args, cancel_event=None):
-        response = self._call(name, args, cancel_event)
+        if self.config.get("tool_profile") == "simple":
+            from easy_api import schemas
+            if name not in {tool["name"] for tool in schemas(MANAGEMENT)}:
+                raise SessionError("기본 도구는 화면 대화와 프로세스 편집창으로 통합되었습니다. tools/list를 다시 읽으세요.")
+            response = self.easy.call(name, args, cancel_event)
+        else:
+            response = self._call(name, args, cancel_event)
         def review(images, value):
             if name != 'computer_run_task' or not value.get('checkpoint', {}).get('capture_available'):
                 return {'status': 'not_required', 'next_step': '요소 정보가 부족하면 프로세스 편집창에서 직접 요소 또는 이미지를 지정하세요. 모델이 화면을 읽었다고 판단하지 마세요.'}
             return self.checkpoint_reviews.open(self.session, value, images, args)
-        return self.image_delivery.filter_response(response, local_review=review)
+        response = self.image_delivery.filter_response(response, local_review=review)
+        return self.easy.normalize_response(name, args, response) if self.config.get("tool_profile") == "simple" else response
 
     def _call(self, name, args, cancel_event=None):
         if cancel_event is not None and cancel_event.is_set():
@@ -1076,6 +1098,12 @@ class StdioServer:
                 self.response(request_id, error={"code": -32602, "message": "Invalid initialize parameters."})
                 return
             self.initialized = True
+            if self.manager.config.get("tool_profile") == "simple":
+                from easy_api import INSTRUCTIONS
+                self.response(request_id, {"protocolVersion": params.get("protocolVersion", "2024-11-05"),
+                    "capabilities": {"tools": {}}, "serverInfo": {"name": "company-computer-use", "version": VERSION},
+                    "instructions": INSTRUCTIONS})
+                return
             self.response(request_id, {"protocolVersion": params.get("protocolVersion", "2024-11-05"),
                 "capabilities": {"tools": {}}, "serverInfo": {"name": "company-computer-use", "version": VERSION},
                 "instructions": "Image responses default to text-safe, compatible with unknown/text-only models without setup. Local image matching and recording still work. computer_check_image with no arguments returns safe status; only set delivery_mode=vision when the user confirms the connected model accepts images. No model/API routing changes are made. Native checkpoint review uses computer_review_checkpoint; never acknowledge until the human confirms that exact local review. Do not claim to see withheld images or guess coordinates. computer_inspect observation:auto can capture weak UIA but the central delivery policy still applies. Do not repeatedly dump a weak accessibility tree. computer_activity and computer_task_progress can be read during execution. Clients may supply _meta.progressToken for live notifications/progress; these metadata events do not prove task success. "
@@ -1119,7 +1147,7 @@ class StdioServer:
             if not isinstance(meta, dict) or (token is not None and (isinstance(token, bool) or not isinstance(token, (str, int)) or isinstance(token, str) and len(token) > 200)):
                 self.response(request_id, error={"code": -32602, "message": "Invalid progress token."})
                 return
-            if params.get("name") in {"computer_activity", "computer_task_progress"}:
+            if params.get("name") in {"computer_activity", "computer_task_progress", "computer_status"}:
                 with self.state_lock:
                     duplicate = request_id in self.request_events
                 if duplicate:

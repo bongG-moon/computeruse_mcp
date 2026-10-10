@@ -65,6 +65,32 @@ class NativeMatcherTests(unittest.TestCase):
         self.assertEqual(result["rect"], {"x": 53, "y": 37, "width": 32, "height": 24})
         self.assertEqual(result["screenshot"], {"width": 180, "height": 110})
 
+    def crop(self, image, regions):
+        request, response = self.root / "crop-request.json", self.root / "crop-response.json"
+        response.unlink(missing_ok=True)
+        request.write_text(json.dumps({"nonce": "a" * 64, "screenshot_png": image, "regions": regions}), encoding="utf-8")
+        subprocess.run([str(self.helper), "--crop", str(request), str(response)], timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+        result = json.loads(response.read_text(encoding="utf-8-sig"))
+        self.assertEqual(result["nonce"], "a" * 64)
+        return result
+
+    def test_batch_crop_preserves_requested_pixels_without_desktop_access(self):
+        image = png(180, 110, pattern)
+        result = self.crop(image, [{"x": 13, "y": 24, "width": 36, "height": 22}, {"x": 50, "y": 40, "width": 21, "height": 31}])
+        self.assertEqual(result["status"], "cropped", result)
+        self.assertEqual(len(result["crops"]), 2)
+        first = self.call(result["crops"][0], image)
+        self.assertEqual(first["status"], "matched")
+        self.assertEqual(first["rect"], {"x": 13, "y": 24, "width": 36, "height": 22})
+
+    def test_batch_crop_rejects_unsafe_or_fractional_regions(self):
+        image = png(80, 80, pattern)
+        for regions in ([], [{"x": -1, "y": 0, "width": 8, "height": 8}], [{"x": 78, "y": 0, "width": 8, "height": 8}], [{"x": 1.2, "y": 0, "width": 8, "height": 8}], [{"x": 0, "y": 0, "width": 8, "height": 8, "extra": True}]):
+            with self.subTest(regions=regions):
+                result = self.crop(image, regions)
+                self.assertEqual(result["status"], "failed", result)
+                self.assertNotIn("crops", result)
+
     def test_small_window_border_difference_preserves_exact_template_size(self):
         # Native DWM capture and Driver capture may differ by a one-pixel border
         # while the button's pixels are unchanged (424x230 vs 422x228 in live QA).
@@ -75,6 +101,34 @@ class NativeMatcherTests(unittest.TestCase):
         self.assertEqual(result["status"], "matched")
         self.assertEqual(result["score"], 1)
         self.assertEqual(result["rect"], {"x": 89, "y": 61, "width": 160, "height": 96})
+
+    def test_recorded_full_width_row_matches_across_two_pixel_capture_border(self):
+        template = base64.b64encode((SOURCE / "test_data" / "recorded-border-template.png").read_bytes()).decode()
+        screen = base64.b64encode((SOURCE / "test_data" / "recorded-border-screen.png").read_bytes()).decode()
+        result = self.call(template, screen, source_size={"width": 764, "height": 96}, capture_window={"width": 764, "height": 520})
+        self.assertEqual(result["status"], "matched", result)
+        self.assertGreaterEqual(result["score"], .94)
+        self.assertEqual(result["candidate_count"], 1)
+        self.assertEqual(result["rect"], {"x": 0, "y": 315, "width": 762, "height": 96})
+        self.assertEqual(result["template_clip"], {"left": 1, "top": 0, "right": 1, "bottom": 0, "original_width": 764, "original_height": 96})
+
+    def test_border_clipping_and_refinement_do_not_hide_a_second_identical_target(self):
+        # Keep the same capture dimensions, but duplicate the actual painted
+        # row at another location. Both must survive the common candidate set.
+        from image_pixels import decode_png, encode_png
+        template = base64.b64encode((SOURCE / "test_data" / "recorded-border-template.png").read_bytes()).decode()
+        screen = base64.b64encode((SOURCE / "test_data" / "recorded-border-screen.png").read_bytes()).decode()
+        width, height, color, channels, rows = decode_png(screen)
+        rows[100:196] = rows[315:411]
+        result = self.call(template, encode_png(width, height, color, rows), source_size={"width": 764, "height": 96}, capture_window={"width": 764, "height": 520})
+        self.assertEqual(result["status"], "ambiguous", result)
+        self.assertGreaterEqual(result["candidate_count"], 2)
+
+    def test_border_clipping_is_not_applied_to_a_large_window_size_change(self):
+        template = base64.b64encode((SOURCE / "test_data" / "recorded-border-template.png").read_bytes()).decode()
+        screen = base64.b64encode((SOURCE / "test_data" / "recorded-border-screen.png").read_bytes()).decode()
+        result = self.call(template, screen, source_size={"width": 764, "height": 96}, capture_window={"width": 770, "height": 526})
+        self.assertNotIn("template_clip", result)
 
     def test_native_recorded_popup_survives_driver_border_difference(self):
         # Unmodified recorder output and Driver PNG from our owned WinForms
@@ -146,6 +200,8 @@ class NativeMatcherTests(unittest.TestCase):
 
     def test_source_size_matches_downsampled_large_crop(self):
         def smooth(x, y):
+            if x in (0, 31) or y in (0, 23):
+                return (25, 40, 190)
             return (35 + x * 5, 45 + y * 5, 80 + x * 2)
         template = png(32, 24, smooth)
         image = png(240, 160, lambda x, y: smooth((x - 63) // 2, (y - 45) // 2)
@@ -153,6 +209,19 @@ class NativeMatcherTests(unittest.TestCase):
         result = self.call(template, image, source_size={"width": 64, "height": 48}, capture_window={"width": 240, "height": 160})
         self.assertEqual(result["status"], "matched")
         self.assertEqual(result["rect"], {"x": 63, "y": 45, "width": 64, "height": 48})
+
+    def test_refined_gradient_remains_ambiguous_across_nested_scales(self):
+        # Refinement exposes an alternate 48x36 inner-gradient alignment:
+        # .99516660 - .96516732 = .02999928, below the required .03 margin.
+        # Keep that genuine ambiguity instead of rounding away the threshold.
+        def smooth(x, y):
+            return (35 + x * 5, 45 + y * 5, 80 + x * 2)
+        image = png(240, 160, lambda x, y: smooth((x - 63) // 2, (y - 45) // 2)
+                    if 63 <= x < 127 and 45 <= y < 93 else (250, 250, 250))
+        result = self.call(png(32, 24, smooth), image, source_size={"width": 64, "height": 48}, capture_window={"width": 240, "height": 160})
+        self.assertEqual(result["status"], "ambiguous", result)
+        self.assertLess(result["score"] - result["second_score"], .03)
+        self.assertNotIn("rect", result)
 
     def test_capture_ratio_and_source_size_combine(self):
         def smooth(x, y):

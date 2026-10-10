@@ -169,6 +169,31 @@ class WorkflowTests(unittest.TestCase):
     def checkpoint(self, run_id):
         return self.runner.progress(run_id)
 
+    def test_hosted_frame_uses_exact_logical_app_and_never_authorizes_host_exe(self):
+        self.runtime.guard.process_resolver = mock.Mock(return_value=r"C:\Windows\System32\ApplicationFrameHost.exe")
+        self.runtime.guard.target_executable = mock.Mock(return_value=self.runtime.programs[0]["exe"])
+        self.runtime.guard.hosted_target = mock.Mock(return_value={"app_pid": 101, "app_started": 88})
+        engine = ScriptedOperations()
+        result = self.run_recipe(engine)
+        self.assertTrue(result["task_verified"])
+        self.assertEqual(len(engine.calls), 2)
+        self.runtime.guard.process_resolver.assert_not_called()
+        self.assertTrue(all(call.args == ({"pid": 100, "window_id": 200},)
+                            for call in self.runtime.guard.target_executable.call_args_list))
+
+    def test_hosted_child_replacement_between_steps_stops_without_second_input(self):
+        identity = {"app_pid": 101, "app_started": 88}
+        self.runtime.guard.target_executable = mock.Mock(return_value=self.runtime.programs[0]["exe"])
+        self.runtime.guard.hosted_target = mock.Mock(side_effect=lambda target: copy.deepcopy(identity))
+        def first_action():
+            identity["app_started"] = 99
+            return {"task_verified": True}
+        engine = ScriptedOperations([first_action])
+        result = self.run_recipe(engine)
+        self.assertFalse(result["task_verified"])
+        self.assertEqual(len(engine.calls), 1)
+        self.assertEqual(result["completed_steps"], 1)
+
     def test_defaults_overrides_and_substitution_are_literal_and_do_not_mutate_task(self):
         original = copy.deepcopy(self.task)
         rendered, values = render_steps(self.task, {})
@@ -376,15 +401,37 @@ class WorkflowTests(unittest.TestCase):
         writes = [(args["pid"], args["window_id"]) for name, args in self.runtime.calls if name == "set_value"]
         self.assertEqual(writes, [(100, 200), (300, 400)])
 
-    def test_changed_input_or_recipe_cannot_resume_previous_checkpoint(self):
+    def test_changed_input_cannot_resume_previous_checkpoint(self):
         initial = self.run_recipe(ScriptedOperations([{"task_verified": False}]))
-        changed = copy.deepcopy(self.task)
-        changed["revision"] = 2
-        for kwargs in ({"inputs": {"value": "다른 값"}}, {"task": changed}):
+        for kwargs in ({"inputs": {"value": "다른 값"}},):
             engine = ScriptedOperations()
             with self.subTest(kwargs=kwargs), self.assertRaises(WorkflowError):
                 self.run_recipe(engine, resume=initial["run_id"], **kwargs)
             self.assertFalse(engine.calls)
+
+    def test_edited_task_resumes_immutable_original_revision(self):
+        initial = self.run_recipe(ScriptedOperations([{"task_verified": False}]))
+        changed = copy.deepcopy(self.task)
+        changed["revision"] = 2
+        changed["steps"][1]["value"] = "new revision value"
+        changed["variables"]["value"]["default"] = "new default"
+        engine = ScriptedOperations()
+        answer = self.run_recipe(engine, resume=initial["run_id"], task=changed)
+        self.assertTrue(answer["task_verified"])
+        self.assertEqual(answer["revision"], 1)
+        self.assertEqual(engine.calls[0][0]["expect"][0]["equals"], "기본값")
+        self.assertEqual(engine.calls[1][0]["value"], "완료")
+
+    def test_legacy_record_without_snapshot_rejects_changed_recipe(self):
+        initial = self.run_recipe(ScriptedOperations([{"task_verified": False}]))
+        record = self.runner.progress(initial["run_id"])
+        record.pop("snapshot_hash")
+        from vendor.guard import atomic_json
+        atomic_json(self.runner._path(initial["run_id"]), record)
+        engine = ScriptedOperations()
+        with self.assertRaises(WorkflowError):
+            self.run_recipe(engine, resume=initial["run_id"], task={**self.task, "revision": 2})
+        self.assertFalse(engine.calls)
 
     def test_window_bindings_require_exact_approved_program_and_positive_identifiers(self):
         invalid = [[], self.target * 2, [{"program_id": "unknown", "pid": 100, "window_id": 200}],
@@ -682,7 +729,7 @@ class WorkflowTaskStoreTests(unittest.TestCase):
         self.store.path.write_text(json.dumps({"version": 1, "tasks": [old]}), encoding="utf-8")
         self.assertEqual(self.store.get("first"), old)
         new = self.store.save({**self.text, "name": "새 이름"})
-        self.assertEqual(new["revision"], 1)
+        self.assertEqual(new["revision"], 2)
         self.assertNotIn("steps", new)
         self.assertNotIn("variables", new)
 

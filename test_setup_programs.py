@@ -19,7 +19,7 @@ class HiddenProgramIntegrationTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="program-widget-test-")
         self.root = Path(self.temp.name)
         self.config_path = self.root / "isolated-config.json"
-        self.config = {"version": 1, "driver": "", "mode": "uia", "approval": "session",
+        self.config = {"version": 1, "driver": "", "mode": "uia", "approval": "session", "tool_profile": "simple",
                        "log_detail": "metadata", "max_minutes": 10, "max_actions": 120,
                        "approval_timeout_seconds": 300, "state_dir": str(self.root / "records"),
                        "extra_metadata": {"preserve": "사용자가 남긴 설정"},

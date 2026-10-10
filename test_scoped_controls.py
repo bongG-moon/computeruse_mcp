@@ -131,6 +131,25 @@ class ScopedTests(unittest.TestCase):
             reader.observe({"pid": 10, "window_id": 20}, [{"name": "field"}])
         reader.factory.assert_not_called()
 
+    def test_hosted_frame_uses_driver_fallback_without_starting_direct_pid_helper(self):
+        runtime = self.runtime()
+        runtime.guard.hosted_target = mock.Mock(return_value={"app_pid": 11, "window_id": 20})
+        reader = ScopedControls(runtime, factory=mock.Mock())
+        with mock.patch("scoped_controls.validate_arguments") as validated, self.assertRaises(NotImplementedError) as raised:
+            reader.observe({"pid": 10, "window_id": 20}, [{"name": "field"}])
+        self.assertEqual(str(raised.exception), "hosted_scoped_helper_unavailable")
+        validated.assert_called_once()
+        runtime.guard.hosted_target.assert_called_once_with({"pid": 10, "window_id": 20})
+        reader.factory.assert_not_called()
+
+    def test_invalid_hosted_relation_is_denied_instead_of_fallback(self):
+        runtime = self.runtime()
+        runtime.guard.hosted_target = mock.Mock(side_effect=ValueError("changed"))
+        reader = ScopedControls(runtime, factory=mock.Mock())
+        with mock.patch("scoped_controls.validate_arguments"), self.assertRaises(ValueError):
+            reader.observe({"pid": 10, "window_id": 20}, [{"name": "field"}])
+        reader.factory.assert_not_called()
+
     def test_failed_helper_stop_keeps_process_reference(self):
         reader, process = self.reader()
         process.terminate = mock.Mock(side_effect=OSError("denied"))

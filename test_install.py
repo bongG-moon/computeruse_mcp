@@ -82,6 +82,36 @@ class ConversationSetupTests(unittest.TestCase):
         self.assertIn("승인 설정은 변경하지 않습니다", result["summary"]["approval"])
         self.assertFalse(self.config.exists())
 
+    def test_fresh_notepad_install_includes_current_package_controls(self):
+        actual = self.root / "Microsoft.WindowsNotepad_1.2.3.4_x64__8wekyb3d8bbwe" / "Notepad.exe"
+        actual.parent.mkdir()
+        actual.touch()
+        catalog = {"notepad": {"exe": str(self.chrome), "control_exes": [str(actual)], "available": True}}
+        with patch.object(install, "builtin_catalog", return_value=catalog) as discover, \
+             patch.object(install, "app_candidates") as old_discovery:
+            plan = self.plan(apps=["notepad"])
+        old_discovery.assert_not_called()
+        discover.assert_called_once()
+        prepared = json.loads(Path(plan["plan_path"]).read_text(encoding="utf-8"))["plan"]["config"]
+        self.assertEqual(prepared["tool_profile"], "simple")
+        self.assertEqual(prepared["programs"][0]["control_exes"], [str(actual.resolve())])
+        self.assertEqual([p["id"] for p in prepared["programs"]], ["notepad"])
+        result = self.apply(plan)
+        self.assertTrue(result["ok"])
+        self.assertEqual(install.load_config(self.config)["programs"][0]["control_exes"], [str(actual.resolve())])
+
+    def test_notepad_package_change_after_prepare_is_not_silently_reresolved(self):
+        actual = self.root / "InstalledNotepad.exe"
+        actual.touch()
+        catalog = {"notepad": {"exe": str(self.chrome), "control_exes": [str(actual)], "available": True}}
+        with patch.object(install, "builtin_catalog", return_value=catalog):
+            plan = self.plan(apps=["notepad"])
+        actual.unlink()
+        with patch.object(install, "builtin_catalog", side_effect=AssertionError("Do not replace the approved plan")):
+            with self.assertRaises(install.SetupError): self.apply(plan)
+        self.assertFalse(self.config.exists())
+        self.register_call.assert_not_called()
+
     def test_prepare_creates_only_review_plan(self):
         plan = self.plan()
         self.assertEqual(plan["status"], "confirmation_required")

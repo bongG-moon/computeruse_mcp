@@ -273,6 +273,10 @@ def connection_issues(initialized: dict, names: set, status: dict) -> list[str]:
     from teaching_support import TEACHING_HELPER_FILES
     required = {"computer_status", "computer_begin", "computer_stop", "get_window_state",
                 "computer_teach_element", "computer_teach_status", "computer_process_editor", "computer_process_status"}
+    if status.get("tool_profile") == "simple":
+        required = {"computer_status", "computer_programs", "computer_register_program", "computer_open",
+                    "computer_observe", "computer_act", "computer_process_editor", "computer_tasks",
+                    "computer_update_task", "computer_run_task", "computer_export_skill", "computer_stop"}
     issues = []
     server = initialized.get("serverInfo", {})
     if server.get("name") != "company-computer-use" or server.get("version") != VERSION or status.get("version") != VERSION:

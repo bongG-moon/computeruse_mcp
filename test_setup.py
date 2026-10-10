@@ -139,6 +139,32 @@ class HiddenTkTaskIntegrationTests(unittest.TestCase):
                     app.after_cancel(timer)
                 app.destroy()
 
+    def test_simple_hides_legacy_modes_and_legacy_preserves_them_without_migration(self):
+        for profile in ("simple", "legacy"):
+            with self.subTest(profile=profile), tempfile.TemporaryDirectory() as folder, \
+                 patch.object(setup.Setup, "deiconify"), patch("settings.discover", return_value={"apps": []}):
+                path = Path(folder) / "config.json"
+                config = setup.default_config(path)
+                config.update(tool_profile=profile, mode="visual")
+                setup.save_config(path, config)
+                original = path.read_bytes()
+                app = setup.Setup(path)
+                try:
+                    self.assertFalse(app.winfo_ismapped())
+                    pending, modes = [app], []
+                    while pending:
+                        widget = pending.pop()
+                        if isinstance(widget, setup.ttk.Radiobutton) and str(widget.cget("variable")) == str(app.mode):
+                            modes.append(str(widget.cget("value")))
+                        pending.extend(widget.winfo_children())
+                    self.assertEqual(sorted(modes), ["uia", "visual"] if profile == "legacy" else [])
+                    self.assertEqual(app.current()["mode"], "visual")
+                    self.assertEqual(app.current()["tool_profile"], profile)
+                    self.assertEqual(path.read_bytes(), original)
+                finally:
+                    for timer in app.tk.splitlist(app.tk.call("after", "info")): app.after_cancel(timer)
+                    app.destroy()
+
     def test_hidden_task_widgets_create_read_edit_cancel_and_delete(self):
         original_toplevel_init = setup.tk.Toplevel.__init__
 
@@ -148,7 +174,7 @@ class HiddenTkTaskIntegrationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as folder:
             config_path = Path(folder) / "isolated-config.json"
-            config = {"version": 1, "driver": "", "mode": "uia", "approval": "session",
+            config = {"version": 1, "driver": "", "mode": "uia", "approval": "session", "tool_profile": "simple",
                       "log_detail": "metadata", "max_minutes": 10, "max_actions": 120,
                       "approval_timeout_seconds": 300, "state_dir": str(Path(folder) / "isolated-state"),
                       "programs": [{"id": item, "name": "시험 프로그램 " + item, "exe": "",

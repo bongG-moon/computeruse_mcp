@@ -120,29 +120,12 @@ def discover() -> dict:
     pf = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
     pf86 = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
     local = Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
-    notepad = _first(_app_path("notepad.exe"), windir / "System32/notepad.exe")
-    notepad_controls = []
-    # Windows 11's System32 alias can launch a different packaged executable.
-    # Ask Windows for its registered package path; never infer another user's path.
-    powershell = windir / "System32/WindowsPowerShell/v1.0/powershell.exe"
-    if os.name == "nt" and powershell.is_file():
-        try:
-            result = subprocess.run([str(powershell), "-NoProfile", "-NonInteractive", "-Command",
-                "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Get-AppxPackage Microsoft.WindowsNotepad | Select-Object -ExpandProperty InstallLocation"],
-                capture_output=True, timeout=12, creationflags=hidden_flags())
-            for line in result.stdout.decode("utf-8-sig", "replace").splitlines():
-                if line.strip():
-                    actual = Path(line.strip()) / "Notepad/Notepad.exe"
-                    # Packaged apps may be executable through their alias while
-                    # directory ACLs prevent stat(). Keep launch and control paths separate.
-                    notepad_controls.append(str(actual))
-                    break
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+    from builtin_programs import builtin_catalog
+    defaults = builtin_catalog()
+    notepad, notepad_controls = defaults["notepad"]["exe"], defaults["notepad"]["control_exes"]
     # Browser defaults must be Chrome, not whichever browser Windows prefers.
     # Leave it unavailable when Chrome is absent; never silently allow Edge.
-    browser = _first(_app_path("chrome.exe"), pf / "Google/Chrome/Application/chrome.exe",
-                     pf86 / "Google/Chrome/Application/chrome.exe", local / "Google/Chrome/Application/chrome.exe")
+    browser = defaults["chrome"]["exe"]
     excel = _first(_app_path("excel.exe"), pf / "Microsoft Office/root/Office16/EXCEL.EXE",
                    pf86 / "Microsoft Office/root/Office16/EXCEL.EXE")
     apps = [
@@ -154,6 +137,7 @@ def discover() -> dict:
     for app in apps:
         app["available"] = bool(app["exe"])
         app["control_exes"] = notepad_controls if app["id"] == "notepad" else []
+    apps.extend({k: v for k, v in defaults[name].items() if k != "builtin"} for name in ("calculator", "store"))
     return {"claude": native_claude(), "apps": apps}
 
 

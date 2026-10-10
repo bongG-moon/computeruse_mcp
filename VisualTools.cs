@@ -1,4 +1,4 @@
-// Offline visual authoring. Never injects application input or uses the network.
+﻿// Offline visual authoring. Never injects application input or uses the network.
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -27,6 +27,10 @@ internal static class VisualTools
     [DllImport("user32.dll")] internal static extern bool IsIconic(IntPtr hwnd);
     [DllImport("user32.dll")] static extern bool IsZoomed(IntPtr hwnd);
     [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr hwnd, IntPtr dc, uint flags);
+    [DllImport("user32.dll")] static extern IntPtr GetWindowDC(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
+    [DllImport("user32.dll", EntryPoint="GetWindowLongW")] static extern int GetWindowLong(IntPtr hwnd, int index);
+    [DllImport("gdi32.dll")] static extern bool BitBlt(IntPtr destination, int x, int y, int width, int height, IntPtr source, int sourceX, int sourceY, uint operation);
     [DllImport("user32.dll")] static extern int GetDlgCtrlID(IntPtr hwnd);
     [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hwnd, int command);
     [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr hwnd);
@@ -95,7 +99,7 @@ internal static class VisualTools
     [STAThread]
     static int Main(string[] args)
     {
-        if (args.Length != 3 || (args[0] != "--pick" && args[0] != "--match" && args[0] != "--record")) return 2;
+        if (args.Length != 3 || (args[0] != "--pick" && args[0] != "--match" && args[0] != "--record" && args[0] != "--crop")) return 2;
         string nonce = null, response = null;
         try {
             if (!Path.IsPathRooted(args[1]) || !Path.IsPathRooted(args[2])) return 2;
@@ -104,6 +108,7 @@ internal static class VisualTools
             Dictionary<string, object> data = Json.Deserialize<Dictionary<string, object>>(Read(request));
             string token = Str(data, "nonce", ""); if (!Nonce(token)) return 2; nonce = token;
             if (args[0] == "--match") { Write(response, Match(data)); return 0; }
+            if (args[0] == "--crop") { Write(response, Crop(data)); return 0; }
             if (!Environment.UserInteractive) throw new InvalidOperationException("interactive_desktop_unavailable");
             try { SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch (EntryPointNotFoundException) { SetProcessDPIAware(); }
             Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
@@ -238,12 +243,12 @@ internal static class VisualTools
             return true;
         }, IntPtr.Zero); return related;
     }
-    static List<Rectangle> Occluders(Target target)
+    static List<Rectangle> Occluders(Target target, bool excludeLayered = false)
     {
         var found = new List<Rectangle>(); IntPtr window = GetWindow(target.Hwnd, 3); int count = 0;
         while (window != IntPtr.Zero) {
             if (++count > 512) throw new InvalidOperationException("window_order_unavailable");
-            if (IsWindowVisible(window) && !IsIconic(window)) {
+            if (IsWindowVisible(window) && !IsIconic(window) && !(excludeLayered && (GetWindowLong(window, -20) & 0x80000) != 0)) {
                 int cloaked; RECT r;
                 if ((DwmGetWindowAttribute(window, 14, out cloaked, 4) != 0 || cloaked == 0) &&
                     (DwmGetWindowRectangle(window, 9, out r, Marshal.SizeOf(typeof(RECT))) == 0 || GetWindowRect(window, out r))) {
@@ -255,6 +260,16 @@ internal static class VisualTools
         return found;
     }
     static bool Covered(Rectangle region, List<Rectangle> rectangles) { foreach (Rectangle r in rectangles) if (r.IntersectsWith(region)) return true; return false; }
+    internal static bool RecordedEditConfirmed(Dictionary<string, object> before, Dictionary<string, object> after, bool replaced) {
+        var native = Map(after, "native_target"); var element = Map(native, "element");
+        return before != null && after != null && Str(before, "identity", "").Length > 0
+            && Str(before, "identity", "before") == Str(after, "identity", "after")
+            && Str(before, "protected", "False") != "True" && Str(after, "protected", "False") != "True"
+            && Str(element, "role", "") == "Edit" && Str(element, "is_password", "False") != "True"
+            && before.ContainsKey("value") && before["value"] is string && after.ContainsKey("value") && after["value"] is string
+            && Str(before, "value", "").Length <= 2000 && Str(after, "value", "").Length <= 2000
+            && (Str(before, "value", "").Length == 0 || replaced) && Str(before, "value", "") != Str(after, "value", "");
+    }
     sealed class RenderJob {
         internal DateTime Started; internal Rectangle Raw, Visible; internal Bitmap Image; internal Exception Error;
         internal readonly ManualResetEvent Completed = new ManualResetEvent(false);
@@ -312,17 +327,60 @@ internal static class VisualTools
         } finally { if (image != null) image.Dispose(); }
     }
     static Bitmap Capture(Target target) { return Capture(target, false); }
+    static Bitmap CaptureWindowSurface(Target target) {
+        // A window DC with SRCCOPY (without CAPTUREBLT) excludes layered
+        // overlays. Do not treat a click-through cursor's full-screen bounds
+        // as opaque; ordinary windows remain checked separately per crop.
+        target.EnsureCaptureReady(); Rectangle raw = target.Bounds(), visible = target.CaptureBounds();
+        IntPtr source = GetWindowDC(target.Hwnd); if (source == IntPtr.Zero) throw new InvalidOperationException("window_surface_unavailable");
+        // GDI SRCCOPY does not establish an alpha channel. Treat its result
+        // as opaque RGB so a zero alpha byte cannot erase valid pixels.
+        Bitmap image = new Bitmap(visible.Width, visible.Height, PixelFormat.Format32bppRgb);
+        try {
+            using (Graphics graphics = Graphics.FromImage(image)) {
+                IntPtr destination = graphics.GetHdc();
+                try { if (!BitBlt(destination, 0, 0, image.Width, image.Height, source, visible.X - raw.X, visible.Y - raw.Y, 0x00CC0020)) throw new InvalidOperationException("window_surface_unavailable"); }
+                finally { graphics.ReleaseHdc(destination); }
+            }
+            if (!target.Foreground() || target.Bounds() != raw || target.CaptureBounds() != visible) throw new InvalidOperationException("target_changed");
+            if (!Detailed(new Pixels(image))) throw new InvalidOperationException("target_render_incomplete");
+            Bitmap result = image; image = null; return result;
+        } finally { ReleaseDC(target.Hwnd, source); if (image != null) image.Dispose(); }
+    }
     static Bitmap Capture(Target target, bool allowOcclusion) { bool rendered; return Capture(target, allowOcclusion, out rendered); }
     static Bitmap Capture(Target target, bool allowOcclusion, out bool rendered) {
-        target.EnsureCaptureReady(); Rectangle r = target.CaptureBounds(); rendered = Covered(r, Occluders(target));
+        target.EnsureCaptureReady(); Rectangle r = target.CaptureBounds(); rendered = !allowOcclusion && Covered(r, Occluders(target));
         if (rendered) { Bitmap isolated = RenderWindow(target, r); if (!target.Foreground() || target.CaptureBounds() != r) { isolated.Dispose(); throw new InvalidOperationException("target_changed"); } return isolated; }
         Bitmap b = new Bitmap(r.Width, r.Height, PixelFormat.Format32bppArgb);
         try { using (Graphics g = Graphics.FromImage(b)) g.CopyFromScreen(r.Location, Point.Empty, r.Size, CopyPixelOperation.SourceCopy);
             if (!target.Foreground() || target.CaptureBounds() != r) throw new InvalidOperationException("target_changed");
-            if (Covered(r, Occluders(target))) throw new InvalidOperationException("target_occluded"); return b;
+            // The recorder validates both old and current occluders against
+            // the exact click crop. A small recorder panel must not force a
+            // whole Qt/GPU window through unsupported PrintWindow rendering.
+            if (!allowOcclusion && Covered(r, Occluders(target))) throw new InvalidOperationException("target_occluded"); return b;
         } catch { b.Dispose(); throw; }
     }
     static string Encode(Bitmap b) { using (MemoryStream s = new MemoryStream()) { b.Save(s, ImageFormat.Png); if (s.Length > 524288) throw new InvalidOperationException("template_too_large"); return Convert.ToBase64String(s.ToArray()); } }
+    internal static Dictionary<string, object> Crop(Dictionary<string, object> request) {
+        object rawRegions; var regions = request.TryGetValue("regions", out rawRegions) ? rawRegions as ArrayList : null;
+        if (regions == null || regions.Count < 1 || regions.Count > 16) throw new InvalidOperationException("invalid_crop_regions");
+        var crops = new List<string>(); long encodedSize = 0;
+        using (Bitmap screenshot = Decode(Str(request, "screenshot_png", ""), false)) {
+            foreach (object entry in regions) {
+                var region = entry as Dictionary<string, object>;
+                if (region == null || region.Count != 4) throw new InvalidOperationException("invalid_crop_region");
+                foreach (string key in new string[] { "x", "y", "width", "height" }) if (!region.ContainsKey(key) || !(region[key] is int)) throw new InvalidOperationException("invalid_crop_region");
+                int x = Num(region, "x", -1), y = Num(region, "y", -1), width = Num(region, "width", -1), height = Num(region, "height", -1);
+                if (x < 0 || y < 0 || width < 1 || height < 1 || x > screenshot.Width - width || y > screenshot.Height - height) throw new InvalidOperationException("invalid_crop_region");
+                using (Bitmap crop = screenshot.Clone(new Rectangle(x, y, width, height), PixelFormat.Format32bppArgb)) using (MemoryStream stream = new MemoryStream()) {
+                    crop.Save(stream, ImageFormat.Png); string png = Convert.ToBase64String(stream.ToArray()); encodedSize += png.Length;
+                    if (encodedSize > 15 * 1024 * 1024) throw new InvalidOperationException("crop_response_too_large");
+                    crops.Add(png);
+                }
+            }
+        }
+        return new Dictionary<string, object> { { "nonce", Str(request, "nonce", "") }, { "status", "cropped" }, { "crops", crops } };
+    }
     static Bitmap Decode(string png, bool template)
     {
         if (png.Length > (template ? 710000 : 24 * 1024 * 1024)) throw new InvalidOperationException("image_too_large");
@@ -366,17 +424,55 @@ internal static class VisualTools
             }
         }
     }
-    static bool Detailed(Pixels p)
+    static Dictionary<string, object> DetailMetrics(Pixels p)
     {
-        double sum = 0, sq = 0, edge = 0; int n = 0, edges = 0, step = Math.Max(1, Math.Min(p.W, p.H) / 64);
+        double sum = 0, sq = 0, edgeX = 0, edgeY = 0; int n = 0, edgesX = 0, edgesY = 0, step = Math.Max(1, Math.Min(p.W, p.H) / 64);
         for (int y = 0; y < p.H; y += step) for (int x = 0; x < p.W; x += step) {
             int i = y * p.Stride + x * 4; double v = (p.Data[i] + p.Data[i + 1] + p.Data[i + 2]) / 3.0;
             sum += v; sq += v * v; n++;
-            if (x + step < p.W) { int j = i + step * 4; edge += Math.Abs(v - (p.Data[j] + p.Data[j + 1] + p.Data[j + 2]) / 3.0); edges++; }
+            if (x + step < p.W) { int j = i + step * 4; edgeX += Math.Abs(v - (p.Data[j] + p.Data[j + 1] + p.Data[j + 2]) / 3.0); edgesX++; }
+            if (y + step < p.H) { int j = i + step * p.Stride; edgeY += Math.Abs(v - (p.Data[j] + p.Data[j + 1] + p.Data[j + 2]) / 3.0); edgesY++; }
         }
-        return n > 0 && sq / n - (sum / n) * (sum / n) >= 36 && edges > 0 && edge / edges >= 1.2;
+        return new Dictionary<string, object> { { "variance", n == 0 ? 0 : sq / n - (sum / n) * (sum / n) },
+            { "horizontal_edge", edgesX == 0 ? 0 : edgeX / edgesX }, { "vertical_edge", edgesY == 0 ? 0 : edgeY / edgesY } };
     }
-    sealed class Candidate { internal int X, Y, W, H; internal double Score, Scale; }
+    static bool Detailed(Pixels p) {
+        var detail = DetailMetrics(p);
+        // A list icon must meet the same criterion as its rotated version.
+        // Flat/low-variance captures still fail; matching and ambiguity limits
+        // remain independent and unchanged.
+        return Real(detail, "variance", 0) >= 36 && Math.Max(Real(detail, "horizontal_edge", 0), Real(detail, "vertical_edge", 0)) >= 1.2;
+    }
+    internal static Rectangle RecordingRegion(Size frame, Point anchor, bool semantic, bool identified, bool expanded) {
+        int width = Math.Min(expanded ? 640 : !semantic ? 2048 : identified ? 160 : 384, frame.Width);
+        int height = Math.Min(expanded ? 192 : semantic && !identified ? 128 : 96, frame.Height);
+        return new Rectangle(Math.Max(0, Math.Min(frame.Width - width, anchor.X - width / 2)),
+            Math.Max(0, Math.Min(frame.Height - height, anchor.Y - height / 2)), width, height);
+    }
+    internal static Dictionary<string, object> RecordedImage(Bitmap primary, Point anchor, Bitmap context, Point contextAnchor, Size frameSize, string mode) {
+        Bitmap[] images = context == null ? new Bitmap[] { primary } : new Bitmap[] { primary, context };
+        Point[] anchors = context == null ? new Point[] { anchor } : new Point[] { anchor, contextAnchor };
+        string failure = "template_low_detail";
+        for (int index = 0; index < images.Length; index++) {
+            try {
+                var result = Template(images[index], new Rectangle(Point.Empty, images[index].Size), anchors[index]);
+                result["capture_window"] = new Dictionary<string, object> { { "width", frameSize.Width }, { "height", frameSize.Height } };
+                result["capture_diagnostic"] = new Dictionary<string, object> { { "status", "retained" }, { "capture_mode", mode },
+                    { "candidate_count", index + 1 }, { "context_expanded", index > 0 }, { "detail", DetailMetrics(new Pixels(images[index])) } };
+                return result;
+            } catch (InvalidOperationException error) { failure = error.Message; }
+        }
+        var rejected = new Dictionary<string, object> { { "operation", "manual_entry" }, { "reason", failure }, { "capture_issue", failure },
+            { "capture_diagnostic", new Dictionary<string, object> { { "status", "rejected" }, { "capture_mode", mode }, { "candidate_count", images.Length },
+                { "width", primary.Width }, { "height", primary.Height }, { "detail", DetailMetrics(new Pixels(primary)) } } } };
+        // Keep actual rejected pixels in the private recording receipt. They
+        // never become a replay target and are not exposed by status metadata.
+        try { rejected["rejected_capture"] = new Dictionary<string, object> { { "format", "computer-rejected-capture/v1" },
+            { "png", Encode(primary) }, { "width", primary.Width }, { "height", primary.Height }, { "before_input", true } }; }
+        catch (InvalidOperationException) { }
+        return rejected;
+    }
+    sealed class Candidate { internal int X, Y, W, H, ClipLeft, ClipTop, OriginalW, OriginalH; internal double Score, Scale; }
     sealed class Feature { internal int X, Y; internal double Importance; }
     static List<Feature> Features(Pixels template)
     {
@@ -446,6 +542,9 @@ internal static class VisualTools
                 if (Math.Abs(rx - ry) / Math.Max(rx, ry) < .12) ratio = (rx + ry) / 2;
             }
             Dictionary<string, object> source = Map(request, "source_size"); double sourceScale = source == null ? 1 : (double)Num(source, "width", original.Width) / original.Width;
+            int sourceWidth = source == null ? original.Width : Num(source, "width", original.Width);
+            int sourceHeight = source == null ? original.Height : Num(source, "height", original.Height);
+            bool nearBorder = capture != null && Math.Abs(Num(capture, "width", 0) - image.W) <= 4 && Math.Abs(Num(capture, "height", 0) - image.H) <= 4;
             HashSet<long> sampledSizes = new HashSet<long>();
             // A different capture border can change the window ratio without
             // changing the control's pixels. Always preserve the original
@@ -453,17 +552,24 @@ internal static class VisualTools
             foreach (double baseScale in new double[] { 1, ratio, .75, .85, 1.15, 1.25, 1.5, ratio * .9, ratio * 1.1 }) {
                 double scale = baseScale * sourceScale;
                 if (scale < .2 || scale > 16) continue;
-                int width = (int)Math.Round(original.Width * scale), height = (int)Math.Round(original.Height * scale);
-                if (width < 8 || height < 8 || width > image.W || height > image.H) continue;
+                int width = (int)Math.Round(sourceWidth * baseScale), height = (int)Math.Round(sourceHeight * baseScale);
+                bool clipBorder = nearBorder && Math.Abs(baseScale - 1) < .00001
+                    && (width <= image.W || width == sourceWidth && width == Num(capture, "width", 0) && width - image.W <= 4)
+                    && (height <= image.H || height == sourceHeight && height == Num(capture, "height", 0) && height - image.H <= 4);
+                if (width < 8 || height < 8 || (width > image.W || height > image.H) && !clipBorder) continue;
                 if (sampledSizes.Add(((long)width << 32) | (uint)height)) scales.Add(scale);
             }
             List<Candidate> best = new List<Candidate>(); Stopwatch elapsed = Stopwatch.StartNew();
             foreach (double scale in scales) {
-                int w = (int)Math.Round(original.Width * scale), h = (int)Math.Round(original.Height * scale);
-                if (w < 8 || h < 8 || w > image.W || h > image.H) continue;
+                int w = (int)Math.Round(sourceWidth * scale / sourceScale), h = (int)Math.Round(sourceHeight * scale / sourceScale);
+                int originalWidth = w, originalHeight = h, clipLeft = Math.Max(0, w - image.W) / 2, clipTop = Math.Max(0, h - image.H) / 2;
+                if (w < 8 || h < 8) continue;
                 using (Bitmap resized = new Bitmap(w, h)) {
                     using (Graphics g = Graphics.FromImage(resized)) using (ImageAttributes attributes = new ImageAttributes()) { attributes.SetWrapMode(System.Drawing.Drawing2D.WrapMode.TileFlipXY); g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic; if (w == original.Width && h == original.Height) g.DrawImageUnscaled(original, 0, 0); else g.DrawImage(original, new Rectangle(0, 0, w, h), 0, 0, original.Width, original.Height, GraphicsUnit.Pixel, attributes); }
-                    Pixels pattern = new Pixels(resized); List<Feature> features = Features(pattern); if (features.Count == 0) continue;
+                    w = Math.Min(w, image.W); h = Math.Min(h, image.H);
+                    if (w < 8 || h < 8) continue;
+                    using (Bitmap visiblePattern = resized.Clone(new Rectangle(clipLeft, clipTop, w, h), PixelFormat.Format32bppArgb)) {
+                    Pixels pattern = new Pixels(visiblePattern); List<Feature> features = Features(pattern); if (features.Count == 0) continue;
                     List<Candidate> coarse = new List<Candidate>();
                     // Check every possible origin: even a one-pixel offset can
                     // change the sparse text in a wide, mostly blank field.
@@ -471,12 +577,24 @@ internal static class VisualTools
                         if (elapsed.ElapsedMilliseconds > 15000) throw new InvalidOperationException("match_timeout");
                         for (int x = 0; x <= image.W - w; x++) {
                             double score = FeatureScore(image, pattern, features, x, y, minimum - .12);
-                            if (score >= minimum - .12) AddBest(coarse, new Candidate { X = x, Y = y, W = w, H = h, Score = score, Scale = scale }, 128, true);
+                            if (score >= minimum - .12) AddBest(coarse, new Candidate { X = x, Y = y, W = w, H = h, Score = score, Scale = scale,
+                                ClipLeft = clipLeft, ClipTop = clipTop, OriginalW = originalWidth, OriginalH = originalHeight }, 128, true);
                         }
                     }
                     foreach (Candidate c in coarse) {
-                        c.Score = Score(image, pattern, c.X, c.Y, false);
-                        if (c.Score >= minimum - margin) AddBest(best, c, 8, true);
+                        // Sparse feature ranking can prefer an adjacent edge
+                        // over the true antialiased-text alignment. Refine
+                        // before merging final candidates; never lower the
+                        // final similarity or distinct-target margin.
+                        Candidate local = null;
+                        for (int fy = Math.Max(0, c.Y - 2); fy <= Math.Min(image.H - h, c.Y + 2); fy++)
+                            for (int fx = Math.Max(0, c.X - 2); fx <= Math.Min(image.W - w, c.X + 2); fx++) {
+                                double exact = Score(image, pattern, fx, fy, false);
+                                if (exact >= minimum - margin && (local == null || exact > local.Score)) local = new Candidate { X = fx, Y = fy, W = w, H = h, Score = exact, Scale = scale,
+                                    ClipLeft = clipLeft, ClipTop = clipTop, OriginalW = originalWidth, OriginalH = originalHeight };
+                            }
+                        if (local != null) AddBest(best, local, 8, true);
+                    }
                     }
                 }
             }
@@ -487,6 +605,10 @@ internal static class VisualTools
             if (best.Count > 1 && winner.Score - best[1].Score < margin) { result["status"] = "ambiguous"; result["code"] = "image_ambiguous"; return result; }
             result["status"] = "matched"; result["scale"] = winner.Scale;
             result["rect"] = new Dictionary<string, object> { { "x", winner.X }, { "y", winner.Y }, { "width", winner.W }, { "height", winner.H } };
+            if (winner.OriginalW != winner.W || winner.OriginalH != winner.H)
+                result["template_clip"] = new Dictionary<string, object> { { "left", winner.ClipLeft }, { "top", winner.ClipTop },
+                    { "right", winner.OriginalW - winner.W - winner.ClipLeft }, { "bottom", winner.OriginalH - winner.H - winner.ClipTop },
+                    { "original_width", winner.OriginalW }, { "original_height", winner.OriginalH } };
             return result;
         }
     }
@@ -539,9 +661,12 @@ internal static class VisualTools
     {
         readonly Target target; readonly PictureBox picture = new PictureBox(), preview = new PictureBox(); readonly Label info = new Label();
         readonly Button confirm = Button("이 이미지로 선택"), capture = Button("대상 창을 가져와 캡처"), again = Button("다시 선택");
-        Bitmap frame, crop; Rectangle selection, display; Point start, anchor; bool dragging, anchorChosen; DateTime captureAt, captureDeadline;
+        Bitmap frame, crop; Rectangle selection, display, capturedBounds; Point start, anchor; bool dragging, anchorChosen; DateTime captureAt, captureDeadline, autoCaptureAt;
         internal Picker(Dictionary<string, object> data, string response) : base(data, response, 180) {
-            target = new Target(data); Style(this, "이미지로 요소 선택", new Size(1050, 760)); MinimumSize = new Size(780, 580);
+            target = new Target(data); Style(this, "화면에서 대상 선택", new Size(1050, 760)); MinimumSize = new Size(780, 580);
+            bool includeNative = Object.Equals(data.ContainsKey("include_native") ? data["include_native"] : null, true);
+            bool includeText = Object.Equals(data.ContainsKey("include_text") ? data["include_text"] : null, true);
+            confirm.Text = "이 대상으로 선택";
             var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 3, Padding = new Padding(20) };
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 76)); layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 24));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 86)); layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 100));
@@ -576,9 +701,11 @@ internal static class VisualTools
             };
             Clock.Tick += delegate {
                 if (Done || IsDisposed) { captureAt = DateTime.MinValue; return; }
+                if (autoCaptureAt != DateTime.MinValue && DateTime.UtcNow >= autoCaptureAt) { autoCaptureAt = DateTime.MinValue; capture.PerformClick(); return; }
                 if (captureAt == DateTime.MinValue || DateTime.UtcNow < captureAt) return;
                 try {
                     frame = Capture(target);
+                    capturedBounds = target.CaptureBounds();
                     info.Text = "찾을 부분을 드래그한 뒤 오른쪽 미리보기에서 실제 클릭할 위치를 지정하세요.\n같은 버튼이 여러 개면 주변 이름까지 포함하면 구별하기 쉽습니다.";
                 } catch (Exception e) {
                     // Only re-observe while Windows finishes restore/activation.
@@ -595,12 +722,77 @@ internal static class VisualTools
                 try { if (frame == null || !target.Valid() || target.CaptureBounds().Size != frame.Size) throw new InvalidOperationException("target_changed");
                     if (!anchorChosen) throw new InvalidOperationException("anchor_required");
                     var result = Template(frame, selection, anchor);
+                    if (includeNative) {
+                        // The same chosen point supplies both recognition paths.
+                        // Never ask for another F8 selection when UIA is absent.
+                        Hide(); SetForegroundWindow(target.Hwnd);
+                        if (target.Foreground() && target.CaptureBounds() == capturedBounds) {
+                            Dictionary<string, object> semantic = null; bool protectedInput = false;
+                            var pickedPoint = new POINT { X = capturedBounds.X + anchor.X, Y = capturedBounds.Y + anchor.Y };
+                            var worker = new Thread(delegate() {
+                                try { semantic = ReadPickedNative(target, pickedPoint, includeText); }
+                                catch (InvalidOperationException error) { protectedInput = error.Message == "protected"; }
+                                catch { }
+                            });
+                            worker.IsBackground = true; worker.SetApartmentState(ApartmentState.MTA); worker.Start();
+                            if (worker.Join(600)) {
+                                if (protectedInput) { Show(); Activate(); info.Text = "비밀번호나 보호된 입력은 저장하지 않습니다. 다른 대상을 선택하세요."; return; }
+                                if (semantic != null) result["native_target"] = semantic;
+                            }
+                        }
+                    }
                     result["human_confirmed"] = true; result["pid"] = target.Pid; result["window_id"] = target.Hwnd.ToInt64();
                     result["selection"] = new Dictionary<string, object> { { "x", selection.X }, { "y", selection.Y }, { "width", selection.Width }, { "height", selection.Height } };
                     Finish("selected", result);
-                } catch (Exception e) { info.Text = e.Message == "template_low_detail" ? "구별할 수 있는 글자나 아이콘을 조금 더 포함해 선택하세요." : e.Message == "selection_too_thin" ? "영역이 너무 가늘게 선택되었습니다. 위아래 또는 좌우 여백을 조금 더 포함해 주세요." : "선택한 크기 또는 창 상태가 바뀌었습니다. 다시 캡처해 주세요."; }
+                } catch (Exception e) { if (!Visible) { Show(); Activate(); } info.Text = e.Message == "template_low_detail" ? "구별할 수 있는 글자나 아이콘을 조금 더 포함해 선택하세요." : e.Message == "selection_too_thin" ? "영역이 너무 가늘게 선택되었습니다. 위아래 또는 좌우 여백을 조금 더 포함해 주세요." : "선택한 크기 또는 창 상태가 바뀌었습니다. 다시 캡처해 주세요."; }
             };
+            if (Object.Equals(data.ContainsKey("auto_capture") ? data["auto_capture"] : null, true))
+                Shown += delegate { autoCaptureAt = DateTime.UtcNow.AddMilliseconds(800); };
             FormClosed += delegate { if (frame != null) frame.Dispose(); if (crop != null) crop.Dispose(); target.Release(); };
+        }
+        internal static Dictionary<string, object> ReadPickedNative(Target target, POINT point, bool includeText) {
+            if (!target.Valid() || !target.Contains(point)) return null;
+            var chain = new List<AutomationElement>(); AutomationElement item = AutomationElement.FromPoint(new System.Windows.Point(point.X, point.Y));
+            bool owned = false;
+            for (int level = 0; level < 17 && item != null; level++) {
+                if (item.Current.ProcessId != target.Pid) return null;
+                if (item.Current.IsPassword) throw new InvalidOperationException("protected");
+                chain.Add(item);
+                if (item.Current.NativeWindowHandle == target.Hwnd.ToInt64()) { owned = true; break; }
+                item = TreeWalker.ControlViewWalker.GetParent(item);
+            }
+            if (!owned) return null;
+            int chosen = -1;
+            for (int i = 0; i < chain.Count; i++) {
+                var type = chain[i].Current.ControlType;
+                // An emulator's play icon can expose a containing ListItem.
+                // Promoting that row into a Button repeats the original bug.
+                // Only a real action control may replace the chosen pixels;
+                // collection rows/containers stay image targets.
+                bool actionControl = type == ControlType.Button || type == ControlType.Edit || type == ControlType.ComboBox
+                    || type == ControlType.CheckBox || type == ControlType.RadioButton || type == ControlType.Hyperlink
+                    || type == ControlType.Slider || type == ControlType.ScrollBar || type == ControlType.TabItem
+                    || type == ControlType.MenuItem || i == 0 && (type == ControlType.Document || includeText && type == ControlType.Text);
+                if (actionControl) { chosen = i; break; }
+                if (type != ControlType.Text && type != ControlType.Pane && type != ControlType.Custom) break;
+                if (i >= 3) break;
+            }
+            if (chosen < 0) return null;
+            AutomationElement element = chain[chosen]; System.Windows.Rect bounds = element.Current.BoundingRectangle;
+            if (bounds.IsEmpty || !bounds.Contains(point.X, point.Y)) return null;
+            var ancestors = new List<Dictionary<string, object>>();
+            for (int i = chosen + 1; i < chain.Count; i++) ancestors.Add(PickedIdentity(chain[i]));
+            Rectangle window = target.Bounds();
+            return new Dictionary<string, object> { { "status", "selected" }, { "pid", target.Pid }, { "window_id", target.Hwnd.ToInt64() },
+                { "human_confirmed", true }, { "element", PickedIdentity(element) }, { "ancestors", ancestors },
+                { "point", new Dictionary<string, object> { { "x", point.X }, { "y", point.Y } } },
+                { "bounds", new Dictionary<string, object> { { "x", bounds.X }, { "y", bounds.Y }, { "width", bounds.Width }, { "height", bounds.Height } } },
+                { "window_bounds", new Dictionary<string, object> { { "x", window.X }, { "y", window.Y }, { "width", window.Width }, { "height", window.Height } } } };
+        }
+        static Dictionary<string, object> PickedIdentity(AutomationElement element) {
+            string name = element.Current.Name ?? "", id = element.Current.AutomationId ?? "";
+            if (name.Length > 1000 || id.Length > 1000) throw new InvalidOperationException("identity_too_long");
+            return new Dictionary<string, object> { { "role", element.Current.ControlType.ProgrammaticName.Replace("ControlType.", "") }, { "name", name }, { "automation_id", id }, { "is_password", false } };
         }
         void ClearCapture() {
             preview.Image = null; if (crop != null) { crop.Dispose(); crop = null; } if (frame != null) { frame.Dispose(); frame = null; }
@@ -620,8 +812,8 @@ internal static class VisualTools
     sealed class Recorder : SessionForm
     {
         sealed class Pending {
-            internal Target Target; internal string Operation, RequestedOperation, Reason; internal Bitmap Crop; internal Point Anchor, ScreenPoint; internal Size FrameSize;
-            internal int Wheel; internal string Key; internal string[] Keys; internal Dictionary<string, object> Baseline;
+            internal Target Target; internal string Operation, RequestedOperation, Reason; internal Bitmap Crop, ContextCrop; internal Point Anchor, ContextAnchor, ScreenPoint; internal Size FrameSize; internal string CaptureMode;
+            internal int Wheel; internal string Key; internal string[] Keys; internal Dictionary<string, object> Baseline; internal bool ReplaceAll;
             internal Dictionary<string, object> Saved; internal int Index = -1;
             internal SemanticSample Semantic; internal IntPtr HitWindow; internal Rectangle HitBounds; internal uint HitThread; internal int HitControlId; internal string HitClass; internal DateTime ClickAt; internal bool HitEnabled, ProbeRequested;
         }
@@ -636,9 +828,9 @@ internal static class VisualTools
         bool compact; TableLayoutPanel recorderLayout;
         string recordState = "checking", hookProbe = "checking", uiaProbe = "checking"; DateTime heartbeatAt, probeAt;
         volatile bool probeDone, probeGood; bool probeSettled;
-        DateTime frameAt, dirtyAt, lastSample, workerStarted, typingConfirmedAt; Target frameTarget; Rectangle frameBounds; Bitmap frame; bool frameRendered; List<Rectangle> frameOccluders = new List<Rectangle>();
+        DateTime frameAt, dirtyAt, lastSample, workerStarted, typingConfirmedAt; Target frameTarget; Rectangle frameBounds; Bitmap frame; bool frameRendered, frameExcludesLayered; List<Rectangle> frameOccluders = new List<Rectangle>();
         Dictionary<string, object> lastImage, focusedState; Target lastImageTarget, focusedTarget; DateTime focusedAt; Point lastImagePoint;
-        Pending mouseDown, typing, lastPointer; readonly List<Pending> clickEvidence = new List<Pending>(); List<KeyValuePair<Pending, SemanticSample>> completedClicks; Point mouseStart; readonly object stateLock = new object(); Dictionary<string, object> completedState; Target completedTarget; int completedGeneration; bool workerCompleted;
+        Pending mouseDown, typing, lastPointer, selectAllPreparation; readonly List<Pending> clickEvidence = new List<Pending>(); List<KeyValuePair<Pending, SemanticSample>> completedClicks; Point mouseStart; readonly object stateLock = new object(); Dictionary<string, object> completedState; Target completedTarget; int completedGeneration; bool workerCompleted;
         SemanticSample hovered, completedHover, tracked, completedTracked; Target hoverTarget, trackedTarget; DateTime hoverAt, trackedAt; Dictionary<string, object> trackedEvent; int trackedIndex; bool trackedKeyboard;
         internal Recorder(Dictionary<string, object> data, string response) : base(data, response, 1800) {
             maximum = Num(data, "max_events", 15); if (maximum < 1 || maximum > 15) throw new InvalidOperationException("invalid_event_limit");
@@ -659,7 +851,7 @@ internal static class VisualTools
             pause.Click += delegate { Drain(); Pause(); };
             stop.Click += delegate { CompleteRecording(); };
             cancel.Click += delegate { Finish("cancelled", null); };
-            Clock.Tick += Tick; FormClosed += delegate { UninstallHooks(); if (frame != null) frame.Dispose(); while (pending.Count > 0) { Pending p = pending.Dequeue(); if (p.Crop != null) p.Crop.Dispose(); } foreach (Target t in targets) t.Release(); focusedState = null; };
+            Clock.Tick += Tick; FormClosed += delegate { UninstallHooks(); if (frame != null) frame.Dispose(); while (pending.Count > 0) { Pending p = pending.Dequeue(); if (p.Crop != null) p.Crop.Dispose(); if (p.ContextCrop != null) p.ContextCrop.Dispose(); } foreach (Target t in targets) t.Release(); focusedState = null; };
             Shown += delegate {
                 PlaceToolbar();
                 StartProbe();
@@ -718,7 +910,7 @@ internal static class VisualTools
             try { Write(Response + ".progress.json", value); heartbeatAt = DateTime.UtcNow; } catch { recording = false; recordState = "failed"; Warn("recording_progress_failed"); info.Text = "기록 상태를 전달하지 못해 중지했습니다. 지금까지의 내용을 검토하세요."; start.Enabled = pause.Enabled = false; stop.Enabled = events.Count > 0; }
         }
         string ActiveText() { return "● 기록 중 · 클릭과 입력이 실제 프로그램에 적용됩니다.\n요소로 기록할 수 없으면 이미지로 기록합니다. 가려진 대상은 보완이 필요합니다.\nEsc: 일시정지 · 마친 뒤 동작과 입력값을 검토하세요."; }
-        void Pause() { recording = false; generation++; Compact(false); FinalizePendingInput(); tracked = hovered = null; trackedEvent = null; trackedTarget = hoverTarget = null; typing = null; lastPointer = null; focusedState = null; lastImage = null; lastImageTarget = null; recordState = "paused"; start.Enabled = probeSettled && hookProbe == "available" && events.Count < maximum; pause.Enabled = false; info.Text = "일시정지 · " + events.Count + "/" + maximum + "개 동작을 기록했습니다.\n다시 시작할 때 입력 대상을 클릭하거나 기록을 마치고 검토하세요."; if (frame != null) { frame.Dispose(); frame = null; } Heartbeat(true); }
+        void Pause() { recording = false; generation++; Compact(false); FinalizePendingInput(); tracked = hovered = null; trackedEvent = null; trackedTarget = hoverTarget = null; typing = null; selectAllPreparation = null; lastPointer = null; focusedState = null; lastImage = null; lastImageTarget = null; recordState = "paused"; start.Enabled = probeSettled && hookProbe == "available" && events.Count < maximum; pause.Enabled = false; info.Text = "일시정지 · " + events.Count + "/" + maximum + "개 동작을 기록했습니다.\n다시 시작할 때 입력 대상을 클릭하거나 기록을 마치고 검토하세요."; if (frame != null) { frame.Dispose(); frame = null; } Heartbeat(true); }
         void InstallHooks() { if (mouseHook != IntPtr.Zero) return; mouseProc = MouseHook; keyProc = KeyHook; IntPtr module = GetModuleHandle(null); mouseHook = SetWindowsHookEx(14, mouseProc, module, 0); keyHook = SetWindowsHookEx(13, keyProc, module, 0); if (mouseHook == IntPtr.Zero || keyHook == IntPtr.Zero) { UninstallHooks(); throw new InvalidOperationException("recording_hook_unavailable"); } }
         void UninstallHooks() { recording = false; if (mouseHook != IntPtr.Zero) UnhookWindowsHookEx(mouseHook); if (keyHook != IntPtr.Zero) UnhookWindowsHookEx(keyHook); mouseHook = keyHook = IntPtr.Zero; }
         Target Current() {
@@ -758,12 +950,14 @@ internal static class VisualTools
         }
         Dictionary<string, object> Event(Target t, string operation) { return new Dictionary<string, object> { { "operation", operation }, { "program_id", t.Program }, { "window_ref", t.Window }, { "verification", "manual_required" } }; }
         void Queue(Pending p) {
-            if (events.Count + pending.Count >= maximum) { if (p.Crop != null) p.Crop.Dispose(); Warn("recording_event_limit"); recording = false; BeginInvoke((Action)delegate { Drain(); Pause(); info.Text = "기록 가능한 " + maximum.ToString() + "단계에 도달했습니다. 이후 동작은 기록하지 않습니다. [기록 마치고 검토]를 눌러 확인하세요."; }); return; }
+            if (events.Count + pending.Count >= maximum) { if (p.Crop != null) p.Crop.Dispose(); if (p.ContextCrop != null) p.ContextCrop.Dispose(); Warn("recording_event_limit"); recording = false; BeginInvoke((Action)delegate { Drain(); Pause(); info.Text = "기록 가능한 " + maximum.ToString() + "단계에 도달했습니다. 이후 동작은 기록하지 않습니다. [기록 마치고 검토]를 눌러 확인하세요."; }); return; }
             pending.Enqueue(p);
         }
         bool FocusMatches(Target target) {
-            if (lastPointer == null || lastPointer.Target != target || focusedTarget != target || focusedState == null || DateTime.UtcNow.Subtract(focusedAt).TotalMilliseconds > 1200) return false;
+            if (focusedTarget != target || focusedState == null || DateTime.UtcNow.Subtract(focusedAt).TotalMilliseconds > 1200 || !target.Foreground()) return false;
             if (Str(focusedState, "protected", "False") == "True") return false;
+            if (lastPointer == null) return Map(focusedState, "native_target") != null;
+            if (lastPointer.Target != target) return false;
             return new Rectangle(Num(focusedState, "x", 0), Num(focusedState, "y", 0), Num(focusedState, "width", 0), Num(focusedState, "height", 0)).Contains(lastPointer.ScreenPoint);
         }
         // Hook callbacks copy only a small cached crop. PNG encoding, UIA,
@@ -781,14 +975,29 @@ internal static class VisualTools
             }
             if (!target.ImageAllowed) { if (item.Semantic == null) item.Operation = "manual_entry"; item.Reason = "image_replay_unavailable"; return item; }
             if (frame == null || frameTarget != target || DateTime.UtcNow.Subtract(frameAt).TotalMilliseconds > 250 || frameBounds != target.CaptureBounds() || !target.Contains(point)) { item.Operation = "manual_entry"; item.Reason = "image_capture_required"; return item; }
-            int x = point.X - frameBounds.X, y = point.Y - frameBounds.Y, w = Math.Min(160, frame.Width), h = Math.Min(96, frame.Height);
-            Rectangle r = new Rectangle(Math.Max(0, Math.Min(frame.Width - w, x - w / 2)), Math.Max(0, Math.Min(frame.Height - h, y - h / 2)), w, h);
+            // A repeated icon alone is not a durable target. Graphical rows
+            // retain horizontal context (names/labels) while the actual click
+            // point remains an explicit anchor. Template() bounds storage at
+            // 512px and preserves the original source size for replay scale.
+            int x = point.X - frameBounds.X, y = point.Y - frameBounds.Y;
+            var semanticIdentity = item.Semantic == null ? null : Map(item.Semantic.Native, "element");
+            bool identified = semanticIdentity != null && (Str(semanticIdentity, "name", "").Length > 0 || Str(semanticIdentity, "automation_id", "").Length > 0);
+            Rectangle r = RecordingRegion(frame.Size, new Point(x, y), item.Semantic != null, identified, false);
             Rectangle desktopRegion = new Rectangle(frameBounds.X + r.X, frameBounds.Y + r.Y, r.Width, r.Height);
-            List<Rectangle> currentOccluders = Occluders(target);
+            List<Rectangle> currentOccluders = Occluders(target, frameExcludesLayered);
             if (!frameRendered && (Covered(desktopRegion, frameOccluders) || Covered(desktopRegion, currentOccluders))) {
                 item.Operation = "manual_entry"; item.Reason = "image_occluded_requires_selection"; return item;
             }
-            item.Crop = frame.Clone(r, PixelFormat.Format32bppArgb); item.Anchor = new Point(x - r.X, y - r.Y); item.FrameSize = frame.Size; return item;
+            item.Crop = frame.Clone(r, PixelFormat.Format32bppArgb); item.Anchor = new Point(x - r.X, y - r.Y); item.FrameSize = frame.Size;
+            item.CaptureMode = frameExcludesLayered ? "window_surface" : frameRendered ? "rendered_window" : "screen";
+            // Capture a bounded alternative from this exact pre-input frame,
+            // not a later screenshot or another event. Check its own occluders.
+            Rectangle context = RecordingRegion(frame.Size, new Point(x, y), true, false, true);
+            Rectangle contextDesktop = new Rectangle(frameBounds.X + context.X, frameBounds.Y + context.Y, context.Width, context.Height);
+            if (item.Semantic != null && context != r && (frameRendered || !Covered(contextDesktop, frameOccluders) && !Covered(contextDesktop, currentOccluders))) {
+                item.ContextCrop = frame.Clone(context, PixelFormat.Format32bppArgb); item.ContextAnchor = new Point(x - context.X, y - context.Y);
+            }
+            return item;
         }
         IntPtr MouseHook(int code, IntPtr message, IntPtr data) {
             try {
@@ -796,7 +1005,7 @@ internal static class VisualTools
                     MOUSE mouse = (MOUSE)Marshal.PtrToStructure(data, typeof(MOUSE)); int kind = message.ToInt32();
                     if (kind == 0x201 || kind == 0x204 || kind == 0x20A) {
                         Target target = Current(); if (target != null && target.Contains(mouse.point)) {
-                            if ((mouse.flags & 1) != 0) injected++; typing = null;
+                            if ((mouse.flags & 1) != 0) injected++; typing = null; selectAllPreparation = null;
                             Pending item = CaptureClick(target, mouse.point, kind == 0x204 ? "right_click" : kind == 0x20A ? "scroll" : "click");
                             item.Wheel = (short)(mouse.data >> 16); if (kind != 0x20A) { lastPointer = item; clickEvidence.Add(item); } Queue(item);
                             if (kind != 0x20A) { mouseDown = item; mouseStart = new Point(mouse.point.X, mouse.point.Y); }
@@ -823,13 +1032,14 @@ internal static class VisualTools
                             // a different generic selection strategy.
                             if (tracked != null && trackedTarget == target && tracked.Role == "ComboBox") trackedKeyboard = true;
                             bool ctrl = (GetAsyncKeyState(0x11) & 0x8000) != 0, alt = (GetAsyncKeyState(0x12) & 0x8000) != 0, shift = (GetAsyncKeyState(0x10) & 0x8000) != 0;
-                            if (ctrl && !alt && !shift && (value == Keys.A || value == Keys.Z || value == Keys.Y)) { typing = null; bool valid = FocusMatches(target); Queue(new Pending { Target = target, Operation = valid ? "hotkey" : "manual_entry", Reason = valid ? null : "focus_target_requires_selection", Keys = new string[] { "CTRL", value.ToString().ToUpperInvariant() } }); }
-                            else if (!ctrl && !alt && !shift && (value == Keys.Enter || value == Keys.Tab || value == Keys.Up || value == Keys.Down || value == Keys.Left || value == Keys.Right || value == Keys.Home || value == Keys.End || value == Keys.PageDown || value == Keys.PageUp)) { typing = null; bool valid = FocusMatches(target); Queue(new Pending { Target = target, Operation = valid ? "press_key" : "manual_entry", Reason = valid ? null : "focus_target_requires_selection", Key = value.ToString().ToUpperInvariant() }); }
+                            if (ctrl && !alt && !shift && (value == Keys.A || value == Keys.Z || value == Keys.Y)) { typing = null; bool valid = FocusMatches(target); var preparation = new Pending { Target = target, Operation = valid ? "hotkey" : "manual_entry", Reason = valid ? null : "focus_target_requires_selection", Keys = new string[] { "CTRL", value.ToString().ToUpperInvariant() }, Baseline = valid ? focusedState : null }; selectAllPreparation = valid && value == Keys.A ? preparation : null; Queue(preparation); }
+                            else if (!ctrl && !alt && !shift && (value == Keys.Enter || value == Keys.Tab || value == Keys.Up || value == Keys.Down || value == Keys.Left || value == Keys.Right || value == Keys.Home || value == Keys.End || value == Keys.PageDown || value == Keys.PageUp)) { typing = null; selectAllPreparation = null; bool valid = FocusMatches(target); Queue(new Pending { Target = target, Operation = valid ? "press_key" : "manual_entry", Reason = valid ? null : "focus_target_requires_selection", Key = value.ToString().ToUpperInvariant() }); }
                             else {
                                 if (typing == null || typing.Target != target) {
                                     Dictionary<string, object> baseline = FocusMatches(target) ? focusedState : null;
                                     bool protectedField = focusedTarget == target && focusedState != null && Str(focusedState, "protected", "False") == "True" && DateTime.UtcNow.Subtract(focusedAt).TotalMilliseconds < 1200;
-                                    typing = new Pending { Target = target, Operation = "manual_entry", Reason = protectedField ? "protected_input" : (ctrl || alt) && !(ctrl && !alt && !shift && value == Keys.V && baseline != null) ? "shortcut_requires_manual_setup" : "unknown_input", Baseline = baseline }; Queue(typing);
+                                    typing = new Pending { Target = target, Operation = "manual_entry", Reason = protectedField ? "protected_input" : (ctrl || alt) && !(ctrl && !alt && !shift && value == Keys.V && baseline != null) ? "shortcut_requires_manual_setup" : "unknown_input", Baseline = baseline,
+                                        ReplaceAll = baseline != null && selectAllPreparation != null && selectAllPreparation.Target == target && Str(selectAllPreparation.Baseline, "identity", "before") == Str(baseline, "identity", "after") }; Queue(typing);
                                 } dirtyAt = DateTime.UtcNow;
                             }
                         }
@@ -847,16 +1057,20 @@ internal static class VisualTools
                 if (p.RequestedOperation != null) { lastImage = null; lastImageTarget = null; }
                 if (p.Crop != null) {
                     using (Bitmap image = p.Crop) {
-                        if (Detailed(new Pixels(image))) {
-                            lastImage = new Dictionary<string, object> { { "template_png", Encode(image) }, { "width", image.Width }, { "height", image.Height },
-                                { "anchor", new Dictionary<string, object> { { "x", (double)p.Anchor.X / image.Width }, { "y", (double)p.Anchor.Y / image.Height } } },
-                                { "capture_window", new Dictionary<string, object> { { "width", p.FrameSize.Width }, { "height", p.FrameSize.Height } } } }; lastImageTarget = p.Target; lastImagePoint = p.ScreenPoint;
-                            foreach (var pair in lastImage) item[pair.Key] = pair.Value;
-                        } else { item["operation"] = "manual_entry"; item["reason"] = "template_low_detail"; }
+                        try {
+                            var captured = RecordedImage(image, p.Anchor, p.ContextCrop, p.ContextAnchor, p.FrameSize, p.CaptureMode);
+                            foreach (var pair in captured) item[pair.Key] = pair.Value;
+                            if (captured.ContainsKey("template_png")) { lastImage = captured; lastImageTarget = p.Target; lastImagePoint = p.ScreenPoint; }
+                        } finally { if (p.ContextCrop != null) { p.ContextCrop.Dispose(); p.ContextCrop = null; } }
                     } p.Crop = null;
                 } else if (p.RequestedOperation == null && (p.Key != null || p.Keys != null || p.Baseline != null) && lastImage != null && lastImageTarget == p.Target) foreach (var pair in lastImage) item[pair.Key] = pair.Value;
                 else item["reason"] = "image_capture_required";
                 if (p.Reason != null) item["reason"] = p.Reason;
+                if (p.RequestedOperation != null && p.RequestedOperation != "manual_entry" && p.Reason != "drag_requires_manual_setup") {
+                    item["requested_operation"] = p.RequestedOperation;
+                    item["pointer_evidence"] = new Dictionary<string, object> { { "source", "native_mouse_hook" }, { "operation", p.RequestedOperation }, { "before_input", item.ContainsKey("template_png") } };
+                    if (!item.ContainsKey("template_png")) item["capture_issue"] = Str(item, "reason", "image_capture_required");
+                }
                 // Preserve the original action for an in-place target repair.
                 if (p.Operation == "manual_entry" && p.Key == null && p.Keys == null && p.Baseline == null && p.ScreenPoint != Point.Empty)
                     item["requested_operation"] = p.Reason == "drag_requires_manual_setup" ? "manual_entry" : p.RequestedOperation;
@@ -917,7 +1131,13 @@ internal static class VisualTools
                         else if (e != null && e.Current.ProcessId == target.Pid && e.Current.ControlType == ControlType.Edit && e.Current.IsEnabled) {
                             object raw;
                             if (e.TryGetCurrentPattern(ValuePattern.Pattern, out raw)) { ValuePattern p = (ValuePattern)raw;
-                                if (!p.Current.IsReadOnly && target.Foreground()) { string value = p.Current.Value; System.Windows.Rect bounds = e.Current.BoundingRectangle; if (value.Length <= 2000 && !bounds.IsEmpty) state = new Dictionary<string, object> { { "value", value }, { "identity", String.Join(",", Array.ConvertAll(e.GetRuntimeId(), delegate(int n) { return n.ToString(); })) }, { "x", (int)bounds.X }, { "y", (int)bounds.Y }, { "width", (int)bounds.Width }, { "height", (int)bounds.Height } }; }
+                                if (!p.Current.IsReadOnly && target.Foreground()) { string value = p.Current.Value; System.Windows.Rect bounds = e.Current.BoundingRectangle;
+                                    if (value.Length <= 2000 && !bounds.IsEmpty) {
+                                        state = new Dictionary<string, object> { { "value", value }, { "identity", String.Join(",", Array.ConvertAll(e.GetRuntimeId(), delegate(int n) { return n.ToString(); })) }, { "x", (int)bounds.X }, { "y", (int)bounds.Y }, { "width", (int)bounds.Width }, { "height", (int)bounds.Height } };
+                                        var focus = ReadSemantic(e, target, new POINT { X = (int)(bounds.X + bounds.Width / 2), Y = (int)(bounds.Y + bounds.Height / 2) }, false);
+                                        if (focus != null && focus.Role == "Edit") state["native_target"] = focus.Native;
+                                    }
+                                }
                             }
                         }
                     }
@@ -983,7 +1203,7 @@ internal static class VisualTools
                 { "window_bounds", new Dictionary<string, object> { { "x", window.X }, { "y", window.Y }, { "width", window.Width }, { "height", window.Height } } } };
             var sample = new SemanticSample { Element = e, Native = native, Role = role, Enabled = e.Current.IsEnabled, Identity = String.Join(",", Array.ConvertAll(e.GetRuntimeId(), delegate(int n) { return n.ToString(); })) };
             object raw;
-            if (e.TryGetCurrentPattern(TogglePattern.Pattern, out raw)) {
+            if (role == "CheckBox" && e.TryGetCurrentPattern(TogglePattern.Pattern, out raw)) {
                 ToggleState state = ((TogglePattern)raw).Current.ToggleState;
                 if (state != ToggleState.Indeterminate) { sample.Property = "selected"; sample.Value = state == ToggleState.On; }
             } else if (role == "ComboBox") {
@@ -1032,7 +1252,16 @@ internal static class VisualTools
             if (current == null) { if (GetForegroundWindow() != Handle) Warn("outside_target_not_recorded"); if (!outside) { outside = true; recordState = "outside_target"; info.Text = "연결 범위 밖이라 기록 일시정지\n원래 프로그램이나 관련 팝업으로 돌아오면 계속합니다.\n다른 프로그램·관련 없는 창은 기록되지 않습니다."; Heartbeat(true); } if (frame != null) { frame.Dispose(); frame = null; } }
             else {
                 if (outside) { outside = false; recordState = "recording"; info.Text = ActiveText(); Heartbeat(true); }
-                try { List<Rectangle> occluders = Occluders(current); Rectangle capturedBounds = current.CaptureBounds(); bool rendered; Bitmap next = Capture(current, true, out rendered); occluders.AddRange(Occluders(current)); if (current.CaptureBounds() != capturedBounds) { next.Dispose(); throw new InvalidOperationException("target_changed"); } if (frame != null) frame.Dispose(); frame = next; frameRendered = rendered; frameBounds = capturedBounds; frameTarget = current; frameOccluders = occluders; frameAt = DateTime.UtcNow; } catch { if (frame != null) { frame.Dispose(); frame = null; } }
+                try {
+                    List<Rectangle> allOccluders = Occluders(current), ordinaryOccluders = Occluders(current, true);
+                    Rectangle capturedBounds = current.CaptureBounds(); bool rendered = false;
+                    bool excludeLayered = allOccluders.Count != ordinaryOccluders.Count && Covered(capturedBounds, allOccluders);
+                    Bitmap next = excludeLayered ? CaptureWindowSurface(current) : Capture(current, true, out rendered);
+                    List<Rectangle> occluders = excludeLayered ? ordinaryOccluders : allOccluders; occluders.AddRange(Occluders(current, excludeLayered));
+                    if (current.CaptureBounds() != capturedBounds) { next.Dispose(); throw new InvalidOperationException("target_changed"); }
+                    if (frame != null) frame.Dispose(); frame = next; frameRendered = rendered; frameExcludesLayered = excludeLayered;
+                    frameBounds = capturedBounds; frameTarget = current; frameOccluders = occluders; frameAt = DateTime.UtcNow;
+                } catch { if (frame != null) { frame.Dispose(); frame = null; } }
             }
             lock (stateLock) {
                 if (workerCompleted) {
@@ -1083,8 +1312,17 @@ internal static class VisualTools
                         }
                         if (typing != null && typing.Target == current && typing.Saved != null && typing.Baseline != null && completedState != null && DateTime.UtcNow.Subtract(dirtyAt).TotalMilliseconds >= 400 && workerStarted >= dirtyAt && typing.Reason != "shortcut_requires_manual_setup" && typing.Reason != "recording_method_unverified") {
                             string before = Str(typing.Baseline, "value", ""), after = Str(completedState, "value", "");
-                            if (Str(typing.Baseline, "identity", "before") == Str(completedState, "identity", "after") && before.Length == 0 && after != before) {
-                                typing.Saved["operation"] = "set_value"; typing.Saved["value"] = after; typing.Saved["input_role"] = "Edit"; typing.Saved.Remove("reason"); typingConfirmedAt = DateTime.UtcNow; list.Items[typing.Index] = (typing.Index + 1).ToString() + "  글자 입력 · 저장 전 내용을 확인하세요";
+                            if (RecordedEditConfirmed(typing.Baseline, completedState, typing.ReplaceAll)) {
+                                typing.Saved["operation"] = "set_value"; typing.Saved["value"] = after; typing.Saved["input_role"] = "Edit"; typing.Saved.Remove("reason");
+                                typing.Saved["native_target"] = Map(completedState, "native_target");
+                                typing.Saved["after"] = new Dictionary<string, object> { { "property", "value" }, { "equals", after } };
+                                typing.Saved["event_evidence"] = new Dictionary<string, object> { { "source", "uia_recording" }, { "identity", Str(completedState, "identity", "") }, { "after_input", true } };
+                                typingConfirmedAt = DateTime.UtcNow; list.Items[typing.Index] = (typing.Index + 1).ToString() + "  글자 입력 · 저장 전 Driver 대조";
+                                if (typing.ReplaceAll && selectAllPreparation != null && selectAllPreparation.Saved != null && selectAllPreparation.Index == typing.Index - 1 && typing.Index == events.Count - 1) {
+                                    events.RemoveAt(selectAllPreparation.Index); list.Items.RemoveAt(selectAllPreparation.Index); typing.Index--;
+                                    list.Items[typing.Index] = (typing.Index + 1).ToString() + "  글자 입력 · 저장 전 Driver 대조";
+                                    selectAllPreparation = null;
+                                }
                             } else if (before.Length > 0) typing.Saved["reason"] = "existing_text_requires_review";
                         }
                     }

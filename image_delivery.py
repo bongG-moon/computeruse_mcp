@@ -122,6 +122,16 @@ class ImageDelivery:
                     'model_vision_guaranteed': False, 'scope': 'current_mcp_connection',
                     'screen_accessed': False, 'external_api_called': False}
 
+    def configure(self, delivery_mode):
+        """Explicit host capability selection; not a claim of image understanding."""
+        if delivery_mode not in {'text', 'vision'}:
+            raise ValueError('delivery_mode는 text 또는 vision이어야 합니다.')
+        with self.lock:
+            self.delivery_mode = delivery_mode
+            self.pending = None
+            self.last_status = 'not_tested'
+        return self.status()
+
     def check(self, challenge_id=None, answer=None, delivery_mode=None):
         with self.lock:
             if delivery_mode is not None:

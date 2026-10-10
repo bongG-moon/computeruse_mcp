@@ -176,6 +176,44 @@ class ProgramRegistration:
                 'message': '주소를 등록할 실제 업무 창을 목록에서 선택하세요. 선택한 candidate_id와 launch_uri를 함께 전달하면 바로 등록됩니다. 창이 없으면 사용자가 평소 방식으로 한 번 연 뒤 목록을 다시 확인하세요. 설정 파일을 찾거나 편집할 필요가 없습니다.'}
 
     def _options(self, args, loaded):
+        if args.get("builtin") is not None:
+            if any(key in args for key in ("exe", "candidate_id", "arguments", "working_directory", "launch_uri", "control_exes")):
+                raise RegistrationError("invalid_builtin", "기본 프로그램은 builtin 이름으로 지정하세요. 실행 경로나 실행 인자를 함께 지정하지 않습니다.")
+            from builtin_programs import resolve_builtin, is_previous_package_path
+            try:
+                found = resolve_builtin(args["builtin"])
+            except ValueError as error:
+                raise RegistrationError("builtin_unavailable", str(error)) from error
+            current_paths = [found["exe"], *found["control_exes"]]
+            legacy_name = {"notepad": "notepad.exe", "calculator": "calc.exe"}.get(args["builtin"])
+            legacy_path = str(Path(os.environ.get("WINDIR", r"C:\Windows")) / "System32" / legacy_name) if legacy_name else None
+            def same_builtin(app):
+                exe = app.get("exe")
+                if not exe or app.get("launch") not in (None, found.get("launch")): return False
+                return (check_app(exe) == check_app(found["exe"])
+                    or legacy_path is not None and check_app(exe) == check_app(legacy_path)
+                    or is_previous_package_path(exe, args["builtin"], current_paths))
+            matches = [app for app in loaded["programs"] if same_builtin(app)]
+            if args.get("program_id"):
+                named = [app for app in loaded["programs"] if app["id"] == args["program_id"]]
+                if named and not same_builtin(named[0]):
+                    raise RegistrationError("builtin_identity_conflict", "이 ID에는 다른 프로그램이 등록되어 있습니다. 기존 항목은 변경하지 않았습니다.")
+                if named: matches = named
+                elif matches:
+                    raise RegistrationError("builtin_identity_conflict", "이미 등록한 기본 프로그램의 ID를 유지하세요. 저장한 작업의 연결을 바꾸지 않았습니다.")
+            if len(matches) > 1:
+                raise RegistrationError("builtin_identity_ambiguous", "같은 기본 프로그램이 여러 항목에 있습니다. 갱신할 program_id를 지정하세요.")
+            existing = matches[0] if len(matches) == 1 else {}
+            # Retire only paths from the same trusted package family. Custom
+            # control executables remain unchanged and are never inferred.
+            controls = [path for path in existing.get("control_exes", [])
+                if not is_previous_package_path(path, args["builtin"], current_paths)]
+            controls.extend(found["control_exes"])
+            controls = list({check_app(path): path for path in controls if check_app(path) != check_app(found["exe"])}.values())
+            return {"exe": found["exe"], "name": args.get("name", existing.get("name", found["name"])),
+                "program_id": args.get("program_id", existing.get("id", found["id"])),
+                "hints": args.get("hints", existing.get("hints", found["hints"])),
+                "control_exes": controls, "launch": found.get("launch"), "_builtin_existing": existing}
         if bool(args.get("exe")) == bool(args.get("candidate_id")):
             raise RegistrationError("choose_program", "EXE 전체 경로 또는 열린 창의 candidate_id 중 하나를 지정하세요.")
         exe = args.get("exe")
@@ -215,6 +253,39 @@ class ProgramRegistration:
         values = [copy.deepcopy(updated) for _ in range(3)]
         manager.config, manager.tasks.config, manager.elements.config = values
 
+    def _refresh_builtin(self, options, existing, initial_hash, cancel_event):
+        """Explicit builtin refresh only. Preserve raw unrelated configuration
+        and an active session's old Guard; the next session gets fresh paths.
+        """
+        # CLI/server configuration paths are strings. Normalize and validate
+        # before the Path-only lock, as programs.add_program does via _read.
+        path = programs._plain_file(self.manager.config_path)
+        # Validate discovered executables before obtaining the writer lock.
+        exe = str(programs._plain_file(options["exe"], executable=True))
+        controls = [str(programs._plain_file(p, executable=True)) for p in options["control_exes"]]
+        with programs._write_lock(path):
+            path, original, checked, digest = programs._read(path)
+            if digest != initial_hash:
+                raise RegistrationError("configuration_changed", "기본 프로그램 확인 중 설정이 바뀌었습니다. 다른 변경을 덮어쓰지 않았습니다.")
+            candidate = copy.deepcopy(existing)
+            candidate.update(exe=exe, control_exes=controls, name=options["name"], hints=options["hints"])
+            if options["launch"] is not None: candidate["launch"] = copy.deepcopy(options["launch"])
+            else: candidate.pop("launch", None)
+            updated = copy.deepcopy(original)
+            index = next(i for i, p in enumerate(updated["programs"]) if p["id"] == existing["id"])
+            # Keep optional fields absent when their meaning is unchanged.
+            raw = copy.deepcopy(updated["programs"][index])
+            for key, value in candidate.items():
+                if key in raw or value != checked["programs"][index].get(key): raw[key] = copy.deepcopy(value)
+            if "launch" not in candidate: raw.pop("launch", None)
+            updated["programs"][index] = raw
+            normalized = validate_config(updated)
+            if cancel_event is not None and cancel_event.is_set():
+                raise RegistrationError("registration_cancelled", "등록 요청이 취소되어 설정을 변경하지 않았습니다.")
+            changed = updated != original
+            if changed: programs._replace_if_unchanged(path, digest, updated, candidate)
+        return {"changed": changed, "program": candidate}, normalized
+
     def register(self, args, cancel_event=None):
         manager = self.manager
         with manager.lock:
@@ -227,16 +298,20 @@ class ProgramRegistration:
             if disk != loaded:
                 raise RegistrationError("configuration_changed", "다른 곳에서 설정이 변경되어 덮어쓰지 않았습니다. 현재 화면 작업을 마친 뒤 MCP를 다시 연결하고 등록하세요.")
             options = self._options(args, loaded)
-            preview = programs.preview_add(manager.config_path, **options)
-            if preview["expected_config_sha256"] != initial_hash:
-                raise RegistrationError("configuration_changed", "등록 확인 중 설정이 변경되었습니다. 다른 변경을 덮어쓰지 않았습니다. 목록을 다시 확인하세요.")
-            updated = copy.deepcopy(loaded)
-            if preview["status"] != "already_present":
-                updated["programs"].append(preview["program"])
-            updated = validate_config(updated)
-            if cancel_event is not None and cancel_event.is_set():
-                raise RegistrationError("registration_cancelled", "등록 요청이 취소되어 설정을 변경하지 않았습니다.")
-            saved = programs.add_program(manager.config_path, expected_config_sha256=preview["expected_config_sha256"], **options)
+            builtin_existing = options.pop("_builtin_existing", None)
+            if builtin_existing:
+                saved, updated = self._refresh_builtin(options, builtin_existing, initial_hash, cancel_event)
+            else:
+                preview = programs.preview_add(manager.config_path, **options)
+                if preview["expected_config_sha256"] != initial_hash:
+                    raise RegistrationError("configuration_changed", "등록 확인 중 설정이 변경되었습니다. 다른 변경을 덮어쓰지 않았습니다. 목록을 다시 확인하세요.")
+                updated = copy.deepcopy(loaded)
+                if preview["status"] != "already_present":
+                    updated["programs"].append(preview["program"])
+                updated = validate_config(updated)
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RegistrationError("registration_cancelled", "등록 요청이 취소되어 설정을 변경하지 않았습니다.")
+                saved = programs.add_program(manager.config_path, expected_config_sha256=preview["expected_config_sha256"], **options)
             original = manager.config, manager.tasks.config, manager.elements.config
             try:
                 _, _, after, _ = programs._read(manager.config_path)

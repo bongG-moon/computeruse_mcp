@@ -17,6 +17,7 @@ import ntpath
 import os
 from pathlib import Path
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -25,6 +26,11 @@ import uuid
 
 
 class GuardError(RuntimeError):
+    pass
+
+
+class ElevationRequired(GuardError):
+    """A measured lower Driver token was blocked before any input dispatch."""
     pass
 
 
@@ -142,6 +148,17 @@ def validate_policy(policy):
         raise GuardError("Choose at least one allowed application.")
     for app in apps:
         check_app(app)
+    hosted = policy.get('hosted_windows', [])
+    if not isinstance(hosted, list) or len(hosted) > 64:
+        raise GuardError('Invalid exact hosted-window scope.')
+    seen = set()
+    for frame in hosted:
+        if (not isinstance(frame, dict) or any(type(frame.get(key)) is not int or frame[key] <= 0
+                for key in ('pid', 'window_id', 'app_pid', 'app_window_id', 'host_started', 'app_started'))
+                or check_app(frame.get('exe')) not in {check_app(app) for app in apps}
+                or (frame['pid'], frame['window_id']) in seen):
+            raise GuardError('Invalid exact hosted-window scope.')
+        seen.add((frame['pid'], frame['window_id']))
     if type(policy.get("max_actions")) is not int or not 1 <= policy["max_actions"] <= 1000:
         raise GuardError("max_actions must be between 1 and 1000.")
     if not isinstance(policy.get("driver"), str) or not os.path.isabs(policy["driver"]):
@@ -291,7 +308,7 @@ def discover_allowed_windows(policy, args, process_resolver=windows_process_exe,
             pid = window_resolver(hwnd)
             if "pid" in args and args["pid"] != pid:
                 continue
-            exe = _allowed_pid(pid, policy, process_resolver)
+            exe = _allowed_target(pid, hwnd, policy, process_resolver, window_resolver)
             metadata = dict(metadata_provider(hwnd))
             if args.get("on_screen_only") and not metadata.get("is_on_screen"):
                 continue
@@ -304,13 +321,13 @@ def discover_allowed_windows(policy, args, process_resolver=windows_process_exe,
                     # A relationship is discovery evidence only, never an input
                     # grant. Keep owners from other processes/sessions private.
                     if (window_resolver(owner) == pid and
-                            _allowed_pid(pid, policy, process_resolver) == exe and
+                            _allowed_target(pid, owner, policy, process_resolver, window_resolver) == exe and
                             window_resolver(owner) == pid):
                         metadata[key] = owner
                 except (GuardError, OSError, ValueError):
                     pass
             # Recheck after metadata retrieval to handle a closed/reused HWND.
-            if window_resolver(hwnd) != pid or _allowed_pid(pid, policy, process_resolver) != exe:
+            if window_resolver(hwnd) != pid or _allowed_target(pid, hwnd, policy, process_resolver, window_resolver) != exe:
                 continue
             rows.append({"pid": pid, "window_id": hwnd, "exe": exe,
                          "app_name": ntpath.basename(exe), **metadata})
@@ -325,7 +342,7 @@ def local_discovery_result(name, rows):
     else:
         by_pid = {}
         for row in rows:
-            app = by_pid.setdefault(row["pid"], {"pid": row["pid"], "name": row["app_name"],
+            app = by_pid.setdefault((row["pid"], row['exe']), {"pid": row["pid"], "name": row["app_name"],
                 "exe": row["exe"], "running": True, "windows": []})
             app["windows"].append(row)
         structured = {"apps": list(by_pid.values()),
@@ -498,6 +515,28 @@ def _allowed_pid(pid, policy, resolver):
     return exe
 
 
+def _hosted_target(pid, hwnd, policy, process_resolver=windows_process_exe):
+    matches = [row for row in policy.get('hosted_windows', [])
+               if isinstance(row, dict) and row.get('pid') == pid and row.get('window_id') == hwnd]
+    if not matches:
+        return None
+    from hosted_windows import validate
+    if len(matches) != 1 or not validate(matches[0], policy['allowed_apps'], process_resolver=process_resolver):
+        raise GuardError('호스트 창 안의 승인한 앱이 바뀌거나 종료되었습니다. 현재 앱 창을 다시 연결하세요.')
+    return copy.deepcopy(matches[0])
+
+
+def _allowed_target(pid, hwnd, policy, process_resolver=windows_process_exe,
+                    window_resolver=windows_window_pid):
+    """An exact hosted window never grants its shared host process or siblings."""
+    if type(pid) is not int or pid <= 0 or type(hwnd) is not int or hwnd <= 0 or window_resolver(hwnd) != pid:
+        raise GuardError('window_id must currently belong to the approved pid.')
+    hosted = _hosted_target(pid, hwnd, policy, process_resolver)
+    if hosted is not None:
+        return check_app(hosted['exe'])
+    return _allowed_pid(pid, policy, process_resolver)
+
+
 def _guard_keys(args, target_exe=""):
     keys = []
     for field in ("keys", "modifiers", "modifier"):
@@ -551,7 +590,22 @@ def validate_arguments(name, args, policy, process_resolver=windows_process_exe,
         return args
     if name == "list_windows":
         if "pid" in args:
-            _allowed_pid(args["pid"], policy, process_resolver)
+            try:
+                _allowed_pid(args["pid"], policy, process_resolver)
+            except GuardError:
+                frames = [row for row in policy.get('hosted_windows', []) if row.get('pid') == args['pid']]
+                current_frame = False
+                for row in frames:
+                    try:
+                        if _hosted_target(args['pid'], row['window_id'], policy, process_resolver):
+                            current_frame = True
+                            break
+                    except (GuardError, OSError, ValueError):
+                        # One package can close while another remains in the
+                        # same system host. Discovery still filters each HWND.
+                        continue
+                if not current_frame:
+                    raise
         return args
     if args.get("scope", "window") != "window":
         raise GuardError("Desktop scope is unavailable; select an exact approved window.")
@@ -563,10 +617,8 @@ def validate_arguments(name, args, policy, process_resolver=windows_process_exe,
             if field in args and args[field] != target[field]:
                 raise GuardError("Conflicting target coordinates.")
             args[field] = target[field]
-    target_exe = _allowed_pid(args.get("pid"), policy, process_resolver)
     hwnd = args.get("window_id")
-    if type(hwnd) is not int or hwnd <= 0 or window_resolver(hwnd) != args["pid"]:
-        raise GuardError("window_id must currently belong to the approved pid.")
+    target_exe = _allowed_target(args.get('pid'), hwnd, policy, process_resolver, window_resolver)
     if "session" in args and (not isinstance(args["session"], str) or not 1 <= len(args["session"]) <= 128):
         raise GuardError("Invalid session label.")
     if mode == "uia" and set(args) & PIXEL_KEYS:
@@ -702,6 +754,7 @@ def diagnostic_code(value):
     if "no window with window_id" in text and "exists" in text:
         return "target_unavailable"
     for code, fragments in (
+        ("elevation_required", ("uipi:", "higher-integrity", "elevation_required")),
         ("stale_observation", ("stale", "reobserve", "expired snapshot", "invalid element token")),
         ("background_unavailable", ("background_unavailable", "background unavailable")),
         ("delivery_failed", ("delivery_failed", "delivery failed", "postmessage ignored", "postmessage wm_keydown/up is ignored")),
@@ -789,6 +842,10 @@ def action_guidance(result, name):
             guidance["next_step"] = "get_window_state로 해당 창을 다시 관찰한 뒤 새 element_token 또는 snapshot_id를 사용하세요. 이전 입력이 적용됐는지 확인한 후 필요한 동작만 요청하세요."
         elif guidance["diagnostic_code"] == "target_unavailable":
             guidance["next_step"] = "list_windows로 현재 창을 다시 식별하세요. 별도 대화상자의 창을 관찰할 수 없다면 허용된 부모 창을 get_window_state로 다시 관찰해 대화상자 요소가 포함되어 있는지 확인하세요. 자동 재시도하지 않습니다."
+        elif guidance["diagnostic_code"] == "elevation_required":
+            guidance["recovery_kind"] = "administrator_connection"
+            guidance["automatic_retry"] = False
+            guidance["next_step"] = "대상 프로그램보다 Driver 권한이 낮습니다. 배포된 관리자 연결로 MCP를 다시 연결한 뒤 현재 화면부터 확인하세요. 같은 연결에서 입력을 반복하거나 보안 정책을 변경하지 마세요."
         elif guidance["diagnostic_code"] == "driver_ended" or "runtime was terminated" in texts.lower():
             guidance["recovery_kind"] = "restart_session"
             guidance["automatic_retry"] = False
@@ -803,6 +860,37 @@ def action_guidance(result, name):
     result["structuredContent"] = structured
     result.setdefault("content", []).append({"type": "text", "text": json.dumps({"computer_use_guidance": guidance}, ensure_ascii=False)})
     return result
+
+
+def input_failure_evidence(result):
+    """Small Driver failure evidence for callers, without embedded pixels.
+
+    Persistent metadata logging remains unchanged. In particular, omission of
+    input_sent is preserved as unknown rather than invented non-delivery.
+    """
+    def scalar(value):
+        if value is None or type(value) in (bool, int, float): return value
+        if not isinstance(value, str): return None
+        value = re.sub(r'(?:data:image/[^;\s]+;base64,|iVBORw0KGgo|/9j/)[A-Za-z0-9+/=]{24,}', '[image omitted]', value)
+        return value[:2000]
+    sources = [result.get('structuredContent', {})]
+    for item in result.get('content', []):
+        if isinstance(item, dict) and item.get('type') == 'text':
+            try: sources.append(json.loads(item.get('text', '')))
+            except (ValueError, TypeError): pass
+    evidence = {'diagnostic_code': diagnostic_code(driver_evidence_text(result)),
+                'message': scalar(driver_evidence_text(result)), 'automatic_retry': False}
+    for source in sources:
+        if not isinstance(source, dict): continue
+        for key in ('code', 'error_code', 'input_sent', 'status', 'effect', 'reason', 'backend', 'route', 'delivery_mode', 'success'):
+            if key in source and type(source[key]) in (str, bool, int, float, type(None)):
+                evidence[key] = scalar(source[key])
+        delivery = source.get('delivery')
+        if isinstance(delivery, dict):
+            evidence['delivery'] = {key: scalar(delivery[key]) for key in
+                ('mode', 'delivered_count', 'requested_count', 'backend', 'route', 'reason')
+                if key in delivery and type(delivery[key]) in (str, bool, int, float, type(None))}
+    return evidence
 
 
 def observation_guidance(result, name, args, mode):
@@ -965,6 +1053,9 @@ class DriverTransport:
         self.responses = queue.Queue()
         self.serial = 0
         self.lock = threading.Lock()
+        self.lifecycle_lock = threading.RLock()
+        self.last_activity = time.monotonic()
+        self.readonly_recovery_scope = None
         if self.stop_path.exists():
             raise GuardError("Run has already been stopped.")
         if child is None:
@@ -1025,6 +1116,73 @@ class DriverTransport:
             raise GuardError("Driver process is not running.")
 
     def driver_request(self, method, params=None, timeout=None):
+        """Revive only an idle lifecycle for a fresh, bound read-only request.
+
+        Cua 0.28.2 evicts ordinary lifecycles after five minutes independently
+        of the capability manifest. start_session on the SAME transport goes
+        through the unchanged authorization context, revocation checks and
+        manifest expiry; restarting its process would reset those boundaries.
+        """
+        with self.lifecycle_lock:
+            idle = time.monotonic() - self.last_activity
+            params = copy.deepcopy(params)
+            recovery = self.readonly_recovery_scope
+            eligible = (method == 'tools/call' and isinstance(params, dict)
+                and params.get('name') == 'get_window_state' and idle >= 300
+                and callable(recovery))
+            def dispatch(call_method, arguments, limit):
+                answer = self._driver_request_once(call_method, arguments, timeout=limit)
+                if call_method == 'tools/call' and not answer.get('isError'):
+                    self.last_activity = time.monotonic()
+                return answer
+            if not eligible:
+                return dispatch(method, params, timeout)
+            target = {key: params.get('arguments', {}).get(key) for key in ('pid', 'window_id')}
+            if any(type(value) is not int or value <= 0 for value in target.values()):
+                return dispatch(method, params, timeout)
+            deadline = time.monotonic() + (timeout or self.policy.get('request_timeout_seconds', 90))
+            def remaining():
+                value = deadline - time.monotonic()
+                if value <= 0: raise RequestDeadlineExceeded('화면 읽기 제한 시간이 지났습니다. 입력은 보내지 않았습니다.')
+                return value
+            with recovery(target) as verify_identity:
+                verify_identity()
+                answer = dispatch(method, params, remaining())
+                payload = answer.get('structuredContent', {})
+                refusal = payload.get('refusal') if isinstance(payload, dict) else None
+                if not (answer.get('isError') is True and isinstance(payload, dict)
+                        and payload.get('status') == 'refused'
+                        and isinstance(refusal, dict) and refusal.get('code') == 'session_ended'):
+                    return answer
+                verify_identity()
+                renewed = dispatch('tools/call', {'name': 'start_session', 'arguments': {}}, remaining())
+                # Do not revive denied/revoked authorization by restarting the
+                # Driver, replacing its policy, or requesting a different mode.
+                if renewed.get('isError'):
+                    return renewed
+                lifecycle = renewed.get('structuredContent')
+                if not isinstance(lifecycle, dict) or lifecycle.get('active') is not True:
+                    # A lifecycle acknowledgement is not a screen observation.
+                    # Keep the original failed read if the acknowledgement is
+                    # missing or malformed, rather than reporting read success.
+                    answer['structuredContent']['read_only_recovery'] = {
+                        'reason': 'driver_idle_lifecycle_ended', 'same_transport': True,
+                        'manifest_replaced': False, 'input_replayed': False,
+                        'observation_repeated': False, 'attempts': 1,
+                        'diagnostic_code': 'lifecycle_recovery_unconfirmed'}
+                    return answer
+                verify_identity()
+                answer = dispatch(method, params, remaining())
+                verify_identity()
+                if not isinstance(answer.get('structuredContent'), dict):
+                    answer['structuredContent'] = {}
+                answer['structuredContent']['read_only_recovery'] = {
+                    'reason': 'driver_idle_lifecycle_ended', 'same_transport': True,
+                    'manifest_replaced': False, 'input_replayed': False,
+                    'observation_repeated': True, 'attempts': 1}
+                return answer
+
+    def _driver_request_once(self, method, params=None, timeout=None):
         with self.lock:
             self.check_running()
             self.serial += 1
@@ -1094,7 +1252,7 @@ class Guard:
         self.checkpoint_ready_resolver = checkpoint_ready_resolver or windows_checkpoint_ready
         self.image_geometry_resolver = image_geometry_resolver or windows_image_geometry
         self.image_coordinate_resolver = image_coordinate_resolver or windows_image_coordinate_contract
-        self.image_focus_resolver = image_focus_resolver or windows_image_focus
+        self.image_focus_resolver = image_focus_resolver or self._image_focus
         self.action_count = 0
         self.observed_targets = set()
 
@@ -1103,6 +1261,25 @@ class Guard:
             fields = metadata_event(kind, fields)
         with (self.run_dir / "actions.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(redact_images({"time": utc_now(), "event": kind, **fields}), ensure_ascii=False) + "\n")
+
+    def target_executable(self, target):
+        return _allowed_target(target.get('pid'), target.get('window_id'), self.policy,
+                               self.process_resolver, self.window_resolver)
+
+    def hosted_target(self, target):
+        self.target_executable(target)
+        return _hosted_target(target['pid'], target['window_id'], self.policy, self.process_resolver)
+
+    def _image_focus(self, target):
+        frame = self.hosted_target(target)
+        if frame is None: return windows_image_focus(target)
+        from hosted_windows import focus_window
+        try:
+            return focus_window(frame, self.policy['allowed_apps'], process_resolver=self.process_resolver)
+        except GuardError:
+            raise
+        except (OSError, RuntimeError, ValueError) as error:
+            raise GuardError(str(error)) from error
 
     def check_stop(self):
         if (self.run_dir / "stop.flag").exists():
@@ -1211,7 +1388,7 @@ class Guard:
             # the ordinary session opted into verbose action diagnostics.
             policy["log_detail"] = "metadata"
             validate_arguments("get_window_state", target, policy, self.process_resolver, self.window_resolver)
-            executable = _allowed_pid(target["pid"], self.policy, self.process_resolver)
+            executable = self.target_executable(target)
             def require_ready():
                 if self.checkpoint_ready_resolver(target["window_id"]) is not True:
                     raise CheckpointRequiresForeground("화면 확인 대상 창을 최소화하지 않은 상태로 맨 앞으로 가져오세요. "
@@ -1226,7 +1403,7 @@ class Guard:
             # A reused HWND/PID, even for another allowed program, invalidates
             # the image. Do not forward pixels until ownership is rechecked.
             if (self.window_resolver(target["window_id"]) != target["pid"]
-                    or _allowed_pid(target["pid"], self.policy, self.process_resolver) != executable
+                    or self.target_executable(target) != executable
                     or self.window_resolver(target["window_id"]) != target["pid"]):
                 raise GuardError("Checkpoint window changed or is no longer the approved target.")
             if not isinstance(answer, dict) or answer.get("isError"):
@@ -1277,6 +1454,7 @@ class Guard:
         expected_focus = None
         may_have_dispatched = False
         match_diagnostic = None
+        driver_failure = None
         coordinate_contract = None
         self.observed_targets.clear()
         def result(code, message, *, verified=False, deferred=False):
@@ -1285,6 +1463,7 @@ class Guard:
                     "verification_deferred": deferred,
                     "diagnostic": {"code": code, "message": message, "automatic_replay": False,
                         **({"image_match": copy.deepcopy(match_diagnostic)} if match_diagnostic else {}),
+                        **({"driver_failure": copy.deepcopy(driver_failure)} if driver_failure else {}),
                         **({"coordinate_contract": copy.deepcopy(coordinate_contract)} if coordinate_contract else {})}}
         try:
             check_active()
@@ -1294,7 +1473,13 @@ class Guard:
             policy = copy.deepcopy(self.policy)
             policy.update(mode="visual", log_detail="metadata")
             validate_arguments("get_window_state", target, policy, self.process_resolver, self.window_resolver)
-            executable = _allowed_pid(target["pid"], self.policy, self.process_resolver)
+            if step['operation'] != 'wait_for_image' and isinstance(self.transport, DriverTransport) and type(getattr(getattr(self.transport, 'child', None), 'pid', None)) is int:
+                from privileges import input_integrity_preflight
+                blocked = input_integrity_preflight(self.transport.child.pid, target['pid'])
+                if blocked is not None:
+                    driver_failure = blocked
+                    raise OperationError(blocked['message'], 'elevation_required')
+            executable = self.target_executable(target)
             geometry = validate_geometry(self.image_geometry_resolver(target["window_id"]))
             is_input = step["operation"] != "wait_for_image"
             coordinate_proof = self.image_coordinate_resolver(target["window_id"]) if is_input and geometry[4] == 0 else None
@@ -1306,7 +1491,7 @@ class Guard:
                 if self.checkpoint_ready_resolver(target["window_id"]) is not True:
                     raise OperationError("이미지 작업 대상 창을 최소화하지 않은 상태로 맨 앞으로 가져오세요.", "image_requires_foreground")
                 if (self.window_resolver(target["window_id"]) != target["pid"]
-                        or _allowed_pid(target["pid"], self.policy, self.process_resolver) != executable
+                        or self.target_executable(target) != executable
                         or self.image_geometry_resolver(target["window_id"]) != geometry):
                     raise OperationError("이미지를 읽은 뒤 창의 위치·크기·소유 프로그램이 달라졌습니다. 다시 관찰해야 합니다.", "image_target_changed")
                 if is_input and geometry[4] == 0 and self.image_coordinate_resolver(target["window_id"]) != coordinate_proof:
@@ -1366,7 +1551,7 @@ class Guard:
                 return result("image_appeared", "현재 창에서 저장한 이미지를 하나로 확인했습니다.", verified=True)
             operation = step["operation"][6:]
             def dispatch(name, args, *, require_same_window_after=True):
-                nonlocal may_have_dispatched
+                nonlocal may_have_dispatched, driver_failure
                 ready()
                 previously_dispatched = may_have_dispatched
                 dispatch_count = visual.action_count
@@ -1393,6 +1578,7 @@ class Guard:
                              and row["delivery"]["delivered_count"] > 0) for row in sources)):
                     may_have_dispatched = previously_dispatched
                 if answer.get("isError"):
+                    driver_failure = input_failure_evidence(answer)
                     raise OperationError("이미지 대상의 입력 전달을 확인하지 못했습니다. 같은 동작을 반복하지 않습니다.", "image_input_unconfirmed")
                 if require_same_window_after:
                     ready()
@@ -1480,13 +1666,18 @@ class Guard:
                     self.approve(name, args, call_id, request_deadline=deadline)
                 # Approval may have taken minutes: resolve PID/HWND again.
                 args = validate_arguments(name, args, self.policy, self.process_resolver, self.window_resolver)
+                if name != 'bring_to_front' and isinstance(self.transport, DriverTransport) and type(getattr(getattr(self.transport, 'child', None), 'pid', None)) is int:
+                    from privileges import input_integrity_preflight
+                    blocked = input_integrity_preflight(self.transport.child.pid, args['pid'])
+                    if blocked is not None:
+                        raise ElevationRequired(blocked['message'])
             self.check_stop()
             target_evidence = {}
             if deadline is not None and time.monotonic() >= deadline:
                 raise RequestDeadlineExceeded("단계 시간이 지나 입력을 전달하지 않았습니다. 현재 상태를 다시 확인하세요.")
             if name not in {"list_apps", "list_windows"}:
                 target_evidence = {"pid": args["pid"],
-                                   "exe": _allowed_pid(args["pid"], self.policy, self.process_resolver)}
+                                   "exe": self.target_executable(args)}
             if name in {"list_apps", "list_windows"}:
                 rows = self.discovery_provider(self.policy, args, self.process_resolver, self.window_resolver)
                 result = local_discovery_result(name, rows)
@@ -1523,6 +1714,10 @@ class Guard:
                     if name not in OBSERVATIONS:
                         # Once dispatched, even an error may have changed the UI.
                         self.observed_targets.discard(target_key)
+                if name in OBSERVATIONS and not raw.get('isError') and self.policy.get('hosted_windows'):
+                    # Suppress pixels/tree if the package inside a shared frame
+                    # was replaced while the Driver performed its read.
+                    self.target_executable(args)
                 result = action_guidance(filter_result(name, raw, self.policy, self.process_resolver), name)
                 result = observation_guidance(result, name, args, self.policy["mode"])
                 if name == "get_window_state" and not result.get("isError"):
@@ -1541,6 +1736,9 @@ class Guard:
                 self.observed_targets.discard(target_key)
                 refused["structuredContent"] = {"error_code": "step_timeout", "input_sent": False,
                                                 "effect": "not_applied", "automatic_retry": False}
+            elif isinstance(error, ElevationRequired):
+                refused['structuredContent'] = {'error_code': 'elevation_required', 'input_sent': False,
+                                               'effect': 'not_applied', 'automatic_retry': False}
             refused = action_guidance(refused, name)
             metrics = add_metrics(refused, started)
             self.log("denied" if isinstance(error, GuardError) else "error", request_id=call_id,

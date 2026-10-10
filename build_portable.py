@@ -47,19 +47,22 @@ VISUAL_TOOLS_NAME = "Computer Use MCP 이미지 도구.exe"
 SCOPED_CONTROLS_NAME = "Computer Use MCP 빠른 확인.exe"
 CHECKPOINT_REVIEW_NAME = "Computer Use MCP 화면 확인.exe"
 APP_FILES = (
+    "easy_api.py", "interaction.py", "image_pixels.py", "task_inputs.py", "task_revision.py", "visual_review.py", "visual_targets.py", "builtin_programs.py", "hosted_windows.py",
     "server.py", "settings.py", "setup.py", "consent.py", "register.py", "README.html", "VALIDATION.html",
     "maintenance.py", "diagnostics.py", "install.py", "programs.py", "INSTALL.md", "vendor/__init__.py", "vendor/guard.py", "vendor/windows.py",
     "session_runtime.py", "configuration_state.py", "operations.py", "workflows.py", "inspection.py", "accessibility_tree.py", "closing.py", "close_actions.py", "privileges.py",
     "program_launch.py", "learning.py", "learning_picker.py", "teaching_sessions.py", "teaching_support.py", "process_editor.py", "process_steps.py", "image_targets.py", "image_steps.py",
-    "README.md", "DRIVER-BUNDLE.md", "CUA-DRIVER-LICENSE.md", "PROCESS_GUIDE.html",
+    "README.md", "DRIVER-BUNDLE.md", "CUA-DRIVER-LICENSE.md", "PROCESS_GUIDE.html", "REDESIGN_PLAN.html",
     "scoped_controls.py", "repeat_profiles.py", "result_files.py", "CHANGES_0.12.0.html", "CHANGES_0.13.0.html",
     "window_transitions.py", "program_registration.py",
     "execution_progress.py", "image_delivery.py", "CHANGES_0.14.0.html", "CHANGES_0.14.1.html",
     "recording_windows.py",
-    "replay_preflight.py", "checkpoint_review.py", "CHANGES_0.15.0.html",
+    "replay_preflight.py", "checkpoint_review.py", "CHANGES_0.15.0.html", "CHANGES_0.16.0.html",
 )
 OPTIONAL_APP_FILES = ()
 SOURCE_SUPPORT_FILES = (
+    "test_hosted_windows.py", "test_hosted_guard.py", "test_visual_targets.py", "test_workflow_target_review.py",
+    "test_interaction.py", "test_workflow_visual_review.py", "test_task_revision.py", "test_easy_api.py", "test_visual_review.py", "test_builtin_programs.py", "test_bundle_packaging.py", "acceptance_apps016.py",
     "CheckpointReview.cs", "test_client_compatibility.py", "test_recorded_clicks.py", "test_recording_reliability.py", "test_native_recording_capture.py", "test_replay_readiness.py", "test_selector_reuse.py", "acceptance_record_replay015.py",
     "test_capture_geometry.py", "capture_picker_fixture.py",
     "test_execution_progress.py", "acceptance_observation.py", "acceptance_recording_windows.py",
@@ -69,7 +72,8 @@ SOURCE_SUPPORT_FILES = (
     "test_operation_verification.py", "test_launch_profiles.py", "test_workflow_contract012.py", "recording_validation.py",
     "scoped_nested_validation.py",
     "test_teaching_support.py",
-    "VisualTools.cs", "test_image_targets.py", "test_image_steps.py", "test_image_guard.py", "test_visual_native.py", "test_driver_overlay.py", "visual_fixture.py", "visual_validation.py",
+    "VisualTools.cs", "test_image_targets.py", "test_image_steps.py", "test_image_guard.py", "test_visual_native.py", "test_driver_overlay.py", "test_driver_lifecycle.py", "visual_fixture.py", "visual_validation.py",
+    "test_image_border_clip.py", "test_data/recorded-border-template.png", "test_data/recorded-border-screen.png",
     "ProcessEditor.cs", "test_process_editor.py", "test_process_steps.py", "test_checkpoint_capture.py", "test_store_locks.py", "process_validation.py",
     "Launcher.cs", "AdministratorBridge.cs", "build_portable.py", "bundle_driver.py", ".gitignore", "test_consent.py", "test_register.py", "test_administrator.py", "administrator_validation.py",
     "ElementPicker.cs", "test_program_launch.py", "test_learning.py", "test_learning_picker.py", "test_learning_tools.py", "learning_validation.py", "test_teaching_sessions.py", "picker_validation.py",

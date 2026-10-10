@@ -83,6 +83,21 @@ class LegacyCoordinateTests(unittest.TestCase):
         self.assertNotIn("template_png", details)
         self.assertFalse(result["input_dispatched"])
 
+    def test_preflight_preserves_driver_refusal_instead_of_claiming_capture_failure(self):
+        def refuse(request, result):
+            result.clear()
+            result.update(isError=True, structuredContent={"status": "refused"},
+                content=[{"type": "text", "text": "Permission session expired; authorize a new bounded session."}])
+        self.transport.after = refuse
+        runtime = SimpleNamespace(guard=self.guard, check_active=lambda: None)
+        result = image_replay_preflight(runtime, TARGET)
+        self.assertFalse(result["ready_for_input"])
+        self.assertFalse(result["capture_verified"])
+        self.assertTrue(result["diagnostic"]["driver_refused"])
+        self.assertEqual(result["diagnostic"]["code"], "image_capture_refused")
+        self.assertIn("Permission session expired", result["diagnostic"]["message"])
+        self.assertEqual(self.mutations(), [])
+
     def test_explicit_driver_non_delivery_does_not_become_uncertain_attempt(self):
         def refuse(request, result):
             if request["name"] == "click":

@@ -48,7 +48,7 @@ record/replay capture must still be checked. A non-foreground capture request is
 reported as needs_foreground, never as an unsupported application.
 """
     from image_targets import png_dimensions
-    from vendor.guard import Guard, _allowed_pid, validate_arguments
+    from vendor.guard import Guard, _allowed_pid, validate_arguments, diagnostic_code, driver_evidence_text, redact_images
     answer = {"status": "blocked", "ready_for_input": False, "ready_for_capture": False,
               "capture_verified": False, "input_dispatched": False, "read_only": True}
     try:
@@ -57,7 +57,10 @@ reported as needs_foreground, never as an unsupported application.
         policy = copy.deepcopy(guard.policy)
         policy.update(mode="visual", log_detail="metadata")
         validate_arguments("get_window_state", target, policy, guard.process_resolver, guard.window_resolver)
-        executable = _allowed_pid(target["pid"], guard.policy, guard.process_resolver)
+        executable_for = getattr(guard, "target_executable", None)
+        def target_executable():
+            return executable_for(target) if callable(executable_for) else _allowed_pid(target["pid"], guard.policy, guard.process_resolver)
+        executable = target_executable()
         geometry = validate_geometry(guard.image_geometry_resolver(target["window_id"]))
         answer["ready_for_capture"] = True
         proof = guard.image_coordinate_resolver(target["window_id"]) if geometry[4] == 0 else None
@@ -75,7 +78,17 @@ reported as needs_foreground, never as an unsupported application.
         captured = visual.call("get_window_state", target)
         runtime.check_active()
         images = [row for row in captured.get("content", []) if row.get("type") == "image"]
-        if captured.get("isError") or len(images) != 1 or images[0].get("mimeType") != "image/png":
+        if captured.get("isError"):
+            # A lost/expired driver grant is not a failure to find screen pixels.
+            # Keep its bounded, image-free explanation so callers can repair
+            # the connection instead of asking the user to record unusable steps.
+            detail = str(redact_images(driver_evidence_text(captured))).strip()[:1000]
+            code = diagnostic_code(detail)
+            if code == "request_failed": code = "image_capture_refused"
+            return {**answer, "diagnostic": {"code": code,
+                "message": "녹화 전 화면 읽기 요청이 거절되었습니다. " + (detail or "Driver 연결 상태를 확인한 뒤 다시 녹화를 시작하세요."),
+                "driver_refused": True}}
+        if len(images) != 1 or images[0].get("mimeType") != "image/png":
             raise OperationError("현재 창의 캡처를 확인하지 못했습니다.", "image_capture_failed")
         size = png_dimensions(images[0].get("data"))
         metadata = captured.get("structuredContent", {})
@@ -83,7 +96,7 @@ reported as needs_foreground, never as an unsupported application.
                 or (metadata.get("screenshot_width"), metadata.get("screenshot_height")) != size):
             raise OperationError("Driver 캡처의 대상·크기가 실제 PNG와 다릅니다.", "image_coordinate_mismatch")
         if (guard.window_resolver(target["window_id"]) != target["pid"]
-                or _allowed_pid(target["pid"], guard.policy, guard.process_resolver) != executable
+                or target_executable() != executable
                 or guard.image_geometry_resolver(target["window_id"]) != geometry
                 or guard.checkpoint_ready_resolver(target["window_id"]) is not True
                 or (geometry[4] == 0 and guard.image_coordinate_resolver(target["window_id"]) != proof)):

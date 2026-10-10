@@ -78,7 +78,7 @@ def suggested_operations(element):
 
 
 def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elements=600,
-                   search="", within=None, offset=0, actionable_only=False, observation="auto"):
+                   search="", within=None, offset=0, actionable_only=False, observation="auto", requested_goal=""):
     if (not isinstance(target, dict) or set(target) != {"pid", "window_id"}
             or any(type(v) is not int or v < 1 for v in target.values())):
         raise OperationError("관찰할 현재 창의 pid/window_id를 지정하세요.")
@@ -87,6 +87,8 @@ def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elemen
             raise OperationError(f"{name}는 1~{ceiling} 범위의 정수여야 합니다.")
     if not isinstance(search, str) or len(search) > 200:
         raise OperationError("search는 200자 이하 검색어여야 합니다.")
+    if not isinstance(requested_goal, str) or len(requested_goal) > 2000:
+        raise OperationError("작업 목표는 2000자 이하 문자열이어야 합니다.")
     if type(offset) is not int or not 0 <= offset <= 5000 or type(actionable_only) is not bool:
         raise OperationError("목록 시작 위치와 조작 요소 필터를 확인하세요.")
     if within is not None:
@@ -138,6 +140,7 @@ def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elemen
                   "execution_verified": False,
                   "task_verified": False, "input_dispatched": False,
                   "requested_observation": observation, "input_mode_unchanged": True,
+                  "requested_goal": requested_goal,
                   "image_delivery": {"format": "mcp_image_content", "client_rendering_verified": False,
                                      "model_image_understanding_verified": False}}
     if not uia:
@@ -238,11 +241,18 @@ def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elemen
         inspection["uia_evidence"] = ("actionable_controls_observed" if actionable else
                                       "structure_only" if elements else "empty_accessibility")
         inspection["input_requires_fresh_observation"] = scoped
-    needs_image = runtime.mode == "uia" and (observation in ("visual", "both") or observation == "auto" and weak)
+    # A usable toolbar is not evidence that the requested row/icon is exposed.
+    # Goal-aware callers receive visual evidence even when unrelated UIA controls
+    # exist. This never claims that text-only clients understand those pixels.
+    goal_needs_image = bool(requested_goal.strip())
+    inspection["goal_target_verified"] = False
+    inspection["missing_target_evidence"] = bool(goal_needs_image)
+    needs_image = runtime.mode == "uia" and (observation in ("visual", "both") or observation == "auto" and (weak or goal_needs_image))
     capture_failed = False
     if needs_image:
         capture = getattr(runtime, "capture_checkpoint", None)
-        reason = "explicit_request" if observation in ("visual", "both") else "weak_accessibility"
+        reason = ("explicit_request" if observation in ("visual", "both") else
+                  "goal_target_not_verified" if goal_needs_image else "weak_accessibility")
         image_state = {"requested": True, "reason": reason, "read_only": True, "status": "unavailable"}
         if callable(capture):
             if callable(report):

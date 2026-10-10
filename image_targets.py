@@ -129,9 +129,43 @@ def validate_match(answer, image_target, screenshot_png):
             or rect["x"]+rect["width"] > width or rect["y"]+rect["height"] > height
             or type(score) not in {int, float} or not math.isfinite(score) or not target["min_score"] <= score <= 1):
         raise OperationError("이미지 비교의 크기·위치·유사도를 검증하지 못했습니다.", "image_match_invalid")
+    second = answer.get('second_score')
+    if ('second_score' in answer and (type(second) not in {int, float} or not math.isfinite(second)
+            or not 0 <= second <= 1 or score-second < target['ambiguity_margin'])
+            or type(answer.get('candidate_count')) is int and answer['candidate_count'] > 1 and 'second_score' not in answer):
+        raise OperationError('서로 다른 이미지 후보를 충분히 구분하지 못했습니다.', 'image_match_invalid')
     # This location is ephemeral and belongs solely to the supplied screenshot.
     x = min(rect["x"]+rect["width"]-1, rect["x"]+int(target["anchor"]["x"]*rect["width"]))
     y = min(rect["y"]+rect["height"]-1, rect["y"]+int(target["anchor"]["y"]*rect["height"]))
+    if 'template_clip' in answer:
+        clip = answer['template_clip']
+        fields = {'left', 'top', 'right', 'bottom', 'original_width', 'original_height'}
+        original = target.get('source_size', {'width': target['width'], 'height': target['height']})
+        if (not isinstance(clip, dict) or set(clip) != fields or any(type(v) is not int for v in clip.values())
+                or rect['width'] < 8 or rect['height'] < 8
+                or any(not 0 <= clip[key] <= 4 for key in ('left', 'top', 'right', 'bottom'))
+                or clip['original_width'] != original['width'] or clip['original_height'] != original['height']
+                or clip['original_width'] != rect['width']+clip['left']+clip['right']
+                or clip['original_height'] != rect['height']+clip['top']+clip['bottom']
+                or not any(clip[key] for key in ('left', 'top', 'right', 'bottom'))
+                or any(abs(target['capture_window'][key]-value) > 4 for key, value in (('width', width), ('height', height)))):
+            raise OperationError('이미지 테두리 보정의 크기와 범위를 확인하지 못했습니다.', 'image_match_invalid')
+        for dimension, origin, start, end, extent in (('width', 'x', 'left', 'right', width), ('height', 'y', 'top', 'bottom', height)):
+            removed = clip[start]+clip[end]
+            if removed and (removed > 4 or original[dimension] != target['capture_window'][dimension]
+                    or rect[dimension] != extent or rect[origin] != 0
+                    or removed != target['capture_window'][dimension]-extent
+                    or clip[start] != removed//2 or clip[end] != removed-removed//2):
+                raise OperationError('이미지 테두리 밖의 영역을 잘라낼 수 없습니다.', 'image_match_invalid')
+        # Preserve the recorded point in original source pixels. Rescaling the
+        # retained crop would shift off-center clicks; clipping must never clamp
+        # a point that was actually removed onto a different control pixel.
+        offset_x = min(original['width']-1, int(target['anchor']['x']*original['width']))-clip['left']
+        offset_y = min(original['height']-1, int(target['anchor']['y']*original['height']))-clip['top']
+        if not 0 <= offset_x < rect['width'] or not 0 <= offset_y < rect['height']:
+            raise OperationError('기록한 클릭 지점이 보정 후 이미지 밖에 있습니다. 다시 선택하세요.', 'image_match_invalid')
+        x, y = rect['x']+offset_x, rect['y']+offset_y
+        details['template_clip'] = dict(clip)
     return {**details, "status": "matched", "x": x, "y": y, "score": score, "rect": dict(rect), "screenshot": screenshot}
 
 

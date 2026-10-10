@@ -46,6 +46,32 @@ class RecordingReliabilityTests(unittest.TestCase):
                 self.assertEqual(draft.steps[0]["operation"], "manual_entry")
                 self.assertNotIn("value", draft.steps[0])
 
+    def test_checkbox_side_effect_exception_requires_distinct_verified_later_physical_click(self):
+        for failure in ("no_pointer", "terminal_unverified", "same_control", "same_runtime", "no_later_pointer"):
+            first, snapshots = self.source.event("set_checked", True)
+            later = copy.deepcopy(first)
+            self.evidence(first, "first"); self.evidence(later, "second")
+            for event in (first, later):
+                event.update(requested_operation="click", pointer_evidence={"source": "native_mouse_hook", "operation": "click", "before_input": True})
+            later["native_target"]["element"].update(automation_id="later", name="Later")
+            row = snapshots[("editor", "main")]["elements"][0]
+            other = {**row, "element_index": 2, "automation_id": "later", "name": "Later"}
+            snapshots[("editor", "main")]["elements"].append(other)
+            row["selected"] = False
+            if failure == "no_pointer": first.pop("pointer_evidence")
+            elif failure == "terminal_unverified": other["selected"] = False
+            elif failure == "same_control":
+                later["native_target"] = copy.deepcopy(first["native_target"])
+            elif failure == "same_runtime": later["event_evidence"]["identity"] = "first"
+            else: later.pop("pointer_evidence")
+            draft = ProcessDraft([self.program])
+            with self.subTest(failure=failure):
+                draft.recorded([first, later], snapshots=snapshots)
+                # Its proven physical click may survive as an image action,
+                # but an unverified historical checked value must not.
+                self.assertNotEqual(draft.steps[0]["operation"], "set_checked")
+                self.assertNotIn("checked", draft.steps[0])
+
     def button(self):
         event, snapshots = self.source.event()
         event.update(operation="click"); event.pop("after"); event.pop("value")

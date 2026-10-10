@@ -17,6 +17,18 @@ class ConversationSetupBoundaryTests(unittest.TestCase):
     plan = fixtures.ConversationSetupTests.plan
     apply = fixtures.ConversationSetupTests.apply
 
+    def test_new_engine_modules_are_bound_to_install_fingerprint(self):
+        bundle = self.root / "fingerprint-bundle"
+        bundle.mkdir()
+        modules = ("easy_api.py", "interaction.py", "image_pixels.py", "task_inputs.py", "task_revision.py", "visual_review.py", "visual_targets.py", "builtin_programs.py")
+        with patch.object(install, "APP_DIR", bundle):
+            previous = install._code_fingerprint()
+            for module in modules:
+                (bundle / module).write_text("# changed engine contract\n", encoding="utf-8")
+                changed = install._code_fingerprint()
+                self.assertNotEqual(previous, changed, module)
+                previous = changed
+
     def assert_apply_rejected(self, plan):
         try:
             result = self.apply(plan)
@@ -188,6 +200,18 @@ class ConversationSetupBoundaryTests(unittest.TestCase):
             plan = self.plan()
             target = bundle / "register.py"
             target.write_bytes(target.read_bytes() + b"\n# changed temporary fixture\n")
+            self.assert_apply_rejected(plan)
+        self.diagnostics.assert_not_called()
+        self.register_call.assert_not_called()
+        self.assertFalse(self.config.exists())
+
+    def test_target_recovery_code_changed_after_prepare_blocks_install(self):
+        bundle = self.copied_bundle()
+        target = bundle / "visual_targets.py"
+        target.write_bytes((install.APP_DIR / "visual_targets.py").read_bytes())
+        with patch.object(install, "APP_DIR", bundle):
+            plan = self.plan()
+            target.write_bytes(target.read_bytes() + b"\n# changed recovery fixture\n")
             self.assert_apply_rejected(plan)
         self.diagnostics.assert_not_called()
         self.register_call.assert_not_called()

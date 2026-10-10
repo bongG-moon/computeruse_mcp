@@ -216,7 +216,13 @@ class ClosureManager:
     def __init__(self, runtime, probe_factory=None):
         self.runtime = runtime
         self.session_id = runtime.id
-        self.probe_factory = probe_factory or NativeClosureProbe
+        transition_probe = getattr(runtime, "create_transition_probe", None)
+        if probe_factory is not None:
+            self.probe_factory = probe_factory
+        elif callable(transition_probe):
+            self.probe_factory = lambda pid, hwnd: transition_probe({"pid": pid, "window_id": hwnd})
+        else:
+            self.probe_factory = NativeClosureProbe
         self.tickets = {}
         self._lock = threading.RLock()
         self._closed = False
@@ -225,6 +231,15 @@ class ClosureManager:
         self.runtime.check_active()
         if self._closed or self.runtime.id != self.session_id:
             raise ClosureError("종료 확인 기록은 만든 화면 작업 세션에서만 사용할 수 있습니다.", "closure_session_changed")
+
+    def _identity(self, target):
+        guard = self.runtime.guard
+        resolver = getattr(guard, "target_executable", None)
+        executable = check_app(resolver(target) if callable(resolver) else guard.process_resolver(target["pid"]))
+        if executable not in guard.policy["allowed_apps"] or guard.window_resolver(target["window_id"]) != target["pid"]:
+            raise ClosureError("이번 세션에 승인된 실행 중 프로그램의 현재 창만 종료 확인할 수 있습니다.", "closure_target_not_allowed")
+        hosted = getattr(guard, "hosted_target", None)
+        return executable, copy.deepcopy(hosted(target) if callable(hosted) else None)
 
     def prepare(self, target, scope="window"):
         self._active()
@@ -237,10 +252,9 @@ class ClosureManager:
             self._active()
             if len(self.tickets) >= self.MAX_TICKETS:
                 raise ClosureError("이 세션의 종료 확인 기록 32개를 모두 사용했습니다. 새 세션에서 현재 창을 다시 관찰하세요.", "closure_ticket_limit")
-            guard = self.runtime.guard
-            executable = check_app(guard.process_resolver(target["pid"]))
-            if executable not in guard.policy["allowed_apps"] or guard.window_resolver(target["window_id"]) != target["pid"]:
-                raise ClosureError("이번 세션에 승인된 실행 중 프로그램의 현재 창만 종료 확인할 수 있습니다.", "closure_target_not_allowed")
+            executable, hosted = self._identity(target)
+            if hosted is not None and scope != "window":
+                raise ClosureError("이 앱은 Windows의 공용 창 호스트를 사용합니다. 다른 앱에 영향을 주지 않도록 창 단위로만 종료할 수 있습니다.", "hosted_window_scope_required")
             probe = None
             try:
                 probe = self.probe_factory(target["pid"], target["window_id"])
@@ -248,7 +262,7 @@ class ClosureManager:
                 self._validate_snapshot(initial, target)
                 if initial["process_exited"] or not initial["target_present"]:
                     raise ProbeError("target_not_live_at_prepare")
-                if check_app(initial["executable"]) != executable or check_app(guard.process_resolver(target["pid"])) != executable or guard.window_resolver(target["window_id"]) != target["pid"]:
+                if check_app(initial["executable"]) != executable or self._identity(target) != (executable, hosted):
                     raise ProbeError("target_changed_during_prepare")
                 self._active()
                 close_id = uuid.uuid4().hex

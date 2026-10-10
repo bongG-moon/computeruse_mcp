@@ -168,6 +168,7 @@ class CheckpointCaptureTests(unittest.TestCase):
         runtime.execution_lock = threading.RLock()
         runtime.mode, runtime.state, runtime.reason = "uia", "active", ""
         runtime.stop_event = threading.Event()
+        runtime.request_cancel_event = threading.Event()
         runtime.deadline = time.monotonic()+60
         runtime.run_dir = self.path
         def stop(reason):
@@ -187,10 +188,11 @@ class CheckpointCaptureTests(unittest.TestCase):
         self.assertEqual(len(self.transport.calls), 1)
 
     def test_runtime_cancellation_or_dead_driver_during_capture_rejects_result(self):
-        for cause in ("cancel", "driver"):
+        for cause in ("cancel", "request_cancel", "driver"):
             runtime = self.runtime()
             self.transport.closed.clear()
-            self.transport.after_request = runtime.stop_event.set if cause == "cancel" else self.transport.closed.set
+            self.transport.after_request = (runtime.stop_event.set if cause == "cancel" else
+                runtime.request_cancel_event.set if cause == 'request_cancel' else self.transport.closed.set)
             with self.subTest(cause=cause), self.assertRaises(SessionError):
                 runtime.capture_checkpoint(TARGET)
             self.assertEqual(runtime.state, "stopped")

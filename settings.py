@@ -12,7 +12,7 @@ from vendor.guard import check_app, normalize_exe, GuardError
 from vendor.windows import discover
 from program_launch import validate_launch_profile
 
-VERSION = "0.15.0"
+VERSION = "0.16.0"
 PROGRAM_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 
 
@@ -28,11 +28,13 @@ def default_config(config_path: Path | None = None) -> dict:
         programs.append({key: item.get(key, default) for key, default in (
             ("id", ""), ("name", ""), ("exe", ""), ("control_exes", []), ("hints", ""))})
         programs[-1]["enabled"] = bool(item.get("available") and item.get("exe"))
+        if "launch" in item:
+            programs[-1]["launch"] = copy.deepcopy(item["launch"])
         if item.get("id") == "notepad":
             programs[-1]["hints"] += " 저장은 파일 → 저장 메뉴를 먼저 사용하고 실제 파일을 확인합니다. 단축키 동작은 프로그램과 Driver 조합에 따라 다를 수 있습니다."
         if item.get("id") == "excel":
             programs[-1]["hints"] += " 입력 확정 후 셀 주소와 값을 다시 확인하고 저장·재열기 결과까지 확인합니다. UIA 즉시 값 또는 여러 셀 문자열 입력만으로 성공을 판단하지 않습니다."
-    return {"version": 1, "driver": "", "programs": programs, "mode": "uia",
+    return {"version": 1, "driver": "", "programs": programs, "mode": "uia", "tool_profile": "simple",
             "approval": "client", "log_detail": "metadata", "max_minutes": 10, "max_actions": 120,
             "approval_timeout_seconds": 300, "observation_timeout_seconds": 20, "state_dir": str(path.parent)}
 
@@ -41,6 +43,9 @@ def validate_config(value: dict) -> dict:
     if not isinstance(value, dict) or value.get("version") != 1:
         raise ValueError("지원하지 않는 설정 형식입니다.")
     config = copy.deepcopy(value)
+    config.setdefault("tool_profile", "simple")
+    if config["tool_profile"] not in {"simple", "legacy"}:
+        raise ValueError("도구 방식은 simple 또는 legacy여야 합니다.")
     config.setdefault("log_detail", "metadata")
     if not isinstance(config["log_detail"], str) or config["log_detail"] not in {"metadata", "content"}:
         raise ValueError("기록 방식은 기본 정보(metadata) 또는 내용 포함(content)이어야 합니다.")

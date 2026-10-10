@@ -33,8 +33,13 @@ def launch_environment(source=None):
 
 def validate_launch_profile(value):
     """Validate a saved exact target, never a command or per-call interpolation."""
-    if not isinstance(value, dict) or value.get("kind") not in {"exe", "uri"}:
-        raise ValueError("실행 방식은 exe 또는 uri로 지정하세요.")
+    if not isinstance(value, dict) or value.get("kind") not in {"exe", "uri", "builtin"}:
+        raise ValueError("실행 방식은 exe, uri 또는 등록된 기본 앱으로 지정하세요.")
+    if value["kind"] == "builtin":
+        from builtin_programs import BUILTIN_PROTOCOLS
+        if set(value) != {"kind", "id"} or value.get("id") not in BUILTIN_PROTOCOLS:
+            raise ValueError("기본 앱 실행은 확인된 calculator 또는 store 식별자만 지원합니다.")
+        return dict(value)
     if value["kind"] == "exe":
         if set(value) - {"kind", "arguments", "cwd"}:
             raise ValueError("실행 방식에는 인자 목록(arguments)과 시작 폴더(cwd)만 지정할 수 있습니다.")
@@ -104,7 +109,11 @@ def create_program(program, process_factory=subprocess.Popen, *, uri_launcher=No
         if os.name != "nt":
             raise OSError("주소 실행은 Windows에서만 지원합니다.")
         uri_launcher = os.startfile
-    uri_launcher(profile["target"], "open")
+    if profile["kind"] == "builtin":
+        from builtin_programs import BUILTIN_PROTOCOLS
+        uri_launcher(BUILTIN_PROTOCOLS[profile["id"]], "open")
+    else:
+        uri_launcher(profile["target"], "open")
     return UriLaunchRequest()
 
 

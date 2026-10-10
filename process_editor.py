@@ -1,4 +1,4 @@
-"""Human-authored declarative processes, using the same guarded picker and task store."""
+﻿"""Human-authored declarative processes, using the same guarded picker and task store."""
 from __future__ import annotations
 
 import copy
@@ -115,21 +115,39 @@ def task_view(task):
     return value
 
 
+def _leaf_steps(steps):
+    for step in steps:
+        if step.get("operation") == "foreach":
+            yield from _leaf_steps(step.get("steps", []))
+        else:
+            yield step
+
+
 class ProcessDraft:
     """No executable code or transient window/element handles can enter a recipe."""
     def __init__(self, programs, task=None):
+        if task and task.get("id"):
+            from task_revision import stable_task
+            task = stable_task(task)
         self.programs = copy.deepcopy(programs)
         self.targets = {(p["program_id"], p.get("window_ref", "main")): p for p in programs}
         self.selections = {}
         self.steps = copy.deepcopy((task or {}).get("steps", []))
         self.variables = copy.deepcopy((task or {}).get("variables", {}))
+        self.task_id = (task or {}).get("id")
+        self.revision = (task or {}).get("revision", 1)
         self.labels = [step.get("selector", {}).get("name", "저장한 이미지" if "image_target" in step else "저장된 요소") for step in self.steps]
         review = (task or {}).get("recording_review", {})
         self.recording_warnings = list(review.get("warning_codes", []))
         self.recording_acknowledged = bool(review.get("acknowledged", False)) if self.recording_warnings else True
+        # Session-local provenance. Only an explicit repair of each associated
+        # target can resolve these warnings; an inherited warning has no such
+        # evidence and still needs the ordinary review path.
+        self._target_warning_steps = set()
+        self._persistent_semantic_warning = "semantic_target_unverified" in self.recording_warnings
         if self.steps:
             validate_recipe(self.steps, self.variables, list({p["program_id"] for p in programs}))
-            for step in self.steps:
+            for step in _leaf_steps(self.steps):
                 if step["operation"] == "wait_for_window":
                     key = (step["program_id"], step["window_ref"])
                     owner = self.targets.get((step["program_id"], step["owner_ref"]))
@@ -138,7 +156,7 @@ class ProcessDraft:
                                   "window_id": 0, "label": (step["title"] or step["class_name"]) + " · 실행 시 팝업 연결"}
                         self.targets[key] = target
                         self.programs.append(target)
-            if any((s["program_id"], s.get("window_ref", "main")) not in self.targets for s in self.steps):
+            if any((s["program_id"], s.get("window_ref", "main")) not in self.targets for s in _leaf_steps(self.steps)):
                 raise OperationError("기존 프로세스의 프로그램과 창을 모두 연결하세요.", "missing_target")
 
     def target(self, payload):
@@ -205,17 +223,17 @@ class ProcessDraft:
                 "acknowledged": self.recording_acknowledged,
                 "messages": [RECORDING_WARNINGS.get(code, "녹화 경고를 확인하세요.") for code in self.recording_warnings]}
 
-    def _semantic_step(self, event, target, snapshots, final_values=None):
+    def _semantic_step(self, event, target, snapshots, final_values=None, *, historical=False):
         native, after = event.get("native_target"), event.get("after")
         action = event.get("operation")
         button = action == "click" and isinstance(native, dict) and native.get("element", {}).get("role") == "Button"
         if not isinstance(native, dict) or (not button and (not isinstance(after, dict) or set(after) != {"property", "equals"})):
-            raise OperationError("녹화한 요소의 관찰 증거가 없습니다.")
+            raise OperationError("녹화한 요소의 관찰 증거가 없습니다.", "recording_semantic_evidence_missing")
         snapshot = snapshots.get((target["program_id"], target.get("window_ref", "main")))
-        if not isinstance(snapshot, dict): raise OperationError("녹화 후 Driver 관찰이 없습니다.")
+        if not isinstance(snapshot, dict): raise OperationError("녹화 후 Driver 관찰이 없습니다.", "recording_snapshot_missing")
         matched = match_picked_element(snapshot, native, {k: target[k] for k in ("pid", "window_id")})
         element = _unique(snapshot, matched["expected_selector"])
-        if action not in suggested_operations(element): raise OperationError("Driver가 해당 요소 동작을 지원하지 않습니다.")
+        if action not in suggested_operations(element): raise OperationError("Driver가 해당 요소 동작을 지원하지 않습니다.", "recording_action_unsupported")
         selector = stable_selector(snapshot, element)
         if button:
             return {"operation": "click", "program_id": target["program_id"], "window_ref": target.get("window_ref", "main"),
@@ -229,10 +247,18 @@ class ProcessDraft:
             # Verify the latest value for the SAME runtime identity against the
             # Driver, rather than discarding W when the user later selected N.
             final_expected = (final_values or {}).get((target["program_id"], target.get("window_ref", "main"), evidence["identity"], prop), expected)
+            if (historical and action == "set_checked" and self._physical_click(event)
+                    and any(other != selector for other in historical)):
+                # Another independently verified checkbox click can turn this
+                # one off. Its own physical-click + after-input evidence still
+                # describes the historical action. Text/ComboBox histories keep
+                # the strict same-runtime-identity terminal-value requirement.
+                final_expected = element.get(prop)
         if (action not in {"set_value", "select_option", "set_checked"} or prop != ("selected" if action == "set_checked" else "value")
                 or type(after["equals"]) is not type(expected) or after["equals"] != expected
-                or prop not in element or type(element[prop]) is not type(final_expected) or element[prop] != final_expected):
-            raise OperationError("기록한 최종값이 현재 Driver 관찰과 일치하지 않습니다.")
+                or prop not in element or type(element[prop]) is not type(expected)
+                or type(element[prop]) is not type(final_expected) or element[prop] != final_expected):
+            raise OperationError("기록한 최종값이 현재 Driver 관찰과 일치하지 않습니다.", "recording_final_value_mismatch")
         step = {"operation": action, "program_id": target["program_id"], "window_ref": target.get("window_ref", "main"),
                 "selector": selector, "expect": [{"selector": copy.deepcopy(selector), "property": prop, "equals": expected}]}
         step["checked" if action == "set_checked" else "value"] = expected
@@ -246,32 +272,44 @@ class ProcessDraft:
                 and isinstance(proof["identity"], str) and 0 < len(proof["identity"]) <= 256
                 and isinstance(event.get("after"), dict) and set(event["after"]) == {"property", "equals"})
 
-    def recorded(self, events, *, snapshots=None, warning_codes=(), windows=()):
+    @staticmethod
+    def _physical_click(event):
+        proof = event.get("pointer_evidence")
+        return (event.get("requested_operation") == "click" and isinstance(proof, dict)
+                and set(proof) == {"source", "operation", "before_input"}
+                and proof == {"source": "native_mouse_hook", "operation": "click", "before_input": True})
+
+    def recorded(self, events, *, snapshots=None, warning_codes=(), windows=(), review_mode="human"):
         from image_targets import validate_image_target
         if not isinstance(events, list) or not events or len(events) > 30:
             raise OperationError("기록한 동작이 없습니다. [기록 시작] 후 실제로 클릭·입력해야 합니다. 마우스를 올려 요소를 모으는 것은 동작 녹화가 아닙니다." if not events else "기록한 동작이 너무 많습니다.", "recording_invalid_events")
         if not isinstance(warning_codes, (list, tuple)) or any(not isinstance(code, str) or code not in RECORDING_WARNINGS for code in warning_codes):
             raise OperationError("녹화 경고 형식을 확인하지 못했습니다.", "recording_invalid_events")
         warnings = list(dict.fromkeys([*self.recording_warnings, *warning_codes]))
+        target_warning_steps = set(self._target_warning_steps)
+        persistent_semantic_warning = self._persistent_semantic_warning or "semantic_target_unverified" in warning_codes
         proposed, labels = copy.deepcopy(self.steps), list(self.labels)
+        import_diagnostics = []
         discovered = self.recorded_windows(windows)
         targets = {**self.targets, **{key: value[0] for key, value in discovered.items()}}
         connected = {(step["program_id"], step.get("window_ref", "main")) for step in proposed if step["operation"] == "wait_for_window"}
         last_event = {(event.get("program_id"), event.get("window_ref", "main")): index for index, event in enumerate(events) if isinstance(event, dict)}
         closed = {(row["program_id"], row["window_ref"]): row["owner_ref"] for row in windows if row.get("closed") is True}
-        final_values = {}
-        for event in events:
+        final_values, terminal_checks = {}, []
+        for index, event in enumerate(events):
             if isinstance(event, dict) and self._event_evidence(event):
                 binding = (event.get("program_id"), event.get("window_ref", "main"))
                 if binding not in targets or event.get("input_method") == "keyboard_unverified": continue
                 try:
                     # Only a real, supported, non-protected current Driver
                     # match can anchor historical values for this identity.
-                    self._semantic_step(event, targets[binding], snapshots or {})
+                    verified, _ = self._semantic_step(event, targets[binding], snapshots or {})
                 except OperationError:
                     continue
                 key = (*binding, event["event_evidence"]["identity"], event["after"]["property"])
                 final_values[key] = event["after"]["equals"]
+                if event.get("operation") == "set_checked" and self._physical_click(event):
+                    terminal_checks.append((index, binding, event["event_evidence"]["identity"], verified["selector"]))
         for event_index, event in enumerate(events):
             if not isinstance(event, dict):
                 raise OperationError("녹화 응답의 형식을 확인하지 못했습니다.", "recording_invalid_events")
@@ -299,6 +337,7 @@ class ProcessDraft:
             if kind not in {*IMAGE_ACTIONS, "manual_entry", "select_option", "set_checked"}:
                 raise OperationError("지원하지 않는 녹화 동작입니다.", "recording_invalid_events")
             semantic_failed = False
+            semantic_error = None
             method_unverified = event.get("input_method") == "keyboard_unverified" or event.get("reason") == "recording_method_unverified"
             if method_unverified and "recording_method_unverified" not in warnings:
                 warnings.append("recording_method_unverified")
@@ -306,7 +345,9 @@ class ProcessDraft:
                 try:
                     if method_unverified:
                         raise OperationError("녹화한 입력·확정 방법을 확인하지 못했습니다.", "recording_method_unverified")
-                    semantic, label = self._semantic_step(event, target, snapshots or {}, final_values)
+                    historical_checks = [selector for index, binding, identity, selector in terminal_checks
+                        if index > event_index and binding == binding_key and identity != event.get("event_evidence", {}).get("identity")]
+                    semantic, label = self._semantic_step(event, target, snapshots or {}, final_values, historical=historical_checks)
                     proposed.append(semantic); labels.append(label)
                     if semantic.get("completion_mode") == "human":
                         if binding_key in closed and event_index == last_event[binding_key]:
@@ -318,24 +359,40 @@ class ProcessDraft:
                             check["message"] = "요소 클릭 뒤 업무 결과가 맞는지 확인하세요. 결과 조건을 지정하면 자동 확인으로 바꿀 수 있습니다."
                         proposed.append(check); labels.append("클릭 결과 확인")
                     continue
-                except OperationError:
+                except OperationError as error:
                     # A native Button does not prove Driver actionability. Keep
                     # its actual recorded click as an image when available.
                     semantic_failed = kind != "click"
-                    if semantic_failed and not method_unverified and "semantic_target_unverified" not in warnings: warnings.append("semantic_target_unverified")
+                    semantic_error = getattr(error, "code", "recording_semantic_unavailable")
+                    import_diagnostics.append({"event_index": event_index, "recorded_operation": kind,
+                        "code": getattr(error, "code", "recording_semantic_unavailable"),
+                        "has_image": "template_png" in event, "physical_click_verified": self._physical_click(event)})
+                    if event.get("capture_issue") in MANUAL_REASONS:
+                        import_diagnostics[-1]["capture_issue"] = event["capture_issue"]
             image = None
             if "template_png" in event:
                 image = validate_image_target({"format": "computer-image-target/v1", **{key: event[key] for key in
                     ("template_png", "width", "height", "anchor", "capture_window")}, "min_score": .94, "ambiguity_margin": .03,
                     **({"source_size": event["source_size"]} if "source_size" in event else {})})
             reason = event.get("reason", "unknown_input")
-            if semantic_failed or kind in {"select_option", "set_checked"}:
+            if (semantic_failed and kind == "set_checked" and image is not None and self._physical_click(event)
+                    and not method_unverified and reason not in {"protected_input", "drag_requires_manual_setup"}
+                    and semantic_error not in {"protected_control", "protected_element", "target_mismatch", "picker_invalid_response"}):
+                # Preserve the physical action actually performed. Do not
+                # invent set_checked support from a native TogglePattern.
+                kind, semantic_failed = "click", False
+                if import_diagnostics: import_diagnostics[-1]["fallback"] = "recorded_image_click"
+            semantic_warning_created = semantic_failed or kind in {"select_option", "set_checked"}
+            if semantic_warning_created:
                 kind, reason = "manual_entry", "semantic_target_unverified"
+                if not method_unverified and "semantic_target_unverified" not in warnings: warnings.append("semantic_target_unverified")
+                if image is None and event.get("capture_issue") in {"template_low_detail", "image_occluded_requires_selection", "image_capture_required", "image_replay_unavailable"}:
+                    reason = event["capture_issue"]
             if method_unverified:
                 kind, reason = "manual_entry", "recording_method_unverified"
             if image is None:
                 kind = "manual_entry"
-                if reason not in {"image_occluded_requires_selection", "focus_target_requires_selection", "protected_input", "drag_requires_manual_setup", "shortcut_requires_manual_setup", "semantic_target_unverified", "recording_method_unverified", "image_replay_unavailable"}:
+                if reason not in {"template_low_detail", "image_occluded_requires_selection", "focus_target_requires_selection", "protected_input", "drag_requires_manual_setup", "shortcut_requires_manual_setup", "semantic_target_unverified", "recording_method_unverified", "image_replay_unavailable"}:
                     reason = "image_capture_required"
             step = {"operation": IMAGE_ACTIONS.get(kind, kind), "program_id": target["program_id"],
                     "window_ref": target.get("window_ref", "main")}
@@ -350,6 +407,12 @@ class ProcessDraft:
                 requested = event.get("requested_operation", event.get("operation"))
                 if requested in IMAGE_ACTIONS and requested not in {"set_value", "press_key", "hotkey"}:
                     step["repair_action"] = requested
+                if semantic_warning_created and not method_unverified:
+                    if semantic_error in IMAGE_FALLBACK_ERRORS and reason not in {"protected_input", "drag_requires_manual_setup"}:
+                        step["step_id"] = uuid.uuid4().hex
+                        target_warning_steps.add(step["step_id"])
+                    else:
+                        persistent_semantic_warning = True
             label = "녹화한 이미지" if image is not None else "대상 확인 필요"
             if isinstance(event.get("observed_selection"), str) and len(event["observed_selection"]) <= 2000:
                 label += " · 관찰한 선택값: " + event["observed_selection"]
@@ -362,6 +425,10 @@ class ProcessDraft:
                 proposed.append(check); labels.append("원래 창으로 복귀 확인")
             else:
                 proposed.append(self.checkpoint(target)); labels.append("현재 창")
+        if review_mode not in {"human", "visual"}: raise OperationError("화면 확인 방법을 선택하세요.")
+        if review_mode == "visual":
+            for item in proposed[len(self.steps):]:
+                if item.get("operation") == "checkpoint": item["review_mode"] = "visual"
         self.validate(proposed, allow_pending=True)
         self.steps, self.labels = proposed, labels
         for key in connected:
@@ -369,6 +436,9 @@ class ProcessDraft:
                 self.targets[key] = discovered[key][0]
                 self.programs.append(discovered[key][0])
         self.recording_warnings = warnings
+        self.recording_import_diagnostics = import_diagnostics
+        self._target_warning_steps = target_warning_steps
+        self._persistent_semantic_warning = persistent_semantic_warning
         if warnings: self.recording_acknowledged = False
 
     def recorded_windows(self, windows):
@@ -427,34 +497,135 @@ class ProcessDraft:
         previous = self.steps[index]
         if previous.get("manual_reason") == "protected_input":
             raise OperationError("보호된 입력은 녹화 단계로 복구하지 않습니다. 해당 입력은 직접 처리하세요.")
-        if previous["operation"] != "manual_entry" and "image_target" not in previous:
-            raise OperationError("보완이 필요하거나 이미지로 저장한 동작을 선택하세요.")
+        if previous["operation"] != "manual_entry" and not any(k in previous for k in ("image_target", "selector")):
+            raise OperationError("동작할 대상이 있는 단계를 선택하세요.")
         target = self.targets[(previous["program_id"], previous.get("window_ref", "main"))]
         selected = self.selection(selection["selection_id"], target)
-        original = next((name for name, mapped in IMAGE_ACTIONS.items() if mapped == previous["operation"]), previous.get("repair_action"))
+        original = next((name for name, mapped in IMAGE_ACTIONS.items() if mapped == previous["operation"]), previous.get("repair_action", previous["operation"]))
         chosen = action or original
-        if chosen not in {"click", "double_click", "right_click", "set_value", "press_key", "hotkey", "scroll", "wait_for_element"}:
+        if chosen not in {"click", "double_click", "right_click", "set_value", "select_option", "set_checked", "press_key", "hotkey", "scroll", "wait_for_element"}:
             raise OperationError("이 단계에서 실행할 동작을 직접 선택하세요.")
         if previous["operation"] != "manual_entry" and chosen != original:
             raise OperationError("대상 재지정은 기존 동작을 유지합니다.")
         step = {"program_id": target["program_id"], "window_ref": target.get("window_ref", "main"), "operation": chosen}
-        for key in ("value", "key", "keys", "direction", "amount", "timeout_ms", "expect"):
+        for key in ("step_id", "value", "key", "keys", "direction", "amount", "timeout_ms", "expect", "checked", "option_order", "completion_mode"):
             if key in previous: step[key] = copy.deepcopy(previous[key])
         if chosen == "set_value" and previous["operation"] == "manual_entry":
             if value is None: raise OperationError("다시 실행할 때 넣을 입력 내용을 직접 지정하세요.")
             step["value"] = _text(value, "입력 내용", 16000, empty=True)
         if selected.get("recognition") == "image":
+            if chosen not in IMAGE_ACTIONS:
+                raise OperationError("이 동작은 값 정보를 제공하는 요소가 필요합니다. 대상 요소를 다시 선택하세요.")
             step.update(operation=IMAGE_ACTIONS[chosen], image_target=copy.deepcopy(selected["image_target"]))
             if chosen == "set_value": step["replace_all"] = True
         else:
             if chosen not in selected["actions"]:
                 raise OperationError("선택한 요소가 이 동작을 지원하지 않습니다. 원래 동작에 맞는 요소를 선택하세요.")
             step["selector"] = copy.deepcopy(selected["selector"])
+            for check in step.get("expect", []):
+                if previous.get("selector") and check.get("selector") == previous["selector"]:
+                    check["selector"] = copy.deepcopy(step["selector"])
             if chosen in {"click", "double_click", "right_click"} and not step.get("expect"):
                 step["completion_mode"] = "human"
         proposed = copy.deepcopy(self.steps); proposed[index] = step
         self.validate(proposed, allow_pending=True)
         self.steps = proposed; self.labels[index] = selected["label"]
+        issue = previous.get("step_id")
+        if issue in self._target_warning_steps:
+            self._target_warning_steps.remove(issue)
+            if not self._target_warning_steps and not self._persistent_semantic_warning:
+                self.recording_warnings = [code for code in self.recording_warnings if code != "semantic_target_unverified"]
+
+    def edit(self, payload):
+        """Edit one authored step; image bytes and untouched fields never round-trip through the UI."""
+        index = payload.get("index")
+        allowed = {"index", "value", "key", "keys", "seconds", "expected", "variable", "variable_label", "checked"}
+        if set(payload) - allowed or type(index) is not int or not 0 <= index < len(self.steps):
+            raise OperationError("수정할 단계를 선택하세요.")
+        proposed, variables = copy.deepcopy(self.steps), copy.deepcopy(self.variables)
+        step = proposed[index]
+        operation = step["operation"]
+        if operation == "manual_entry":
+            if set(payload) != {"index", "value"}: raise OperationError("먼저 확인되지 않은 입력 내용을 지정하세요.")
+            return self.resolve_input(payload)
+        field = "value" if operation in {"set_value", "select_option", "image_type_text"} else "message" if operation == "checkpoint" else None
+        old_value = step.get(field) if field else None
+        if "value" in payload:
+            if field is None: raise OperationError("이 단계에는 수정할 입력값이 없습니다.")
+            step[field] = _text(payload["value"], "입력 내용", 16000, empty=True)
+        if "key" in payload:
+            if operation not in {"press_key", "image_press_key"}: raise OperationError("키 입력 단계가 아닙니다.")
+            step["key"] = payload["key"]
+        if "keys" in payload:
+            if operation not in {"hotkey", "image_hotkey"}: raise OperationError("단축키 단계가 아닙니다.")
+            step["keys"] = copy.deepcopy(payload["keys"])
+        if "checked" in payload:
+            if operation != "set_checked" or type(payload["checked"]) is not bool: raise OperationError("체크 상태는 예 또는 아니요로 지정하세요.")
+            before_checked = step.get("checked")
+            step["checked"] = payload["checked"]
+            for check in step.get("expect", []):
+                if check.get("selector") == step.get("selector") and check.get("property") == "selected" and check.get("equals") == before_checked:
+                    check["equals"] = step["checked"]
+        if "seconds" in payload:
+            timing = "duration_ms" if operation == "delay" else "timeout_ms" if operation in {"wait_for_element", "wait_for_image", "wait_for_state", "wait_for_window"} else None
+            if timing is None: raise OperationError("이 단계에는 대기 시간이 없습니다.")
+            step[timing] = self.milliseconds(payload["seconds"])
+        if "variable" in payload:
+            from workflows import VARIABLE
+            name = payload["variable"]
+            if field != "value" or not isinstance(name, str) or (name and not VARIABLE.fullmatch(name)):
+                raise OperationError("실행 입력 이름은 영문자로 시작하는 영문·숫자·밑줄 1~40자로 지정하세요.")
+            if name:
+                default = payload.get("value", old_value)
+                if not isinstance(default, str) or len(default) > 4000: raise OperationError("실행 입력의 기본값은 4,000자 이하로 지정하세요.")
+                previous = variables.get(name)
+                spec = {"type": "text", "description": _text(payload.get("variable_label", name), "입력 설명", 4000, empty=True), "default": default}
+                if previous and previous.get("type", "text") != "text":
+                    raise OperationError("이름이 같은 다른 형식의 실행 입력이 있습니다. 다른 이름을 사용하세요.")
+                variables[name] = {**(previous or {}), **spec}
+                step["value"] = "${" + name + "}"
+        # Editing a value also edits its existing self-verification, but never
+        # unrelated completion conditions belonging to another control.
+        if field == "value" and step.get("value") != old_value:
+            for check in step.get("expect", []):
+                if check.get("selector") == step.get("selector") and check.get("property") == "value" and check.get("equals") == old_value:
+                    check["equals"] = copy.deepcopy(step["value"])
+        if "expected" in payload:
+            if len(step.get("expect", [])) != 1: raise OperationError("단일 완료 조건이 있는 단계를 선택하세요.")
+            step["expect"][0]["equals"] = copy.deepcopy(payload["expected"])
+        prior = self.variables
+        try:
+            self.variables = variables
+            self.validate(proposed, allow_pending=True)
+        except Exception:
+            self.variables = prior
+            raise
+        self.steps = proposed
+
+    def completion(self, payload):
+        if set(payload) != {"index", "selection_id", "property", "equals"} or type(payload["index"]) is not int or not 0 <= payload["index"] < len(self.steps):
+            raise OperationError("완료 기준을 바꿀 단계와 확인 대상을 선택하세요.")
+        index = payload["index"]
+        step = copy.deepcopy(self.steps[index])
+        was_deferred = not step.get("expect") and (step.get("completion_mode") == "human" or step["operation"].startswith("image_"))
+        if step["operation"] not in {*IMAGE_ACTIONS.values(), "click", "double_click", "right_click", "set_value", "select_option", "set_checked", "press_key", "hotkey", "wait_for_state"}:
+            raise OperationError("동작 또는 완료 대기 단계에 결과 조건을 지정하세요.")
+        target = self.targets[(step["program_id"], step.get("window_ref", "main"))]
+        selected = self.selection(payload["selection_id"], target)
+        if selected.get("recognition") == "image": raise OperationError("값을 제공하는 확인 요소를 선택하세요.")
+        check = {"selector": copy.deepcopy(selected["selector"]), "property": payload["property"], "equals": copy.deepcopy(payload["equals"])}
+        if step["operation"].startswith("image_"): check["require_change"] = True
+        step["expect"] = [check]
+        step.pop("completion_mode", None)
+        proposed, labels = copy.deepcopy(self.steps), list(self.labels)
+        proposed[index] = step
+        if was_deferred and index + 1 < len(proposed):
+            following = proposed[index + 1]
+            if (following.get("operation") == "checkpoint" and not any(k in following for k in ("opened_from", "return_from"))
+                    and (following["program_id"], following.get("window_ref", "main")) == (step["program_id"], step.get("window_ref", "main"))):
+                proposed.pop(index + 1); labels.pop(index + 1)
+        self.validate(proposed, allow_pending=True)
+        self.steps, self.labels = proposed, labels
 
     def add(self, payload):
         if set(payload) - {"action", "program_id", "pid", "window_id", "window_ref", "selection_id", "value", "key", "keys",
@@ -463,7 +634,7 @@ class ProcessDraft:
         target = self.target(payload)
         action = payload.get("action")
         completion = payload.get("completion_mode", "human")
-        if completion not in {"human", "automatic"}:
+        if completion not in {"human", "automatic", "visual"}:
             raise OperationError("완료 확인 방법을 선택하세요.")
         if action not in ACTION_LABELS:
             raise OperationError("동작 종류를 선택하세요.")
@@ -513,11 +684,13 @@ class ProcessDraft:
                 step["expect"][0]["require_change"] = True
         if completion == "automatic" and step["operation"].startswith("image_") and not step.get("expect"):
             raise OperationError("자동 확인할 요소와 작업 후 예상값을 먼저 선택하세요.")
-        if payload.get("completion_mode") == "human" and step["operation"] in {"click", "double_click", "right_click"} and not step.get("expect"):
+        if payload.get("completion_mode") in {"human", "visual"} and step["operation"] in {"click", "double_click", "right_click"} and not step.get("expect"):
             step["completion_mode"] = "human"
         additions, labels = [step], [label]
         if (step["operation"].startswith("image_") or step.get("completion_mode") == "human") and not step.get("expect"):
-            additions.append(self.checkpoint(target)); labels.append("현재 창")
+            check = self.checkpoint(target)
+            if completion == "visual": check["review_mode"] = "visual"
+            additions.append(check); labels.append("현재 창")
         proposed = [*self.steps, *additions]
         self.validate(proposed, allow_pending=True)
         self.steps, self.labels = proposed, [*self.labels, *labels]
@@ -560,6 +733,14 @@ class ProcessDraft:
         rows = []
         for index, (step, label) in enumerate(zip(self.steps, self.labels)):
             action = step["operation"]
+            if action == "foreach":
+                programs = list(dict.fromkeys(self.targets[(child["program_id"], child.get("window_ref", "main"))]["label"] for child in _leaf_steps(step.get("steps", []))))
+                variable = step.get("input", "목록")
+                rows.append({"index": index, "program": ", ".join(programs), "label": variable, "action": action,
+                             "action_label": "목록 반복", "recognition": "group", "requires_input": False, "editable_input": False,
+                             "detail": str(len(step.get("steps", []))) + "개 동작을 목록의 각 값에 반복 · 값은 채팅에서 변경 가능",
+                             "repairable": False, "repair_action": "", "summary": str(index + 1) + ". 목록 반복 · " + variable})
+                continue
             target = self.targets[(step["program_id"], step.get("window_ref", "main"))]
             detail = (str(step.get("duration_ms", 0)/1000) + "초" if action == "delay" else
                       str(step.get("timeout_ms", 0)/1000) + "초 이내" if action in {"wait_for_element", "wait_for_image", "wait_for_state", "wait_for_window"} else
@@ -568,12 +749,12 @@ class ProcessDraft:
                 check = step["expect"][0]
                 detail += " → 확인: " + str(check["selector"].get("name", check["selector"].get("automation_id", "요소"))) + " = " + str(check["equals"])
             action_label = ACTION_LABELS.get(action, action)
-            editable_input = action == "manual_entry" and "image_target" in step and step.get("manual_reason") in {"unknown_input", "existing_text_requires_review"}
+            editable_input = action in {"set_value", "set_checked", "select_option", "image_type_text", "checkpoint", "delay", "wait_for_element", "wait_for_image", "wait_for_state", "wait_for_window", "press_key", "image_press_key", "hotkey", "image_hotkey"} or len(step.get("expect", [])) == 1 or action == "manual_entry" and "image_target" in step and step.get("manual_reason") in {"unknown_input", "existing_text_requires_review"}
             if action == "manual_entry": detail = MANUAL_REASONS.get(step.get("manual_reason"), "이 단계를 삭제하고 동작을 직접 추가하세요.") + " 확인 전에는 저장할 수 없습니다."
             rows.append({"index": index, "program": target["label"], "label": label, "action": action,
                          "action_label": action_label, "recognition": "image" if "image_target" in step else "unresolved" if action == "manual_entry" else "uia",
                          "requires_input": action == "manual_entry", "editable_input": editable_input, "detail": detail,
-                         "repairable": (action == "manual_entry" or "image_target" in step) and step.get("manual_reason") != "protected_input",
+                         "repairable": (action == "manual_entry" or "image_target" in step or "selector" in step) and step.get("manual_reason") != "protected_input",
                          "repair_action": step.get("repair_action", ""),
                          "summary": f"{index+1}. {action_label} · {label} · {detail}"})
         return rows
@@ -592,7 +773,7 @@ class ProcessEditors:
 
     def _view(self, job, **extra):
         with self.lock:
-            return copy.deepcopy({**job["result"], "editor_id": job["id"], "input_dispatched": False,
+            return copy.deepcopy({**job["result"], "editor_id": job["id"], "input_dispatched": job["result"].get("last_test", {}).get("input_dispatched") if "last_test" in job["result"] else False,
                                   "automatic_retry": False, "pending": not job["done"].is_set() or bool(job["result"].get("cleanup_pending")),
                                   "steps": job["summaries"], **extra})
 
@@ -601,11 +782,26 @@ class ProcessEditors:
             raise OperationError("프로세스 만들기를 취소했습니다.", "editor_cancelled")
         job["runtime"].check_active()
 
+    @staticmethod
+    def _hosted_identity(runtime, target):
+        reader = getattr(runtime.guard, "hosted_target", None)
+        return copy.deepcopy(reader(target) if callable(reader) else None)
+
+    def _program(self, job, program_id, target):
+        binding = self.library._program(job["runtime"], program_id, target)
+        key = (target["pid"], target["window_id"])
+        hosted = self._hosted_identity(job["runtime"], target)
+        identities = job.setdefault("hosted_targets", {})
+        if key in identities and identities[key] != hosted:
+            raise OperationError("편집 창에 연결한 앱이 바뀌었습니다. 현재 앱으로 편집 창을 다시 여세요.", "editor_target_changed")
+        identities[key] = hosted
+        return binding
+
     def start(self, runtime, args, cancel_event=None):
         runtime.check_active()
         if runtime.mode != "uia":
             raise OperationError("프로세스 만들기는 UIA 세션에서 시작하세요.", "unsupported_mode")
-        programs = []
+        programs, hosted_targets = [], {}
         for target in args["targets"]:
             if (not isinstance(target, dict) or set(target) - {"program_id", "pid", "window_id", "window_ref"}
                     or not {"program_id", "pid", "window_id"} <= set(target)
@@ -615,12 +811,14 @@ class ProcessEditors:
                     or not WINDOW_REF.fullmatch(target.get("window_ref", "main"))):
                 raise OperationError("프로그램과 현재 창을 정확히 지정하세요.")
             self.library._program(runtime, target["program_id"], {k: target[k] for k in ("pid", "window_id")})
+            hosted_targets[(target["pid"], target["window_id"])] = self._hosted_identity(runtime, {k: target[k] for k in ("pid", "window_id")})
             label = next(p["name"] for p in runtime.programs if p["id"] == target["program_id"])
             programs.append({**target, "label": label + " · " + target.get("window_ref", "main")})
         if not 1 <= len(programs) <= 10 or len({(p["program_id"], p.get("window_ref", "main")) for p in programs}) != len(programs):
             raise OperationError("중복 없는 프로그램/창을 1~10개 연결하세요.")
         task = self.tasks.get(args["task_id"]) if args.get("task_id") else None
         draft = ProcessDraft(programs, task)
+        visual_enabled = callable(getattr(self, "visual_review_enabled", None)) and self.visual_review_enabled(runtime) is True
         with self.lock:
             active = self.pending()
             if active:
@@ -628,9 +826,11 @@ class ProcessEditors:
                                   next_tool="computer_process_status")
             job_id = uuid.uuid4().hex
             job = {"id": job_id, "runtime": runtime, "draft": draft, "cancel": _Cancellation(cancel_event),
+                   "hosted_targets": hosted_targets,
+                   "interaction_lock": threading.RLock(),
                    "started": threading.Event(), "done": threading.Event(), "summaries": draft.summaries(),
                    "args": copy.deepcopy(args), "name": args.get("name", (task or {}).get("name", "새 프로세스")),
-                   "description": (task or {}).get("instructions", ""), "result": {"status": "starting", "editor_visible": False}}
+                   "description": (task or {}).get("instructions", ""), "visual_review_enabled": visual_enabled, "result": {"status": "starting", "editor_visible": False}}
             self.jobs[job_id] = job
             for key in [k for k, j in self.jobs.items() if j["done"].is_set() and not j["result"].get("cleanup_pending")][:-19]:
                 del self.jobs[key]
@@ -656,6 +856,15 @@ class ProcessEditors:
             step = draft.steps[index]
             preview = draft.summaries()[index]
             if "image_target" in step: preview["thumbnail_png"] = step["image_target"]["template_png"]
+            preview["editable"] = {key: copy.deepcopy(step[key]) for key in ("value", "message", "key", "keys", "duration_ms", "timeout_ms", "checked") if key in step}
+            if len(step.get("expect", [])) == 1:
+                preview["editable"]["expected"] = copy.deepcopy(step["expect"][0]["equals"])
+            variable = step.get("value")
+            if isinstance(variable, str) and variable.startswith("${") and variable.endswith("}") and variable[2:-1] in draft.variables:
+                preview["editable"].update(variable=variable[2:-1], variable_spec=copy.deepcopy(draft.variables[variable[2:-1]]))
+            count = 1
+            while "input_" + str(count) in draft.variables: count += 1
+            preview["editable"]["suggested_variable"] = "input_" + str(count)
             return {"status": "ok", "message": "저장할 대상의 미리보기입니다. 프로그램에 입력하지 않았습니다.", "preview": preview}
         if action == "retarget_step":
             index = payload.get("index")
@@ -664,32 +873,62 @@ class ProcessEditors:
             step = draft.steps[index]
             target = draft.targets[(step["program_id"], step.get("window_ref", "main"))]
             exact = {k: target[k] for k in ("pid", "window_id")}
-            self.library._program(runtime, target["program_id"], exact)
-            # Existing image steps keep the established image-only retarget
-            # contract; unresolved rows first try Driver-verified UIA selection.
+            self._program(job, target["program_id"], exact)
+            native = self._visual(job, "pick", {**exact, "label": "이 단계의 대상을 다시 선택하세요", "auto_capture": True,
+                                                   "include_native": payload.get("method", "auto") != "image"}, 120)
+            self._program(job, target["program_id"], exact)
             selected = None
-            if step["operation"] == "manual_entry" and payload.get("method", "auto") != "image":
+            if isinstance(native.get("native_target"), dict) and payload.get("method", "auto") != "image":
                 try:
-                    native = _run_helper(runtime, exact, "이 단계에서 동작할 요소", 120,
-                                         on_ready=lambda _info: self._check(job), cancel_event=job["cancel"])
                     with runtime.execution_lock:
                         self._check(job)
                         snapshot, _ = self.library._observe(runtime, exact, target["program_id"])
-                        selected = draft.remember(target, snapshot, native)
+                        selected = draft.remember(target, snapshot, native["native_target"])
                 except OperationError as exc:
                     if exc.code not in IMAGE_FALLBACK_ERRORS or getattr(exc, "helper_cleanup_pending", False): raise
             if selected is None:
-                native = self._visual(job, "pick", {**exact, "label": "이 단계의 대상을 다시 선택하세요"}, 120)
-                self.library._program(runtime, target["program_id"], exact)
                 selected = draft.remember_image(target, native)
             draft.repair(index, selected, action=payload.get("action"), value=payload.get("value"))
             message = "이 단계의 대상만 다시 지정했습니다. 순서와 프로그램·팝업 연결은 그대로 유지했습니다."
+        elif action in {"pick_target", "pick_completion"}:
+            step_index = None
+            if action == "pick_completion":
+                step_index = payload.get("index")
+                if set(payload) != {"index"} or type(step_index) is not int or not 0 <= step_index < len(draft.steps): raise OperationError("완료 기준을 지정할 단계를 선택하세요.")
+                step = draft.steps[step_index]
+                picked_target = draft.targets[(step["program_id"], step.get("window_ref", "main"))]
+                payload = {**picked_target, "purpose": "expect"}
+                payload.pop("label", None)
+            if set(payload) - {"program_id", "pid", "window_id", "window_ref", "purpose"} or payload.get("purpose") not in {"action", "expect"}:
+                raise OperationError("대상 프로그램과 선택 용도를 확인하세요.")
+            target = draft.target(payload)
+            exact = {k: target[k] for k in ("pid", "window_id")}
+            self._program(job, target["program_id"], exact)
+            native = self._visual(job, "pick", {**exact, "label": "동작할 대상을 화면에서 선택하세요", "auto_capture": True, "include_native": True, "include_text": payload["purpose"] == "expect"}, 120)
+            self._program(job, target["program_id"], exact)
+            picked = None
+            if isinstance(native.get("native_target"), dict):
+                try:
+                    with runtime.execution_lock:
+                        self._check(job)
+                        snapshot, _ = self.library._observe(runtime, exact, target["program_id"])
+                        picked = draft.remember(target, snapshot, native["native_target"])
+                        picked["thumbnail_png"] = native["template_png"]
+                except OperationError as error:
+                    if error.code not in IMAGE_FALLBACK_ERRORS: raise
+            if picked is None:
+                if payload["purpose"] == "expect":
+                    raise OperationError("이 영역은 값 정보를 제공하지 않습니다. 자동 확인은 값이 읽히는 요소를 선택하거나 화면 확인 단계를 사용하세요.", "completion_not_exposed")
+                picked = draft.remember_image(target, native)
+            extra = {"purpose": payload["purpose"], "selection": picked}
+            if step_index is not None: extra["completion_index"] = step_index
+            message = "선택한 대상을 기억했습니다. 요소 정보가 있으면 요소로, 없으면 같은 선택 이미지를 사용합니다."
         elif action in {"pick_element", "pick_image"}:
             if set(payload) - {"program_id", "pid", "window_id", "window_ref", "purpose"} or payload.get("purpose") not in {"action", "expect"}:
                 raise OperationError("요소 선택의 대상과 용도를 확인하세요.")
             target = draft.target(payload)
             exact = {k: target[k] for k in ("pid", "window_id")}
-            self.library._program(runtime, target["program_id"], exact)
+            self._program(job, target["program_id"], exact)
             use_image = action == "pick_image"
             fallback_explanation = None
             fallback_diagnostic = None
@@ -712,7 +951,7 @@ class ProcessEditors:
                     message = fallback_explanation + " 직접 확정한 이미지를 선택했습니다. 동작 뒤 화면 확인 단계가 함께 추가됩니다."
             if use_image:
                 self._check(job)
-                self.library._program(runtime, target["program_id"], exact)
+                self._program(job, target["program_id"], exact)
                 # Retain the reason even if image capture is cancelled or fails;
                 # support can inspect it without another selection/read cycle.
                 with self.lock:
@@ -722,7 +961,7 @@ class ProcessEditors:
                         job["result"].pop("last_recognition", None)
                 native = self._visual(job, "pick", {**exact,
                     "label": fallback_explanation + " 이미지에서 대상을 직접 선택하세요." if fallback_explanation else "이미지로 사용할 영역을 선택하세요"}, 120)
-                self.library._program(runtime, target["program_id"], exact)
+                self._program(job, target["program_id"], exact)
                 extra = {"purpose": "action", "selection": draft.remember_image(target, native)}
                 if fallback_diagnostic:
                     extra["recognition_diagnostic"] = fallback_diagnostic
@@ -731,8 +970,10 @@ class ProcessEditors:
                     job["result"].pop("last_recognition", None)
         elif action == "record":
             from replay_preflight import image_replay_preflight, prepare_image_foreground
-            if payload:
+            if set(payload) - {"review_mode"} or payload.get("review_mode", "human") not in {"human", "visual"}:
                 raise OperationError("녹화 범위는 편집 창에 연결한 프로그램으로 고정됩니다.")
+            if payload.get("review_mode") == "visual" and not job.get("visual_review_enabled"):
+                raise OperationError("화면을 읽는 모델 연결이 확인되지 않았습니다. 직접 화면 확인을 사용하세요.")
             # Reserve room for up to five new popup-binding waits as well as
             # one review checkpoint for each image action.
             maximum_events = (30 - len(draft.steps) - 5) // 2
@@ -741,7 +982,7 @@ class ProcessEditors:
             roots = [target for target in draft.programs if (target["program_id"], target.get("window_ref", "main")) not in
                      {(step["program_id"], step["window_ref"]) for step in draft.steps if step["operation"] == "wait_for_window"}]
             for target in roots:
-                self.library._program(runtime, target["program_id"], {k: target[k] for k in ("pid", "window_id")})
+                self._program(job, target["program_id"], {k: target[k] for k in ("pid", "window_id")})
             preflight = []
             recording_targets = []
             for target in roots:
@@ -760,38 +1001,33 @@ class ProcessEditors:
                                           "preflight_message": check.get("diagnostic", {}).get("message", "")})
             with self.lock:
                 job["result"]["recording_preflight"] = copy.deepcopy(preflight)
+            blocked = [row for row in preflight if row.get("ready_for_input") is not True]
+            if blocked:
+                reason = blocked[0].get("diagnostic", {})
+                raise OperationError("아직 녹화를 시작하지 않았습니다. " + reason.get("message", "대상 창의 화면 읽기와 재생 준비를 확인하지 못했습니다.")
+                    + " 현재 초안은 유지했습니다. 연결 상태와 대상 창을 확인한 뒤 [동작 녹화]를 다시 누르세요.",
+                    reason.get("code", "recording_not_ready"))
             recorded = self._visual(job, "record", {"targets": recording_targets, "max_events": maximum_events}, min(600, job["args"].get("timeout_seconds", 600)))
-            snapshots = {}
-            # Validate owned helper metadata before inspecting any newly bound
-            # popup. Closed popups remain image/manual, never fabricated UIA.
-            popup_targets = [item[0] for item in draft.recorded_windows(recorded.get("windows", [])).values()]
-            recorded_events = copy.deepcopy(recorded.get("events"))
-            closed_popups = {(row["program_id"], row["window_ref"]) for row in recorded.get("windows", []) if row.get("closed") is True}
-            for target in popup_targets:
-                key = (target["program_id"], target.get("window_ref", "main"))
-                if key in closed_popups: continue  # Native helper checked this HWND at discovery.
-                check = image_replay_preflight(runtime, {k: target[k] for k in ("pid", "window_id")}, capture=False)
-                if not check["ready_for_input"] and isinstance(recorded_events, list):
-                    for event in recorded_events:
-                        if not isinstance(event, dict) or (event.get("program_id"), event.get("window_ref", "main")) != key: continue
-                        for field in ("template_png", "width", "height", "anchor", "capture_window", "source_size"): event.pop(field, None)
-                        event["requested_operation"] = event.get("operation")
-                        event["reason"] = "image_replay_unavailable"
-            for target in roots:
-                self.library._program(runtime, target["program_id"], {k: target[k] for k in ("pid", "window_id")})
-            for target in [*roots, *popup_targets]:
-                if any(isinstance(event, dict) and event.get("program_id") == target["program_id"] and event.get("window_ref", "main") == target.get("window_ref", "main") and "native_target" in event for event in recorded.get("events", [])):
-                    try:
-                        with runtime.execution_lock:
-                            self._check(job)
-                            self.library._program(runtime, target["program_id"], {k: target[k] for k in ("pid", "window_id")})
-                            snapshots[(target["program_id"], target.get("window_ref", "main"))], _ = self.library._observe(runtime, {k: target[k] for k in ("pid", "window_id")}, target["program_id"])
-                    except OperationError:
-                        self._check(job)  # Keep unresolved candidates manual; never bypass cancellation.
-            draft.recorded(recorded_events, snapshots=snapshots, warning_codes=recorded.get("warnings", []), windows=recorded.get("windows", []))
+            receipt = job.get("last_recording")
+            if receipt is None or receipt["data"] != recorded:
+                receipt = self._retain_recording(job, recorded)
+            receipt["review_mode"] = payload.get("review_mode", "human")
+            draft = self._import_recording(job, receipt)
             extra["programs"] = copy.deepcopy(draft.programs)
             message = "녹화한 동작을 초안에 추가했습니다. 순서와 입력 내용을 검토한 뒤 저장하세요. 아직 재실행하지 않았습니다."
             if draft.recording_warnings: message = "일부 동작이 빠졌거나 확인되지 않은 부분 기록입니다. [누락 경고 확인]과 각 단계를 검토하세요."
+        elif action == "reimport_recording":
+            if payload:
+                raise OperationError("최근 녹화 원본만 다시 분석할 수 있습니다.")
+            receipt = job.get("last_recording")
+            if receipt is None:
+                raise OperationError("이 편집창에서 보관한 녹화 원본이 없습니다.", "recording_receipt_missing")
+            expected = receipt.get("after", receipt["before"])
+            if draft.__dict__ != expected.__dict__:
+                raise OperationError("녹화 뒤 편집한 내용이 있어 다시 분석으로 덮어쓰지 않았습니다. 필요한 단계만 다시 지정하세요.", "recording_draft_changed")
+            draft = self._import_recording(job, receipt)
+            extra["programs"] = copy.deepcopy(draft.programs)
+            message = "보관한 녹화 원본을 다시 분석했습니다. 실제 클릭·입력은 실행하지 않았습니다."
         elif action == "ack_recording_warnings":
             if payload != {"acknowledged": True} or not draft.recording_warnings:
                 raise OperationError("녹화 경고를 직접 확인한 뒤 확인 버튼을 누르세요.")
@@ -799,7 +1035,34 @@ class ProcessEditors:
             message = "누락 경고를 확인했습니다. 확인되지 않은 단계는 교체·삭제해야 저장할 수 있습니다."
         elif action == "resolve_input":
             draft.resolve_input(payload)
+        elif action == "edit_step":
+            draft.edit(payload)
+            message = "선택한 단계의 설정만 반영했습니다. 다른 단계와 저장 이미지는 유지했습니다."
+        elif action == "set_completion":
+            draft.completion(payload)
+            message = "자동 완료 기준을 지정했습니다. 이 동작의 별도 화면 확인은 생략합니다."
+        elif action == "test_run":
+            if set(payload) != {"name", "description"}: raise OperationError("프로세스 이름과 설명을 확인하세요.")
+            draft.validate()
+            if not draft.steps: raise OperationError("시험할 동작을 먼저 추가하세요.")
+            runner = getattr(self, "test_runner", None)
+            if not callable(runner): raise OperationError("시험 실행 연결을 확인하지 못했습니다. MCP를 최신 버전으로 다시 연결하세요.", "editor_test_unavailable")
+            task = {"id": "draft-" + job["id"], "name": _text(payload["name"], "프로세스 이름", 100),
+                    "instructions": _text(payload["description"], "설명", 4000, empty=True), "expected": "설정한 완료 조건 확인",
+                    "program_ids": list(dict.fromkeys(s["program_id"] for s in _leaf_steps(draft.steps))),
+                    "steps": copy.deepcopy(draft.steps), "variables": copy.deepcopy(draft.variables)}
+            targets = [{key: target[key] for key in ("program_id", "pid", "window_id", "window_ref") if key in target}
+                       for target in draft.programs if target["window_id"] > 0]
+            tested = runner(runtime, task, targets)
+            if not isinstance(tested, dict): raise OperationError("시험 실행 결과의 형식을 확인하지 못했습니다.", "editor_test_invalid_result")
+            extra["test_result"] = self._trial_summary(tested, task)
+            with self.lock:
+                job["test_task"], job["test_targets"], job["test_result_full"] = copy.deepcopy(task), copy.deepcopy(targets), copy.deepcopy(tested)
+                job["result"]["last_test"] = copy.deepcopy(extra["test_result"])
+            message = "시험 실행 결과를 확인하세요. 저장한 작업은 변경하지 않았습니다."
         elif action == "add_step":
+            if payload.get("completion_mode") == "visual" and not job.get("visual_review_enabled"):
+                raise OperationError("화면을 읽는 모델 연결이 확인되지 않았습니다. 직접 화면 확인을 사용하세요.")
             draft.add(payload)
         elif action in {"remove_step", "move_step"}:
             draft.change(action, payload)
@@ -818,24 +1081,165 @@ class ProcessEditors:
                 self._check(job)
                 job["save_started"] = True
             review = ({"recording_review": {key: draft.recording_review()[key] for key in ("partial", "warning_codes", "acknowledged")}} if draft.recording_warnings else {})
-            saved = self.tasks.save({"name": name, "instructions": description or "저장한 단계 순서대로 실행합니다.",
-                "expected": "각 단계의 확인 조건을 통과하고 화면 확인 단계는 사용자가 확인합니다.",
-                "program_ids": list(dict.fromkeys(s["program_id"] for s in draft.steps)),
-                "steps": draft.steps, "variables": draft.variables, **review})
-            extra["saved_task"] = {"id": saved["id"], "name": saved["name"], "step_count": len(saved["steps"])}
+            save_args = {"name": name, "instructions": description or "저장한 단계 순서대로 실행합니다.",
+                "expected": "각 단계에 지정한 완료 조건과 화면 확인 기준을 확인합니다.",
+                "program_ids": list(dict.fromkeys(s["program_id"] for s in _leaf_steps(draft.steps))),
+                "steps": draft.steps, "variables": draft.variables, **review}
+            if draft.task_id:
+                from task_revision import TaskRevisions
+                saved = TaskRevisions(self.tasks).save({**save_args, "id": draft.task_id}, expected_revision=draft.revision)
+            else:
+                saved = self.tasks.save(save_args)
+            draft.task_id, draft.revision = saved["id"], saved.get("revision", 1)
+            extra["saved_task"] = {"id": saved["id"], "name": saved["name"], "revision": draft.revision, "step_count": len(saved["steps"])}
             with self.lock:
                 job["result"] = {"status": "saved", "editor_visible": True, **extra,
-                                 "message": "프로세스를 저장했습니다. 아직 실행하지 않았습니다."}
+                                 "message": "프로세스를 저장했습니다."}
         else:
             raise OperationError("지원하지 않는 편집 요청입니다.")
         with self.lock:
             job["summaries"] = draft.summaries()
-            if draft.recording_warnings: job["result"]["recording_review"] = draft.recording_review()
-        return {"status": "ok", "message": "저장했습니다." if action == "save" else message, "steps": draft.summaries(), "recording_review": draft.recording_review(), **extra}
+            job["result"]["recording_review"] = draft.recording_review()
+            recorded_import = job["result"].get("recording_import")
+            if recorded_import is not None:
+                recorded_import.setdefault("unresolved_at_import", recorded_import.get("unresolved_steps", 0))
+                recorded_import["unresolved_steps"] = sum(step["operation"] == "manual_entry" for step in _leaf_steps(draft.steps))
+                recorded_import["diagnostics_phase"] = "original_import"
+        return {"status": "ok", "message": "저장했습니다." if action == "save" else message, "steps": draft.summaries(), "recording_review": draft.recording_review(),
+                "recording_receipt_available": bool(job.get("last_recording")), **extra}
+
+    def _retain_recording(self, job, recorded):
+        """Preserve the validated owned-helper receipt before transient cleanup.
+
+        Only metadata leaves the session. Original pixels/native identities stay
+        local, so normalization failures never force a new user action merely
+        because their evidence was deleted.
+        """
+        receipt_id = uuid.uuid4().hex
+        folder = Path(job["runtime"].run_dir) / "recording-receipts"
+        path = folder / (receipt_id + ".json")
+        self._check_path(path); folder.mkdir(parents=True, exist_ok=True)
+        self._write(path, {"format": "computer-recording-receipt/v1", "editor_id": job["id"],
+                           "receipt_id": receipt_id, "recording": recorded})
+        receipt = {"id": receipt_id, "path": path, "data": copy.deepcopy(recorded),
+                   "before": copy.deepcopy(job["draft"]), "review_mode": "human"}
+        with self.lock:
+            job["last_recording"] = receipt
+            job["result"]["recording_receipt"] = {"id": receipt_id, "stored_locally": True,
+                "event_count": len(recorded.get("events", [])), "reanalysis_available": True}
+        return receipt
+
+    def _import_recording(self, job, receipt):
+        """Read-only re-analysis into an atomic replacement of this import."""
+        from replay_preflight import image_replay_preflight
+        draft, runtime, recorded = copy.deepcopy(receipt["before"]), job["runtime"], receipt["data"]
+        roots = [target for target in draft.programs if (target["program_id"], target.get("window_ref", "main")) not in
+                 {(step["program_id"], step["window_ref"]) for step in draft.steps if step["operation"] == "wait_for_window"}]
+        snapshots = {}
+        popup_targets = [item[0] for item in draft.recorded_windows(recorded.get("windows", [])).values()]
+        recorded_events = copy.deepcopy(recorded.get("events"))
+        closed_popups = {(row["program_id"], row["window_ref"]) for row in recorded.get("windows", []) if row.get("closed") is True}
+        for target in popup_targets:
+            key = (target["program_id"], target.get("window_ref", "main"))
+            if key in closed_popups: continue
+            check = image_replay_preflight(runtime, {k: target[k] for k in ("pid", "window_id")}, capture=False)
+            if not check["ready_for_input"] and isinstance(recorded_events, list):
+                for event in recorded_events:
+                    if not isinstance(event, dict) or (event.get("program_id"), event.get("window_ref", "main")) != key: continue
+                    for field in ("template_png", "width", "height", "anchor", "capture_window", "source_size"): event.pop(field, None)
+                    event["requested_operation"] = event.get("operation")
+                    event["reason"] = "image_replay_unavailable"
+        for target in roots:
+            self._program(job, target["program_id"], {k: target[k] for k in ("pid", "window_id")})
+        for target in [*roots, *popup_targets]:
+            if (target["program_id"], target.get("window_ref", "main")) in closed_popups: continue
+            if any(isinstance(event, dict) and event.get("program_id") == target["program_id"] and event.get("window_ref", "main") == target.get("window_ref", "main") and "native_target" in event for event in recorded.get("events", [])):
+                try:
+                    with runtime.execution_lock:
+                        self._check(job)
+                        self._program(job, target["program_id"], {k: target[k] for k in ("pid", "window_id")})
+                        snapshots[(target["program_id"], target.get("window_ref", "main"))], _ = self.library._observe(runtime, {k: target[k] for k in ("pid", "window_id")}, target["program_id"])
+                except OperationError:
+                    self._check(job)
+        draft.recorded(recorded_events, snapshots=snapshots, warning_codes=recorded.get("warnings", []),
+                       windows=recorded.get("windows", []), review_mode=receipt["review_mode"])
+        with self.lock:
+            self._check(job)
+            job["draft"] = draft
+            receipt["after"] = copy.deepcopy(draft)
+            job["result"]["recording_import"] = {"receipt_id": receipt["id"],
+                "diagnostics": copy.deepcopy(draft.recording_import_diagnostics), "input_dispatched": False,
+                "unresolved_steps": sum(step["operation"] == "manual_entry" for step in _leaf_steps(draft.steps)),
+                "unresolved_at_import": sum(step["operation"] == "manual_entry" for step in _leaf_steps(draft.steps)),
+                "diagnostics_phase": "original_import"}
+        return draft
+
+    @staticmethod
+    def _trial_summary(tested, task):
+        result = {key: copy.deepcopy(tested[key]) for key in ("status", "state", "task_verified", "run_id", "completed_steps", "total_steps", "step_index", "diagnostic", "checkpoint_id", "next_step", "visual_review", "checkpoint") if key in tested}
+        result["task_id"] = task["id"]
+        result["input_dispatched"] = tested.get("input_dispatched")
+        result["automatic_retry"] = False
+        return result
+
+    def _trial_signal(self, job, state, result=None):
+        exchange = job.get("exchange")
+        if not exchange: raise OperationError("편집 창 연결이 없습니다.", "editor_closed")
+        job["trial_sequence"] = job.get("trial_sequence", 0) + 1
+        sequence = job["trial_sequence"]
+        self._write(exchange["trial"], {"nonce": exchange["nonce"], "seq": sequence, "state": state, "result": result or {}})
+        if state != "running": return
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            self._check(job)
+            if exchange["trial_ready"].exists():
+                answer = self._read(exchange["trial_ready"], exchange["nonce"])
+                if (answer.get("seq") == sequence and answer.get("hidden") is True
+                        and answer.get("helper_pid") == job["result"].get("helper_pid")):
+                    return
+            job["cancel"].event.wait(.03)
+        raise OperationError("편집 창을 잠시 숨기는 준비를 확인하지 못했습니다. 입력하지 않았습니다.", "editor_test_not_ready")
+
+    def resume_test(self, editor_id, runtime, *, observation_review=None, acknowledge_checkpoint=None):
+        with self.lock:
+            job = self.jobs.get(editor_id)
+            if job is None or job["runtime"] is not runtime: raise OperationError("이 연결의 시험 실행을 찾지 못했습니다.", "editor_not_found")
+        if not job["interaction_lock"].acquire(blocking=False): raise OperationError("편집 창에서 선택 또는 녹화가 진행 중입니다.", "editor_busy")
+        trial_signalled = False
+        try:
+            self._check(job)
+            if job["done"].is_set() or "test_task" not in job: raise OperationError("열린 편집 창에서 먼저 시험 실행을 시작하세요.", "editor_test_not_found")
+            previous = job["test_result_full"]
+            if previous.get("status") != "needs_review" or not previous.get("run_id"):
+                raise OperationError("화면 확인을 기다리는 시험 실행만 이어갈 수 있습니다. 입력을 다시 보내지 않았습니다.", "editor_test_not_pending")
+            trial_signalled = True
+            self._trial_signal(job, "running")
+            result = self.test_runner(runtime, copy.deepcopy(job["test_task"]), copy.deepcopy(job["test_targets"]),
+                resume_run_id=previous["run_id"], observation_review=observation_review, acknowledge_checkpoint=acknowledge_checkpoint)
+            if not isinstance(result, dict): raise OperationError("시험 실행 결과를 확인하지 못했습니다.", "editor_test_invalid_result")
+            with self.lock:
+                job["test_result_full"] = copy.deepcopy(result)
+                job["result"]["last_test"] = self._trial_summary(result, job["test_task"])
+            return self.status(editor_id)
+        finally:
+            try:
+                if trial_signalled:
+                    try: self._trial_signal(job, "finished", job["result"].get("last_test", {}))
+                    except (OperationError, OSError):
+                        # The editor may close while its run is being cancelled.
+                        # Preserve the actual run error/result and always release
+                        # ownership; a closed helper cannot receive more input.
+                        pass
+            finally: job["interaction_lock"].release()
 
     def _visual(self, job, mode, arguments, timeout):
         """Owned visible helper; bound scope, nonces, bounded reads and cleanup."""
         self._check(job)
+        def check_hosted():
+            for (pid, hwnd), identity in job.get("hosted_targets", {}).items():
+                if identity is not None and self._hosted_identity(job["runtime"], {"pid": pid, "window_id": hwnd}) != identity:
+                    raise OperationError("선택하거나 녹화하는 동안 대상 창의 앱이 바뀌었습니다. 현재 앱으로 다시 연결하세요.", "editor_target_changed")
+        check_hosted()
         helper = Path(__file__).resolve().with_name(VISUAL_HELPER_NAME)
         self._check_path(helper)
         if not helper.is_file():
@@ -855,6 +1259,7 @@ class ProcessEditors:
             started, visible = time.monotonic(), False
             progress_modified, progress_at, ready_at = None, None, None
             while True:
+                check_hosted()
                 self._check(job)
                 if not visible and ready.exists():
                     shown = self._read(ready, nonce)
@@ -886,6 +1291,7 @@ class ProcessEditors:
                                              "visual_invalid_response")
                     if mode == "record" and progress_at is None:
                         raise OperationError("녹화 진행 상태를 한 번도 확인하지 못했습니다. 전체 배포 파일을 갱신하세요.", "recording_progress_missing")
+                    if mode == "record": self._retain_recording(job, answer)
                     return answer
                 if child.poll() is not None:
                     raise OperationError("이미지·녹화 창이 결과 없이 종료되었습니다.", "visual_helper_closed")
@@ -1003,6 +1409,8 @@ class ProcessEditors:
         request = folder / (nonce[:16] + ".request.json")
         response = folder / (nonce[:16] + ".response.json")
         ready, command, event = [Path(str(response) + suffix) for suffix in (".ready.json", ".command.json", ".event.json")]
+        trial, trial_ready = Path(str(response) + ".trial.json"), Path(str(response) + ".trial.ready.json")
+        job["exchange"] = {"nonce": nonce, "trial": trial, "trial_ready": trial_ready}
         try:
             self._check(job)
             helper = Path(__file__).resolve().with_name(HELPER_NAME)
@@ -1012,6 +1420,7 @@ class ProcessEditors:
             folder.mkdir(parents=True, exist_ok=True)
             timeout = job["args"].get("timeout_seconds", 600)
             self._write(request, {"nonce": nonce, "timeout_seconds": timeout, "programs": job["draft"].programs,
+                                 "visual_review_enabled": job.get("visual_review_enabled", False),
                                  "draft": {"name": job["name"], "description": job["description"], "steps": job["summaries"], "recording_review": job["draft"].recording_review()}})
             child = subprocess.Popen([str(helper), "--edit", str(request), str(response)], cwd=str(helper.parent),
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -1041,7 +1450,8 @@ class ProcessEditors:
                         if not visible or job["result"].get("status") == "saved":
                             raise OperationError("편집 가능한 상태가 아닙니다.", "editor_invalid_state")
                         try:
-                            answer = self._command(job, data)
+                            with job["interaction_lock"]:
+                                answer = self._command(job, data)
                         except Exception as exc:
                             # A failed nested-picker cleanup is terminal. Do
                             # not turn it into a recoverable form error that
@@ -1053,7 +1463,8 @@ class ProcessEditors:
                                     job["save_started"] = False
                             self._check(job)
                             answer = {"status": "error", "message": str(exc), "steps": job["draft"].summaries(),
-                                      "code": getattr(exc, "code", "editor_command_failed")}
+                                      "code": getattr(exc, "code", "editor_command_failed"),
+                                      "recording_receipt_available": bool(job.get("last_recording"))}
                         self._write(event, {"nonce": nonce, "seq": seq, **answer})
                         sequence = seq
                 if response.exists():
@@ -1089,7 +1500,7 @@ class ProcessEditors:
             else:
                 with self.lock:
                     job["result"]["editor_visible"] = False
-            for path in (request, response, ready, command, event):
+            for path in (request, response, ready, command, event, trial, trial_ready):
                 try:
                     self._check_path(path)
                     path.unlink(missing_ok=True)
@@ -1108,9 +1519,18 @@ class ProcessEditors:
             if cancel:
                 job["cancel"].set()
         job["done"].wait(wait_ms/1000)
-        return self._view(job, **({"status": "cancelling", "save_already_started": bool(job.get("save_started")),
+        result = self._view(job, **({"status": "cancelling", "save_already_started": bool(job.get("save_started")),
             "message": "저장이 이미 시작되어 결과를 확인한 뒤 창을 닫습니다." if job.get("save_started") else "저장하지 않고 편집 창을 닫고 있습니다."}
             if cancel and not job["done"].is_set() else {}))
+        tested = job.get("test_result_full", {})
+        # The facade consumes this privately to open the local human review
+        # window; the central delivery filter excludes it from text clients.
+        if "checkpoint_content" in tested:
+            result["checkpoint_content"] = copy.deepcopy(tested["checkpoint_content"])
+        if callable(getattr(self, "visual_review_enabled", None)) and self.visual_review_enabled(job["runtime"]) is True:
+            for key in ("observation_content", "visual_review"):
+                if key in tested: result[key] = copy.deepcopy(tested[key])
+        return result
 
     def stop(self, runtime=None):
         with self.lock:

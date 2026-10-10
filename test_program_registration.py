@@ -31,7 +31,7 @@ class RegistrationTests(unittest.TestCase):
         self.old.touch()
         self.app.touch()
         self.config_path = self.root / "config.json"
-        self.original = {"version": 1, "driver": str(self.root / "driver.exe"), "mode": "uia", "approval": "client",
+        self.original = {"version": 1, "tool_profile": "legacy", "driver": str(self.root / "driver.exe"), "mode": "uia", "approval": "client",
                          "max_minutes": 7, "max_actions": 34, "state_dir": str(self.root / "state"),
                          "programs": [{"id": "old", "name": "기존", "exe": str(self.old), "enabled": True}],
                          "notes": "preserve", "custom_metadata": {"keep": 1}}
@@ -298,3 +298,4 @@ class RegistrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -576,7 +576,7 @@ class Setup(tk.Tk):
         ttk.Label(connection, text="설정 저장 위치: " + str(self.config_path), wraplength=900).grid(row=9, column=0, columnspan=2, sticky="w")
         programs.columnconfigure(0, weight=1)
         programs.rowconfigure(1, weight=1)
-        ttk.Label(programs, text="기본 브라우저는 Google Chrome입니다. Chrome이 없으면 경로를 지정하세요. Edge로 자동 대체하지 않습니다. 그 외 프로그램은 직접 등록하세요.", wraplength=850).grid(row=0, column=0, sticky="w")
+        ttk.Label(programs, text="설치된 메모장·계산기·Microsoft Store·Chrome 등을 찾아 목록에 표시합니다. 사용할 프로그램과 사용 여부를 확인하세요. 목록에 없는 프로그램도 추가할 수 있습니다.", wraplength=850).grid(row=0, column=0, sticky="w")
         self.program_list = tk.Listbox(programs, exportselection=False, height=8)
         self.program_list.grid(row=1, column=0, sticky="nsew", pady=12)
         bar = ttk.Frame(programs)
@@ -585,9 +585,12 @@ class Setup(tk.Tk):
             ttk.Button(bar, text=text, command=command).pack(side="left", padx=(0, 7))
         ttk.Label(programs, text="목록에 없는 프로그램도 ‘프로그램 추가’에서 실행파일을 고르거나 열린 창을 선택해 등록할 수 있습니다.\nClaude Code에 원하는 프로그램 추가를 직접 요청할 수도 있습니다. 저장 후 MCP를 다시 연결하면 반영됩니다.\nExcel 등 사용할 프로그램은 이 PC에 설치되어 있어야 합니다.", wraplength=850).grid(row=3, column=0, sticky="w", pady=15)
         self.refresh_programs()
-        ttk.Label(options, text="화면을 읽는 방식").pack(anchor="w")
-        ttk.Radiobutton(options, text="버튼·글자 정보를 읽기 (먼저 권장)", variable=self.mode, value="uia").pack(anchor="w", pady=4)
-        ttk.Radiobutton(options, text="화면 이미지로 위치 찾기 (이미지 입력 가능한 LLM 필요)", variable=self.mode, value="visual").pack(anchor="w", pady=4)
+        if self.config_value.get("tool_profile", "simple") == "legacy":
+            ttk.Label(options, text="화면을 읽는 방식 (이전 도구 호환 설정)").pack(anchor="w")
+            ttk.Radiobutton(options, text="버튼·글자 정보를 읽기", variable=self.mode, value="uia").pack(anchor="w", pady=4)
+            ttk.Radiobutton(options, text="화면 이미지로 위치 찾기 (이미지 입력 가능한 LLM 필요)", variable=self.mode, value="visual").pack(anchor="w", pady=4)
+        else:
+            ttk.Label(options, text="화면 읽기는 대화·프로세스 편집창에서 함께 처리합니다. 요소 정보가 부족하면 이미지를 사용할 수 있습니다.\n모델에 화면 이미지를 보낼 때는 이미지 입력을 지원하는 연결에서 채팅으로 요청하세요. 기본 전달은 텍스트입니다.", wraplength=900).pack(anchor="w")
         ttk.Label(options, text="확인 방식").pack(anchor="w", pady=(18, 4))
         for label, value in (("별도 승인 창 없이 실행 · 연결한 프로그램의 승인 설정 유지 (새 설정 기본)", "client"),
                              ("작업 시작 때 프로그램·내용을 한 번 확인", "session"),

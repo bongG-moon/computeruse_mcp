@@ -62,6 +62,56 @@ class Probe:
 
 
 class ClosingTests(unittest.TestCase):
+    def hosted_runtime(self):
+        runtime = Runtime()
+        record = {"pid": 42, "window_id": 100, "exe": EXE, "app_pid": 43,
+                  "app_window_id": 101, "app_started": 456, "host_started": 123}
+        runtime.guard.process_resolver = mock.Mock(return_value=r"C:\Windows\System32\ApplicationFrameHost.exe")
+        runtime.guard.target_executable = mock.Mock(return_value=EXE)
+        runtime.guard.hosted_target = mock.Mock(side_effect=lambda target: copy.deepcopy(record))
+        return runtime, record
+
+    def test_hosted_closure_uses_exact_runtime_probe_and_only_window_scope(self):
+        runtime, _ = self.hosted_runtime()
+        probe = Probe(state(window()), [state()])
+        runtime.create_transition_probe = mock.Mock(return_value=probe)
+        manager = ClosureManager(runtime)
+        self.addCleanup(manager.close)
+        with self.assertRaises(ClosureError) as raised:
+            manager.prepare(TARGET, "process")
+        self.assertEqual(raised.exception.code, "hosted_window_scope_required")
+        runtime.create_transition_probe.assert_not_called()
+        ticket = manager.prepare(TARGET)
+        runtime.create_transition_probe.assert_called_once_with(TARGET)
+        result = manager.verify(ticket["close_id"], 0)
+        self.assertTrue(result["task_verified"])
+        self.assertTrue(result["window_closed"])
+        self.assertFalse(result["process_exited"])
+        runtime.guard.process_resolver.assert_not_called()
+
+    def test_hosted_child_replacement_during_prepare_rejects_ticket(self):
+        runtime, record = self.hosted_runtime()
+        runtime.guard.hosted_target.side_effect = [record, {**record, "app_started": 789}]
+        probe = Probe(state(window()))
+        manager = ClosureManager(runtime, lambda pid, hwnd: probe)
+        self.addCleanup(manager.close)
+        with self.assertRaises(ClosureError) as raised:
+            manager.prepare(TARGET)
+        self.assertEqual(raised.exception.code, "target_changed_during_prepare")
+        self.assertTrue(probe.closed)
+        self.assertEqual(manager.tickets, {})
+
+    def test_hosted_child_identity_failure_never_reports_closed(self):
+        runtime, _ = self.hosted_runtime()
+        probe = Probe(state(window()), [ProbeError("hosted_child_changed")])
+        manager = ClosureManager(runtime, lambda pid, hwnd: probe)
+        self.addCleanup(manager.close)
+        ticket = manager.prepare(TARGET)
+        result = manager.verify(ticket["close_id"], 0)
+        self.assertEqual(result["status"], "unknown")
+        self.assertFalse(result["task_verified"])
+        self.assertEqual(result["diagnostic"]["code"], "hosted_child_changed")
+
     def manager(self, initial=None, states=(), scope="window"):
         runtime = Runtime()
         probe = Probe(initial or state(window()), states)

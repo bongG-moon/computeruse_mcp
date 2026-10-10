@@ -315,7 +315,9 @@ class ElementLibrary:
         if paths(approved) != allowed:
             raise LearningError("프로그램 경로가 승인 후 변경되었습니다. 세션을 다시 시작하세요.", "program_changed")
         guard = runtime.guard
-        if normalize_exe(guard.process_resolver(target["pid"])) not in allowed or guard.window_resolver(target["window_id"]) != target["pid"]:
+        resolver = getattr(guard, 'target_executable', None)
+        executable = resolver(target) if callable(resolver) else guard.process_resolver(target['pid'])
+        if normalize_exe(executable) not in allowed or guard.window_resolver(target["window_id"]) != target["pid"]:
             raise LearningError("현재 창은 지정한 프로그램에 속하지 않습니다.", "target_mismatch")
         return hashlib.sha256(json.dumps(allowed, ensure_ascii=False).encode("utf-8")).hexdigest()
 

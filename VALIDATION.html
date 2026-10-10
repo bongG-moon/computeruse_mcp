@@ -3,7 +3,24 @@
 <title>Computer Use MCP — 버전별 검증 결과</title>
 <style>body{margin:0;background:#f2f5f8;color:#203449;font:17px/1.8 'Malgun Gothic',sans-serif}main{max-width:1120px;margin:auto;padding:36px 24px 70px}header{background:#173d61;color:white;padding:30px;border-radius:16px}h1{font-size:30px;line-height:1.4}h2{font-size:23px}section{background:white;border:1px solid #d8e1eb;border-radius:12px;padding:26px;margin-top:22px}table{border-collapse:collapse;width:100%;font-size:15px}th,td{border:1px solid #d8e1eb;padding:12px;text-align:left;vertical-align:top}th{background:#edf3fa}code{background:#eef2f6;padding:2px 5px;overflow-wrap:anywhere}.ok{color:#096149}.warn{color:#9b4b07}.small{font-size:14px;color:#506174}a{color:#176fab}li{margin:8px 0}@media(max-width:700px){main{padding:16px}header,section{padding:18px}table{font-size:13px}h1{font-size:25px}}</style>
 
-<main><header><p>2026년 10월 10일 · Windows 시험 PC</p><h1>등록한 Windows 프로그램에서<br>화면을 읽고 작업을 검증합니다.</h1><p>독립 Computer Use MCP 0.15.0 검증 및 이전 기록<br>시험용 Windows 창과 실제 Driver 0.28.2를 사용했습니다. 사내 프로그램·사내 LLM은 연결하지 않았습니다.</p></header>
+<main><header><p>2026년 10월 10일 · Windows 시험 PC</p><h1>Computer Use MCP 0.16.0<br>현재 검증과 이전 기록</h1><p>0.16.0의 실제 앱 조작과 저장 작업 재생 검증을 완료했습니다.<br>현재 결과와 이전 버전의 시험을 구분합니다. 사내 프로그램·사내 LLM은 이번 시험에 포함하지 않았습니다.</p></header>
+<section id="validation-0160"><h2>0.16.0 — 두 가지 사용 흐름으로 개편 · 검증 결과</h2>
+<p><a href="CHANGES_0.16.0.html">0.16.0 변경 내용</a> · <a href="PROCESS_GUIDE.html">처음 따라 하기</a></p>
+<p id="release-016-status"><strong>실제 MuMu 이어가기와 처음부터 재생하기를 모두 완료했습니다.</strong> 원래 녹화에는 사용자가 한 단계의 대상을 다시 지정하는 보완이 필요했습니다. 수정해 저장한 작업으로 각각 4/4단계를 완료했으며, 자동 회귀 검사도 통과했습니다. 배포 파일과 공개 상태는 <a href="https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.16.0">0.16.0 Release 안내</a>에서 확인하세요.</p>
+<table><tr><th>대상</th><th>현재 결과와 범위</th></tr>
+<tr><td>MuMu · 말로 실행하는 경로</td><td id="mumu-016-action-result">관리자 연결을 거친 MCP가 첫 번째 줄의 실행 버튼에 입력을 한 번 전달했습니다. 이후 실제 화면에서 전원/로딩 표시를 거쳐 녹색 실행 상태로 바뀐 것을 확인했습니다. <strong>Android 내부의 준비 완료나 앱 안의 업무 실행까지 검증한 것은 아닙니다.</strong></td></tr>
+<tr><td>메모장 · 입력과 종료</td><td id="notepad-016-result" class="ok">실제 메모장 창에 입력한 시험 문구가 정확히 일치하는지 확인했고, 창 종료도 확인했습니다. 파일 저장·다시 열기까지 수행한 시험은 아닙니다.</td></tr>
+<tr><td>MuMu · 편집창 녹화와 재생</td><td id="record-016-result" class="ok">원래 보기 전환 녹화에서는 두 번째 이미지가 <code>template_low_detail</code>로 거절되어 사용자가 편집창에서 해당 단계의 대상을 다시 지정했습니다. 수정한 작업을 저장한 뒤 <strong>중단 지점 이어가기와 처음부터 새로 실행하기가 모두 4/4단계, <code>task_verified: true</code>로 완료</strong>됐습니다. 실제 화면에서 왼쪽 상세 보기와 오른쪽 간단 보기를 확인했습니다. 저장된 파란 버튼과 현재 회색 버튼의 차이는 각 실행에서 모델이 현재 화면으로 같은 대상을 확인해 복구했으며, 추가 수동 지정은 없었습니다. 이어가기에서 첫 클릭을 반복하지 않았고 저장 작업의 해시도 유지됐습니다. 각 실행의 화면 확인 2개는 <code>visual_assessed</code>이며 UIA 값의 결정적 검증과 구분합니다. 최신 네이티브 캡처 변경은 자동 검사·시험 앱에서 확인했지만 원래 MuMu 녹화를 모두 새로 수행한 것은 아닙니다.</td></tr>
+<tr id="apps-016-result"><td>Chrome · 시험 페이지</td><td id="chrome-016-result" class="ok">검색어에 <code>CUA-016</code> 입력 → 신청 상태를 <code>신청</code>으로 선택 → 조회 버튼 클릭 → 결과 문구 <code>확인: CUA-016 / 신청</code>의 정확한 일치 → 창 종료를 확인했습니다. 실제 UIA 값과 결과 문구로 확인한 범위이며 다른 웹사이트의 동작을 보장하지 않습니다.</td></tr>
+<tr><td>계산기 · 등록, 계산과 종료</td><td id="calculator-016-result" class="ok">기본 앱 등록 오류를 고친 뒤 정확한 앱 창에 연결했습니다. 2 입력과 3 입력, 계산 결과 5를 UIA로 확인했고 창 종료도 확인했습니다. 중간의 <code>2 +</code> 수식은 새 화면을 모델이 읽어 확인한 <code>visual_assessed</code> 결과이며, 최종 숫자 5는 읽은 값의 정확한 일치로 확인했습니다.</td></tr>
+<tr><td>Microsoft Store · 선택과 종료</td><td id="store-016-result" class="ok">기본 앱 등록과 현재 창 연결 후 <code>앱</code> 항목의 선택 상태가 true인지 확인했습니다. 종료 입력 직후에는 조회 오류로 상태가 불명확했으나, 같은 입력을 반복하지 않고 읽기 전용 종료 확인으로 실제 창이 닫혔음을 확인했습니다. 설치·구매·로그인 작업은 수행하지 않았습니다.</td></tr>
+<tr><td>별도 시험 앱 · 실제 녹화, 저장과 재생</td><td id="fixture-record-016-result" class="ok">수정 후 입력 → 조회 → 그림 버튼 클릭의 실제 동작 3개를 수동 보완·누락 경고 없이 가져와 화면 확인 2개를 포함한 5단계로 저장했습니다. 재생 중 그림 버튼을 찾지 못했던 문제를 고친 뒤 같은 실행을 이어가 5/5단계와 <code>task_verified: true</code>를 확인했습니다. 두 화면 확인은 모델의 실제 화면 판단인 <code>visual_assessed</code>로 남았습니다. 독립 앱 기록에서 재개 전후 조회 누적 횟수는 3회로 유지되고 그림 버튼 클릭만 2회에서 3회로 증가했으며, 입력값은 <code>RECORD-016-FIXED</code>였습니다. 완료한 앞 동작을 반복하지 않았습니다. 이후 같은 저장 작업을 처음부터 새로 실행한 시험도 5/5단계를 완료했고, 조회와 그림 버튼 클릭은 각각 3회에서 4회로 한 번씩 증가했습니다. MuMu 시험과 사람의 사용성 평가는 별도입니다.</td></tr>
+<tr><td>자동 회귀 검사</td><td id="unit-016-result" class="ok">최신 전체 1,327개 실행, 1,325개 통과, 2개 조건부 제외, 실패 0개. 실행 시간 69.477초. 별도 독립 검사 191개도 25.947초에 모두 통과했습니다. 이미지 전달 허용, 실행·단계·창·화면 일치, 미전달 기록, 중복 입력 방지, 저장 원본 유지, 현재 화면 변경 시 중단과 이전 창의 결과 확인 범위를 포함합니다. 실제 앱 검증과 자동 검사 결과를 별도로 구분합니다.</td></tr>
+<tr><td>배포 파일</td><td id="build-016-result">실제 앱 및 저장 작업 재생 검증을 마친 소스를 기준으로 배포 ZIP을 구성합니다. 최종 파일·해시와 공개 상태는 <a href="https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.16.0">0.16.0 Release 안내</a>를 확인하세요. 개인 경로·원문 로그·실제 화면 이미지는 공개 자료에 포함하지 않습니다.</td></tr>
+</table>
+<p><strong>대상 복구의 현재 한계:</strong> 이미지 전달을 허용한 연결에서 입력 미전달이 확인된 단계에만 적용합니다. 앞선 단계의 값·상태 조건은 다시 읽습니다. 같은 창에서 수행한 모델의 화면 확인은 현재 화면 전체가 같을 때만 재사용하므로 시계·애니메이션이 계속 바뀌는 창에서는 다시 관찰이 필요할 수 있습니다. 이전 모델 확인이 다른 창에서 수행됐다면 현재 창의 화면으로 그 결과를 대신 인정하지 않고 자동 이어가기를 멈춥니다. 대상 확인은 모델의 시각 판단이며 업무 완료 판정과 구분합니다.</p>
+<p class="small">이하 기록은 해당 이전 버전의 시험 결과입니다. 이전 전용 시험 앱의 녹화·재생 성공이나 이전 Chrome 시험은 현재 MuMu·Chrome·계산기·Store 검증을 대신하지 않습니다. 개인 경로, 계정, 실제 화면과 원문 로그는 공개 문서에 포함하지 않습니다.</p>
+</section>
 <section id="validation-0150"><h2>0.15.0 — 녹화·이미지 선택·재개 보완</h2>
 <p><a href="CHANGES_0.15.0.html">바뀐 기능과 사용 방법</a> · <a href="PROCESS_GUIDE.html">녹화부터 프로세스 만들기</a></p>
 <p id="release-015-status"><strong>실제 녹화부터 저장·재생·확인 후 재개까지 통과했습니다.</strong> 기본 텍스트 연결에서 로컬 화면 확인 창을 사용했습니다. 처음에는 앱 제어 승인 시간 초과로 중단했지만, 승인 후 같은 저장 작업을 새 앱 프로세스에서 실행해 전체 결과를 확인했습니다. 공개 배포 여부는 GitHub Release의 해당 버전과 첨부 파일을 기준으로 확인하세요.</p>
@@ -181,4 +198,4 @@
 
 <section><h2>증거와 재현</h2><p>개발 폴더의 <code>.data/acceptance-20261004</code>에 시도별 결과와 단계 기록, 합성 파일을 보관했습니다. <code>.data/report-review</code>에는 원본 보고서 추출본과 실제 진단 결과가 있습니다. 원문 로그에는 화면의 다른 탭 제목이 들어갈 수 있어 사용자용·소스 ZIP에는 포함하지 않았습니다.</p><p>재현용 <code>acceptance_workflows.py</code>와 단위 검사, 빌드 스크립트는 소스 ZIP에 포함합니다. 실제 화면 시험에는 Windows, 해당 앱, 별도 Cua Driver가 필요합니다. 시험 경로와 Driver 위치는 실행 PC에 맞게 지정해야 합니다.</p></section>
 
-<footer class="small">Computer Use MCP 0.6.0 · 기존 앱과 별도의 로컬 stdio MCP · 이 문서는 인터넷 연결 없이 열 수 있습니다.</footer></main></html>
+<footer class="small">Computer Use MCP 0.16.0 · 버전별 시험 기록 · 로컬 stdio MCP · 이 문서는 인터넷 연결 없이 열 수 있습니다.</footer></main></html>

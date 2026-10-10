@@ -20,6 +20,7 @@ from consent import _plain_chain
 from diagnostics import run_diagnostics
 from settings import VERSION, load_config, validate_config
 from vendor.windows import _app_path
+from builtin_programs import builtin_catalog
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -74,6 +75,8 @@ def _code_fingerprint() -> str:
              "consent.py", "vendor/guard.py", "vendor/windows.py", "learning_picker.py", "teaching_sessions.py",
              "teaching_support.py", "process_editor.py", "image_targets.py", "image_steps.py", "program_launch.py",
              "operations.py", "process_steps.py", "workflows.py", "session_runtime.py", "repeat_profiles.py", "scoped_controls.py", "result_files.py",
+             "easy_api.py", "interaction.py", "image_pixels.py", "task_inputs.py", "task_revision.py", "visual_review.py", "visual_targets.py", "builtin_programs.py",
+             "privileges.py", "recording_windows.py", "replay_preflight.py", "checkpoint_review.py", "program_registration.py", "image_delivery.py", "hosted_windows.py",
              "Computer Use MCP 빠른 확인.exe")
     from teaching_support import TEACHING_HELPER_FILES
     files += TEACHING_HELPER_FILES
@@ -164,11 +167,16 @@ def inspect_setup(config_path, *, driver=None, apps=(), app_exes=(), scope=None,
     for name in dict.fromkeys(apps):
         if name not in APPS:
             raise SetupError("지원하는 이름은 chrome, edge, notepad, excel입니다. 다른 프로그램은 --app-exe로 정확한 실행파일을 지정하세요.")
-        matches = app_candidates(name)
+        # System32 Notepad can be only a launcher for the current Store app.
+        # Resolve its current-user package targets together with the alias so
+        # the first installed session already recognizes the real app window.
+        builtin = builtin_catalog()["notepad"] if name == "notepad" else None
+        matches = _candidates([builtin["exe"]]) if builtin is not None else app_candidates(name)
         if len(matches) != 1:
             questions.append({"field": "app", "app": name, "question": APPS[name][0] + "의 실행파일을 선택해 주세요.", "candidates": matches})
         else:
-            programs.append({"id": name, "name": APPS[name][0], "exe": matches[0], "enabled": True, "control_exes": [], "hints": "요청한 시험용 창만 사용합니다."})
+            controls = _candidates(builtin["control_exes"]) if builtin is not None else []
+            programs.append({"id": name, "name": APPS[name][0], "exe": matches[0], "enabled": True, "control_exes": controls, "hints": "요청한 시험용 창만 사용합니다."})
     for index, value in enumerate(custom_exes):
         path = _path(value)
         if not path.is_file() or path.suffix.lower() != ".exe":

@@ -97,6 +97,10 @@ class NamedWindowTests(WorkflowTests):
         from vendor.guard import atomic_json
         writes = []
         def once(path, value):
+            # Immutable run snapshots are saved before the checkpoint journal.
+            # This test injects a journal failure, not a failed run creation.
+            if value.get("format") == "computer-workflow-snapshot/v1":
+                return atomic_json(path, value)
             writes.append(copy.deepcopy(value))
             if len(writes) == 1:
                 raise PermissionError("PRIVATE file busy")

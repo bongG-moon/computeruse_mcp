@@ -98,6 +98,20 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(len(issues), 1)
         self.assertIn("ZIP", issues[0])
 
+    def test_simple_profile_diagnoses_public_tools_without_requiring_legacy_names(self):
+        from teaching_support import teaching_capabilities, TEACHING_HELPER_FILES
+        from easy_api import schemas
+        from server import MANAGEMENT
+        with tempfile.TemporaryDirectory() as tmp:
+            for filename in TEACHING_HELPER_FILES:
+                (Path(tmp) / filename).touch()
+            support = teaching_capabilities(Path(tmp))
+        names = {item["name"] for item in schemas(MANAGEMENT)}
+        initialized = {"serverInfo": {"name": "company-computer-use", "version": diagnostics.VERSION}}
+        status = {"version": diagnostics.VERSION, "tool_profile": "simple", "teaching_support": support}
+        self.assertEqual(diagnostics.connection_issues(initialized, names, status), [])
+        self.assertTrue(any("computer_act" in issue for issue in diagnostics.connection_issues(initialized, names-{"computer_act"}, status)))
+
     def test_missing_driver_does_not_launch_process_and_gives_recovery(self):
         with tempfile.TemporaryDirectory() as tmp:
             value = config(Path(tmp), "")
