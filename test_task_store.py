@@ -1,5 +1,6 @@
 """Task persistence under concurrent independent clients; no desktop input."""
 import json
+import copy
 from pathlib import Path
 import subprocess
 import sys
@@ -17,6 +18,102 @@ class TaskStoreTests(unittest.TestCase):
         self.store = TaskStore(self.tmp.name, self.config)
         self.args = {"id": "example", "name": "반복 작업", "instructions": "한글과 English \\\" & <tag>\n" * 500,
                      "expected": "결과를 화면에서 확인", "program_ids": ["editor"]}
+
+    def pending_args(self):
+        return {**self.args, "variables": {"query": {"default": "0012"}}, "steps": [
+            {"operation": "set_value", "program_id": "editor", "window_ref": "main", "step_id": "known",
+             "selector": {"role": "Edit", "name": "검색"}, "value": "${query}"},
+            {"operation": "manual_entry", "program_id": "editor", "window_ref": "main", "step_id": "pending",
+             "manual_reason": "template_low_detail", "repair_action": "click"},
+            {"operation": "checkpoint", "program_id": "editor", "window_ref": "main", "step_id": "result", "message": "결과 확인"}],
+            "recording_review": {"partial": True, "acknowledged": False, "warning_codes": ["semantic_target_unverified"]},
+            "draft": {"format": "computer-process-draft/v1", "labels": ["검색", "첫 번째 재생 버튼", "현재 창"],
+                      "target_warning_steps": ["pending"], "persistent_semantic_warning": False}}
+
+    def test_draft_roundtrip_repairs_only_one_step_and_keeps_revision(self):
+        from process_editor import ProcessDraft
+        from task_revision import TaskRevisions
+        from workflows import render_steps
+        saved = self.store.save(self.pending_args())
+        reopened = TaskStore(self.tmp.name, self.config).get(saved["id"])
+        self.assertEqual(reopened, saved)
+        draft = ProcessDraft([{"program_id": "editor", "pid": 10, "window_id": 20, "label": "test"}], reopened)
+        self.assertEqual(draft.labels, saved["draft"]["labels"])
+        draft.selections["chosen"] = {"target": ("editor", "main"), "recognition": "uia", "selector": {"role": "Button", "name": "실행"}, "actions": ["click"], "label": "실행"}
+        draft.repair(1, {"selection_id": "chosen"}, action="click")
+        self.assertEqual(draft.recording_warnings, [])
+        self.assertTrue(draft.readiness()["runnable"])
+        args = {key: copy.deepcopy(saved[key]) for key in ("id", "name", "instructions", "expected", "program_ids", "variables")}
+        ready = TaskRevisions(self.store).save({**args, "steps": draft.steps}, expected_revision=1)
+        self.assertNotIn("draft", ready)
+        self.assertNotIn("recording_review", ready)
+        self.assertEqual(ready["steps"][0], saved["steps"][0])
+        self.assertEqual(ready["steps"][2:], saved["steps"][2:])
+        self.assertEqual(ready["steps"][1]["step_id"], "pending")
+        self.assertEqual(render_steps(ready, {})[0][0]["value"], "0012")
+        self.assertIn("draft", TaskRevisions(self.store).get(saved["id"], 1))
+
+    def test_draft_never_renders_or_exports_as_executable(self):
+        from task_revision import TaskRevisions
+        from workflows import WorkflowError, render_steps
+        saved = self.store.save(self.pending_args())
+        for run in (lambda: render_steps(saved, {}), lambda: TaskRevisions(self.store).export_skill(saved["id"])):
+            with self.assertRaisesRegex(WorkflowError, "초안"):
+                run()
+
+    def test_draft_strict_shape_and_unacknowledged_review_cannot_bypass_store(self):
+        self.store.save(self.args)
+        before = self.store.path.read_bytes()
+        for bad in ("unknown_key", "secret_value", "missing_marker", "forged_provenance"):
+            args = self.pending_args()
+            if bad == "unknown_key": args["steps"][1]["window_id"] = 123
+            elif bad == "secret_value": args["steps"][1]["value"] = "DO_NOT_STORE_UNKNOWN_INPUT"
+            elif bad == "missing_marker": args.pop("draft")
+            else: args["draft"]["target_warning_steps"] = ["known"]
+            with self.subTest(bad=bad), self.assertRaises(SessionError): self.store.save(args)
+            self.assertEqual(self.store.path.read_bytes(), before)
+
+    def test_recipe_and_draft_limits_accept_1000_reject_1001_atomically(self):
+        from server import MANAGEMENT
+        self.assertEqual(MANAGEMENT["computer_save_task"]["inputSchema"]["properties"]["steps"]["maxItems"], 1000)
+        for pending in (False, True):
+            step = {"operation": "manual_entry", "program_id": "editor", "manual_reason": "image_capture_required"} if pending else {"operation": "delay", "program_id": "editor", "duration_ms": 0}
+            args = {**self.args, "steps": [copy.deepcopy(step) for _ in range(1000)]}
+            if pending: args["draft"] = {"format": "computer-process-draft/v1", "labels": ["target"]*1000, "target_warning_steps": [], "persistent_semantic_warning": False}
+            self.assertEqual(len(self.store.save(args)["steps"]), 1000)
+            before = self.store.path.read_bytes()
+            args["steps"].append(copy.deepcopy(step))
+            if pending: args["draft"]["labels"].append("target")
+            with self.subTest(pending=pending), self.assertRaises(SessionError): self.store.save(args)
+            self.assertEqual(self.store.path.read_bytes(), before)
+
+    def test_draft_step_ids_unique_across_pending_and_executable_steps(self):
+        args = self.pending_args()
+        args["steps"][1]["step_id"] = "known"
+        args["draft"]["target_warning_steps"] = ["known"]
+        with self.assertRaises(SessionError): self.store.save(args)
+
+    def test_more_than_thirty_pending_target_warnings_are_durable(self):
+        args = self.pending_args()
+        args["steps"] = [{"step_id": "pending-"+str(i), "operation": "manual_entry", "program_id": "editor",
+                          "manual_reason": "template_low_detail", "repair_action": "click"} for i in range(33)]
+        args["draft"].update(labels=["target"]*33, target_warning_steps=[step["step_id"] for step in args["steps"]])
+        saved = self.store.save(args)
+        self.assertEqual(len(TaskStore(self.tmp.name, self.config).get(saved["id"])["draft"]["target_warning_steps"]), 33)
+
+    def test_chat_draft_structural_edits_preserve_label_and_warning_identity(self):
+        from task_revision import TaskRevisions
+        self.store.save(self.pending_args())
+        revisions = TaskRevisions(self.store)
+        added = revisions.update("example", 1, [{"op": "insert_step", "after_step_id": None,
+            "step": {"step_id": "extra", "operation": "delay", "program_id": "editor", "duration_ms": 0}}])["task"]
+        self.assertEqual(added["draft"]["labels"][1:], ["검색", "첫 번째 재생 버튼", "현재 창"])
+        moved = revisions.update("example", 2, [{"op": "move_step", "step_id": "extra", "after_step_id": "result"}])["task"]
+        self.assertEqual(moved["draft"]["labels"][:3], ["검색", "첫 번째 재생 버튼", "현재 창"])
+        removed = revisions.update("example", 3, [{"op": "delete_step", "step_id": "pending"}])["task"]
+        self.assertEqual(removed["draft"]["target_warning_steps"], [])
+        self.assertTrue(removed["draft"]["persistent_semantic_warning"])
+        self.assertFalse(removed["recording_review"]["acknowledged"])
 
     def test_save_edit_reopen_delete_preserves_other_tasks(self):
         saved = self.store.save(self.args)

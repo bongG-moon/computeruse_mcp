@@ -3,7 +3,20 @@
 <title>Computer Use MCP — 버전별 검증 결과</title>
 <style>body{margin:0;background:#f2f5f8;color:#203449;font:17px/1.8 'Malgun Gothic',sans-serif}main{max-width:1120px;margin:auto;padding:36px 24px 70px}header{background:#173d61;color:white;padding:30px;border-radius:16px}h1{font-size:30px;line-height:1.4}h2{font-size:23px}section{background:white;border:1px solid #d8e1eb;border-radius:12px;padding:26px;margin-top:22px}table{border-collapse:collapse;width:100%;font-size:15px}th,td{border:1px solid #d8e1eb;padding:12px;text-align:left;vertical-align:top}th{background:#edf3fa}code{background:#eef2f6;padding:2px 5px;overflow-wrap:anywhere}.ok{color:#096149}.warn{color:#9b4b07}.small{font-size:14px;color:#506174}a{color:#176fab}li{margin:8px 0}@media(max-width:700px){main{padding:16px}header,section{padding:18px}table{font-size:13px}h1{font-size:25px}}</style>
 
-<main><header><p>2026년 10월 10일 · Windows 시험 PC</p><h1>Computer Use MCP 0.16.0<br>현재 검증과 이전 기록</h1><p>0.16.0의 실제 앱 조작과 저장 작업 재생 검증을 완료했습니다.<br>현재 결과와 이전 버전의 시험을 구분합니다. 사내 프로그램·사내 LLM은 이번 시험에 포함하지 않았습니다.</p></header>
+<main><header><p>2026년 10월 11일 · Windows 시험 PC</p><h1>Computer Use MCP 0.17.0<br>현재 검증과 이전 기록</h1><p>0.17.0은 자동 검사로 이미지·녹화·초안 저장·반복 작업 변경을 확인했습니다.<br>이번 실제 녹화·재생 시험은 완료하지 못했습니다. 이전 버전의 실제 앱 결과와 구분합니다.</p></header>
+
+<section id="validation-0170"><h2>0.17.0 — 이미지 선택·초안 저장·긴 반복 작업</h2>
+<p><a href="CHANGES_0.17.0.html">변경 내용</a> · <a href="PROCESS_GUIDE.html">처음 따라 하기</a> · <a href="https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.17.0">배포 파일과 공개 상태</a></p>
+<p><strong>이번 변경의 자동 검사 결과는 최종 1,382개 통과·5개 제외·미해결 실패 0개입니다.</strong> 전체 검사 1,387개 실행 후 새 중지 사유 규약에 맞춰 시험용 모형을 보정하고 관련 41개를 재검사했습니다. 이 집계는 전체 검사와 영향 범위 재검사의 결과이며, 한 번의 전체 실행이 처음부터 모두 통과했다는 뜻은 아닙니다.</p>
+<table><tr><th>항목</th><th>자동 검사에서 확인한 범위</th></tr>
+<tr><td>이미지 선택</td><td>선택 위치를 유지한 주변 문맥 확장, 반복 그림의 구별 검사, 작은 이미지와 요소 정보의 독립 처리. 실제 입력 위치가 가려졌을 때는 임의 위치로 바꾸지 않습니다.</td></tr>
+<tr><td>녹화</td><td>입력 직전 이미지 보관과 비동기 비교, 실제 입력점과 주변 영역의 가림 구분, 관련 팝업 캡처·확인된 선택값 기록, 큰 화면·이미지 용량 초과 시 순서를 보존한 부분 기록.</td></tr>
+<tr><td>초안 저장</td><td>빠진 단계·경고를 포함한 저장, 재열기와 보완, 미완성 초안의 실행·스킬 내보내기 차단, 보완된 단계의 경고 정리.</td></tr>
+<tr><td>작업 용량</td><td>작성 1,000단계, 목록 1,000개, 확장 10,000단계의 경계와 기록 파일. 녹화 300동작 및 한글 단계 목록 전달을 검사했습니다. 이 수치는 단계 수 범위이며 이미지·파일 용량은 별도 제한됩니다.</td></tr>
+<tr><td>긴 작업 이어가기</td><td>완료한 구간을 저장하고 같은 작업·입력값·실행 ID로 재개. 연결의 시간·조작 횟수 소진과 사용자 중지를 구분하고, 이미 전달됐거나 전달 여부가 불명확한 입력은 반복하지 않는 모의 실행을 검사했습니다.</td></tr></table>
+<p>제외한 5개는 Windows 심볼릭 링크 생성 조건 1개, Esc 중지 후 열지 않은 승인 위젯 UI 3개, 별도 실행을 지정해야 하는 실제 설치 연결 검사 1개입니다. 소스·네이티브 실행 파일 컴파일 검사를 완료했습니다.</p>
+<p class="warn"><strong>남은 실제 화면 검증:</strong> 이번 시험은 물리적 Esc 중지로 실제 녹화 → 저장 → 재생을 끝까지 완료하지 못했습니다. MuMu 및 다른 앱의 최신 변경 재검증, 실제 앱의 10,000단계 완주, 장시간 무인 운영은 확인하지 않았습니다. 아래 0.16.0의 실제 화면 결과를 0.17.0의 재검증으로 해석하지 않습니다.</p>
+</section>
 <section id="validation-0160"><h2>0.16.0 — 두 가지 사용 흐름으로 개편 · 검증 결과</h2>
 <p><a href="CHANGES_0.16.0.html">0.16.0 변경 내용</a> · <a href="PROCESS_GUIDE.html">처음 따라 하기</a></p>
 <p id="release-016-status"><strong>실제 MuMu 이어가기와 처음부터 재생하기를 모두 완료했습니다.</strong> 원래 녹화에는 사용자가 한 단계의 대상을 다시 지정하는 보완이 필요했습니다. 수정해 저장한 작업으로 각각 4/4단계를 완료했으며, 자동 회귀 검사도 통과했습니다. 배포 파일과 공개 상태는 <a href="https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.16.0">0.16.0 Release 안내</a>에서 확인하세요.</p>
@@ -198,4 +211,4 @@
 
 <section><h2>증거와 재현</h2><p>개발 폴더의 <code>.data/acceptance-20261004</code>에 시도별 결과와 단계 기록, 합성 파일을 보관했습니다. <code>.data/report-review</code>에는 원본 보고서 추출본과 실제 진단 결과가 있습니다. 원문 로그에는 화면의 다른 탭 제목이 들어갈 수 있어 사용자용·소스 ZIP에는 포함하지 않았습니다.</p><p>재현용 <code>acceptance_workflows.py</code>와 단위 검사, 빌드 스크립트는 소스 ZIP에 포함합니다. 실제 화면 시험에는 Windows, 해당 앱, 별도 Cua Driver가 필요합니다. 시험 경로와 Driver 위치는 실행 PC에 맞게 지정해야 합니다.</p></section>
 
-<footer class="small">Computer Use MCP 0.16.0 · 버전별 시험 기록 · 로컬 stdio MCP · 이 문서는 인터넷 연결 없이 열 수 있습니다.</footer></main></html>
+<footer class="small">Computer Use MCP 0.17.0 · 버전별 시험 기록 · 로컬 stdio MCP · 이 문서는 인터넷 연결 없이 열 수 있습니다.</footer></main></html>

@@ -18,7 +18,10 @@ internal static class ProcessEditor
     [DllImport("user32.dll")] internal static extern uint GetDpiForWindow(IntPtr hwnd);
     [DllImport("user32.dll")] internal static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool MoveFileEx(string existing, string replacement, uint flags);
-    internal static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 2097152 };
+    internal const int MaximumSteps = 1000;
+    internal const int MaximumTargets = MaximumSteps + 100;
+    internal const int MaximumMessageBytes = 2 * 1024 * 1024;
+    internal static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = MaximumMessageBytes };
     internal static string Str(Dictionary<string, object> data, string key, string fallback)
     { object value; return data != null && data.TryGetValue(key, out value) && value != null ? Convert.ToString(value) : fallback; }
     internal static int Num(Dictionary<string, object> data, string key, int fallback)
@@ -27,6 +30,15 @@ internal static class ProcessEditor
     { long result; return Int64.TryParse(Str(data, key, ""), out result) ? result : fallback; }
     internal static Dictionary<string, object> Map(Dictionary<string, object> data, string key)
     { object value; return data != null && data.TryGetValue(key, out value) ? value as Dictionary<string, object> : null; }
+    internal static string TrialMessage(Dictionary<string, object> tested)
+    {
+        if (Object.Equals(tested != null && tested.ContainsKey("task_verified") ? tested["task_verified"] : null, true))
+            return "시험 실행을 완료하고 결과를 확인했습니다. 필요하면 저장하세요.";
+        string reason = Str(Map(tested, "continuation"), "reason", "");
+        if (reason == "workflow_chunk_complete") return "여기까지 " + Num(tested, "completed_steps", 0).ToString() + "단계를 확인했습니다. 채팅에서 이어서 실행하면 다음 단계부터 계속합니다.";
+        if (reason == "session_budget_exhausted") return "이 연결의 실행 범위가 끝났습니다. 초안은 유지했습니다. 처음부터 다시 시험하지 말고 채팅의 안내를 확인하세요.";
+        return "시험 실행 상태: " + Str(tested, "status", "확인 필요") + ". 채팅의 결과를 확인하세요.";
+    }
     internal static IEnumerable List(Dictionary<string, object> data, string key)
     { object value; return data != null && data.TryGetValue(key, out value) && !(value is string) ? value as IEnumerable : null; }
     internal static bool ValidNonce(string text)
@@ -67,7 +79,7 @@ internal static class ProcessEditor
     internal static void Write(string path, Dictionary<string, object> data)
     {
         string text = Json.Serialize(data);
-        if (Encoding.UTF8.GetByteCount(text) > 2097152) throw new InvalidOperationException("message_too_large");
+        if (Encoding.UTF8.GetByteCount(text) > MaximumMessageBytes) throw new InvalidOperationException("message_too_large");
         string temporary = path + ".tmp";
         File.WriteAllText(temporary, text, new UTF8Encoding(false));
         try {
@@ -92,7 +104,7 @@ internal static class ProcessEditor
             if (!Path.IsPathRooted(args[1]) || !Path.IsPathRooted(args[2])) return 2;
             string request = Path.GetFullPath(args[1]), result = Path.GetFullPath(args[2]);
             if (!String.Equals(Path.GetDirectoryName(request), Path.GetDirectoryName(result), StringComparison.OrdinalIgnoreCase)) return 2;
-            var data = Json.Deserialize<Dictionary<string, object>>(Read(request, 262144));
+            var data = Json.Deserialize<Dictionary<string, object>>(Read(request, MaximumMessageBytes));
             string token = Str(data, "nonce", ""); if (!ValidNonce(token)) return 2;
             nonce = token; response = result;
             if (!Environment.UserInteractive) throw new InvalidOperationException("interactive_desktop_unavailable");
@@ -133,7 +145,7 @@ internal static class ProcessEditor
         readonly PictureBox thumbnail = new PictureBox();
         readonly List<Choice> allActions = new List<Choice>();
         Dictionary<string, object> selection, expectation, recordingReview;
-        int seq, pendingSeq, stepCount, externalTrialSequence;
+        int seq, pendingSeq, stepCount, externalTrialSequence, maximumSteps;
         string pendingAction, pendingPurpose;
         bool busy, done, hiddenForPicker, loadingActions, pendingInputs, pendingRecordingReview;
         float scale;
@@ -171,6 +183,7 @@ internal static class ProcessEditor
         {
             this.response = response; nonce = Str(request, "nonce", "");
             int lifetime = Num(request, "timeout_seconds", 600); if (lifetime < 30 || lifetime > 1800) throw new ArgumentException("invalid_timeout");
+            maximumSteps = Num(request, "max_steps", MaximumSteps); if (maximumSteps < 1 || maximumSteps > MaximumSteps) throw new ArgumentException("invalid_step_limit");
             deadline = DateTime.UtcNow.AddSeconds(lifetime);
             var programs = List(request, "programs"); if (programs == null) throw new ArgumentException("missing_programs");
             foreach (object raw in programs) {
@@ -179,7 +192,7 @@ internal static class ProcessEditor
                 if (id.Length == 0 || Long(data, "window_id", 0) < 0 || Num(data, "pid", 0) <= 0 ||
                     Long(data, "window_id", 0) == 0 && Str(data, "window_ref", "main") == "main") throw new ArgumentException("invalid_program_identity");
                 program.Items.Add(new Choice { Code = id, Label = Str(data, "label", id), Data = data });
-                if (program.Items.Count > 100) throw new ArgumentException("too_many_programs");
+                if (program.Items.Count > MaximumTargets) throw new ArgumentException("too_many_programs");
             }
             if (program.Items.Count == 0) throw new ArgumentException("empty_programs");
             var first = (Choice)program.Items[0];
@@ -266,7 +279,7 @@ internal static class ProcessEditor
             reviewRecording.Click += delegate { ShowRecordingReview(); };
             editInput.Click += delegate { if (steps.SelectedIndices.Count == 1) Send("preview_step", new Dictionary<string, object> { { "index", steps.SelectedIndices[0] } }, "edit"); };
             trial.Click += delegate { Send("test_run", new Dictionary<string, object> { { "name", processName.Text.Trim() }, { "description", description.Text } }, null); if (busy) { hiddenForPicker = true; Hide(); } };
-            save.Click += delegate { if (pendingRecordingReview) { ShowRecordingReview(); return; } Send("save", new Dictionary<string, object> { { "name", processName.Text.Trim() }, { "description", description.Text } }, null); };
+            save.Click += delegate { Send("save", new Dictionary<string, object> { { "name", processName.Text.Trim() }, { "description", description.Text } }, null); };
             cancel.Click += delegate { Finish("cancelled", null); };
             up.Click += delegate { MoveStep(-1); }; down.Click += delegate { MoveStep(1); };
             remove.Click += delegate { if (steps.SelectedIndices.Count == 1) Send("remove_step", new Dictionary<string, object> { { "index", steps.SelectedIndices[0] } }, null); };
@@ -342,7 +355,7 @@ internal static class ProcessEditor
                 string id = Str(data, "program_id", "");
                 if (id.Length == 0 || Long(data, "window_id", 0) < 0 || Num(data, "pid", 0) <= 0) return;
                 replacements.Add(new Choice { Code = id, Label = Str(data, "label", id), Data = data });
-                if (replacements.Count > 100) return;
+                if (replacements.Count > MaximumTargets) return;
             }
             if (replacements.Count == 0) return;
             bool wasBusy = busy; busy = true;
@@ -524,7 +537,7 @@ internal static class ProcessEditor
             bool partial = value != null && Object.Equals(value.ContainsKey("partial") ? value["partial"] : null, true);
             pendingRecordingReview = partial && !Object.Equals(value.ContainsKey("acknowledged") ? value["acknowledged"] : null, true);
             reviewRecording.Visible = partial;
-            reviewRecording.Text = pendingRecordingReview ? "누락 경고 확인 · 저장 전 필수" : "확인한 녹화 경고 다시 보기";
+            reviewRecording.Text = pendingRecordingReview ? "녹화 경고 확인 · 실행 전" : "확인한 녹화 경고 다시 보기";
         }
         void ShowRecordingReview() {
             if (busy || recordingReview == null) return;
@@ -589,8 +602,7 @@ internal static class ProcessEditor
                             Write(response + ".trial.ready.json", new Dictionary<string, object> { { "nonce", nonce }, { "seq", trialSeq }, { "hidden", !Visible }, { "helper_pid", Process.GetCurrentProcess().Id } });
                         } else if (Str(update, "state", "") == "finished") {
                             Enabled = true; Show(); Activate(); var tested = Map(update, "result");
-                            bool verified = Object.Equals(tested != null && tested.ContainsKey("task_verified") ? tested["task_verified"] : null, true);
-                            status.Text = verified ? "시험 실행을 완료하고 결과를 확인했습니다. 필요하면 저장하세요." : "시험 실행 상태: " + Str(tested, "status", "확인 필요") + ". 채팅의 결과를 확인하세요.";
+                            status.Text = TrialMessage(tested);
                             status.ForeColor = muted; UpdateButtons();
                         }
                     }
@@ -600,7 +612,7 @@ internal static class ProcessEditor
             string path = response + ".event.json"; if (!File.Exists(path)) return;
             Dictionary<string, object> result;
             try {
-                result = Json.Deserialize<Dictionary<string, object>>(Read(path, 2097152));
+                result = Json.Deserialize<Dictionary<string, object>>(Read(path, MaximumMessageBytes));
             } catch (InvalidDataException) { Finish("runtime_failed", new Dictionary<string, object> { { "code", "event_too_large" } }); return;
             } catch (IOException) { Finish("runtime_failed", new Dictionary<string, object> { { "code", "event_read_failed" } }); return;
             } catch (UnauthorizedAccessException) { Finish("runtime_failed", new Dictionary<string, object> { { "code", "event_read_failed" } }); return;
@@ -624,9 +636,7 @@ internal static class ProcessEditor
             if (pendingAction == "preview_step") { var preview = Map(result, "preview"); if (preview != null) { if (pendingPurpose == "edit") ShowStepEdit(preview); else ShowStepPreview(preview); } }
             if (pendingAction == "test_run") {
                 var tested = Map(result, "test_result");
-                string outcome = Str(tested, "status", "unknown");
-                bool verified = Object.Equals(tested != null && tested.ContainsKey("task_verified") ? tested["task_verified"] : null, true);
-                result["message"] = verified ? "시험 실행을 완료하고 설정한 결과를 확인했습니다. 필요하면 저장하세요." : "시험 실행 상태: " + outcome + ". 완료로 확정하지 않았습니다. 채팅의 실행 결과에서 필요한 단계만 확인하세요.";
+                result["message"] = TrialMessage(tested);
             }
             if (pendingAction == "save") {
                 var saved = Map(result, "saved_task");
@@ -656,10 +666,10 @@ internal static class ProcessEditor
             bool connected = targetProgram != null && Long(targetProgram.Data, "window_id", 0) > 0;
             pick.Enabled = pickImage.Enabled = pickExpect.Enabled = record.Enabled = !busy && connected;
             reanalyzeRecording.Enabled = !busy && connected;
-            add.Enabled = !busy && stepCount < 30 && ActionCode.Length > 0 && (!NeedsElement || selection != null) && (!NeedsExpect || expectation != null);
-            save.Enabled = !busy && !pendingInputs && stepCount > 0 && processName.Text.Trim().Length > 0;
-            save.Text = pendingRecordingReview ? "저장 전 경고 확인" : "프로세스 저장";
-            trial.Enabled = save.Enabled && !pendingRecordingReview;
+            add.Enabled = !busy && stepCount < maximumSteps && ActionCode.Length > 0 && (!NeedsElement || selection != null) && (!NeedsExpect || expectation != null);
+            save.Enabled = !busy && stepCount > 0 && processName.Text.Trim().Length > 0;
+            save.Text = pendingInputs || pendingRecordingReview ? "초안 저장 · 이어서 수정" : "프로세스 저장";
+            trial.Enabled = save.Enabled && !pendingInputs && !pendingRecordingReview;
             reviewRecording.Enabled = !busy;
             int index = steps.SelectedIndices.Count == 1 ? steps.SelectedIndices[0] : -1;
             var entry = index >= 0 ? steps.Items[index].Tag as Dictionary<string, object> : null;

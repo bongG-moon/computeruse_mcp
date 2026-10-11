@@ -16,7 +16,7 @@ from vendor.guard import atomic_json, check_app, utc_now
 from process_steps import PROCESS_OPERATIONS, execute_process_step, validate_process_step
 from image_steps import IMAGE_OPERATIONS, IMAGE_MUTATIONS, execute_image_step, validate_image_step, validate_image_verification
 from recording_windows import validate_window_wait, dynamic_window_keys, execute_window_wait
-from task_inputs import (validate_specs, resolve_values, example, expand, MAX_EXPANDED_STEPS,
+from task_inputs import (validate_specs, resolve_values, example, expand, MAX_EXPANDED_STEPS, MAX_RECIPE_STEPS, MAX_ITERATIONS,
                          InputError)
 
 
@@ -26,12 +26,20 @@ class WorkflowError(ValueError):
 
 VARIABLE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,39}$")
 PLACEHOLDER = re.compile(r"\$\{([A-Za-z][A-Za-z0-9_]{0,39})\}")
-MAX_STEPS = 30
+MAX_STEPS = MAX_RECIPE_STEPS
+MAX_RUN_RECORD_BYTES = max(256000, MAX_EXPANDED_STEPS * 1024)
+MAX_SNAPSHOT_BYTES = 32 * 1024 * 1024
+RUN_CHUNK_STEPS = 100
+RUN_CHUNK_SECONDS = 45
 WINDOW_REF = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 
 
 class BindingError(WorkflowError):
     pass
+
+
+class DraftNotReady(WorkflowError):
+    code = "draft_not_ready"
 
 
 def _target_executable(guard, target):
@@ -66,15 +74,45 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 
+def _snapshot_fits(value):
+    size = 0
+    # Match atomic_json's indentation and Windows text newline translation
+    # without constructing a second potentially large encoded JSON object.
+    for piece in json.JSONEncoder(ensure_ascii=False, indent=2).iterencode(value):
+        size += len(piece.encode("utf-8")) + (piece.count("\n") if os.name == "nt" else 0)
+        if size > MAX_SNAPSHOT_BYTES: return False
+    return True
+
+
 def deferred_input(step):
     """Delivery is checked by the immediately following explicit checkpoint."""
     return (step.get("operation") in IMAGE_MUTATIONS and not step.get("expect")) or (
         step.get("operation") in {"click", "double_click", "right_click"} and step.get("completion_mode") == "human")
 
 
+def _session_budget_exhausted(runtime):
+    """Only identify policy exhaustion, never turn a user stop into continuation."""
+    deadline = getattr(runtime, "deadline", None)
+    expired = type(deadline) in (int, float) and time.monotonic() >= deadline
+    cause = getattr(runtime, "stop_cause", None)
+    if cause == "requested_or_error": return False
+    timed_stop = cause == "time_budget" and expired
+    for name in ("request_cancel_event", "stop_event"):
+        event = getattr(runtime, name, None)
+        if event is not None and event.is_set():
+            if name != "stop_event" or not timed_stop: return False
+    folder = getattr(runtime, "run_dir", None)
+    if folder is not None and (Path(folder) / "stop.flag").exists() and not timed_stop: return False
+    if getattr(runtime, "active", True) is False: return False
+    if expired: return True
+    maximum = getattr(runtime, "max_actions", None)
+    used = getattr(getattr(runtime, "guard", None), "action_count", None)
+    return type(maximum) is int and type(used) is int and used >= maximum
+
+
 def _validate_expanded(steps, program_ids):
     if not isinstance(steps, list) or not 1 <= len(steps) <= MAX_EXPANDED_STEPS:
-        raise WorkflowError("전체 반복 작업은 1~300단계로 지정하세요.")
+        raise WorkflowError(f"전체 반복 작업은 1~{MAX_EXPANDED_STEPS}단계로 지정하세요.")
     popup_owners = {target_key(step): step.get("owner_ref") for step in steps
         if isinstance(step, dict) and step.get("operation") == "wait_for_window" and "program_id" in step}
     def linked_image_checkpoint(image, checkpoint):
@@ -126,6 +164,7 @@ def validate_recipe(steps, variables, program_ids):
 
 
 def render_steps(task, inputs):
+    require_runnable(task)
     steps, variables = validate_recipe(task.get("steps"), task.get("variables", {}), task["program_ids"])
     try:
         values = resolve_values(variables, inputs)
@@ -136,10 +175,68 @@ def render_steps(task, inputs):
     return rendered, values
 
 
+def require_runnable(task):
+    """A durable authoring draft is never an executable recipe, on any entry path."""
+    review = task.get("recording_review", {})
+    if "draft" in task or review.get("warning_codes") and review.get("acknowledged") is not True:
+        raise DraftNotReady("저장된 초안입니다. computer_process_editor에서 보완할 단계와 녹화 경고를 확인한 뒤 저장하세요. 입력은 보내지 않았습니다.")
+
+
+def validate_draft_recipe(steps, variables, program_ids):
+    """Validate inert pending records without relaxing executable step validation."""
+    from image_targets import validate_image_target
+    from task_inputs import STEP_ID
+    if not isinstance(steps, list) or not 1 <= len(steps) <= MAX_STEPS:
+        raise WorkflowError(f"초안은 1~{MAX_RECIPE_STEPS}단계로 저장하세요.")
+    validate_specs(variables)
+    ids = set()
+    identified = list(steps)
+    for row in steps:
+        if isinstance(row, dict) and row.get("operation") == "foreach" and isinstance(row.get("steps"), list): identified.extend(row["steps"])
+    for row in identified:
+        if not isinstance(row, dict) or "step_id" not in row: continue
+        ident = row["step_id"]
+        if not isinstance(ident, str) or not STEP_ID.fullmatch(ident) or ident in ids:
+            raise WorkflowError("초안의 단계 ID가 잘못되었거나 중복됩니다.")
+        ids.add(ident)
+    executable = []
+    for step in steps:
+        if not isinstance(step, dict): raise WorkflowError("초안 단계 형식을 확인하세요.")
+        if step.get("operation") != "manual_entry":
+            executable.append(step)
+            continue
+        allowed = {"operation", "program_id", "window_ref", "step_id", "manual_reason", "repair_action", "image_target", "direction", "amount"}
+        if (set(step) - allowed or step.get("program_id") not in program_ids
+                or not isinstance(step.get("window_ref", "main"), str) or not WINDOW_REF.fullmatch(step.get("window_ref", "main"))
+                or not isinstance(step.get("manual_reason"), str) or not re.fullmatch(r"[a-z_]{1,80}", step["manual_reason"])
+                or "step_id" in step and (not isinstance(step["step_id"], str) or not STEP_ID.fullmatch(step["step_id"]))
+                or "repair_action" in step and step["repair_action"] not in {"click", "double_click", "right_click", "scroll", "wait_for_element"}):
+            raise WorkflowError("확인이 필요한 초안 단계에 저장할 수 없는 정보가 있습니다.")
+        if "image_target" in step: validate_image_target(step["image_target"])
+        if "direction" in step and step["direction"] not in {"up", "down", "left", "right"}: raise WorkflowError("스크롤 방향을 확인하세요.")
+        if "amount" in step and (type(step["amount"]) is not int or not 1 <= step["amount"] <= 100): raise WorkflowError("스크롤 양을 확인하세요.")
+    if executable: validate_recipe(executable, variables, program_ids)
+
+
+def validate_draft_metadata(draft, steps):
+    """Persist labels and repair provenance, never transient handles or actions."""
+    from task_inputs import STEP_ID
+    if (not isinstance(draft, dict) or set(draft) != {"format", "labels", "target_warning_steps", "persistent_semantic_warning"}
+            or draft.get("format") != "computer-process-draft/v1"
+            or not isinstance(draft.get("labels"), list) or len(draft["labels"]) != len(steps)
+            or any(not isinstance(label, str) or len(label) > 4000 for label in draft["labels"])
+            or not isinstance(draft.get("target_warning_steps"), list) or len(draft["target_warning_steps"]) > MAX_RECIPE_STEPS
+            or any(not isinstance(value, str) or not STEP_ID.fullmatch(value) for value in draft["target_warning_steps"])
+            or len(set(draft["target_warning_steps"])) != len(draft["target_warning_steps"])
+            or not set(draft["target_warning_steps"]) <= {s.get("step_id") for s in steps if s.get("operation") == "manual_entry"}
+            or type(draft.get("persistent_semantic_warning")) is not bool):
+        raise WorkflowError("저장된 초안의 복구 정보를 확인하세요. 기존 파일은 보존됩니다.")
+
+
 class WorkflowRunner:
     FIELDS = {"format", "run_id", "task_id", "revision", "recipe_hash", "inputs_hash", "created_at", "updated_at",
               "completed_steps", "total_steps", "pending_step", "status", "task_verified", "session_id", "duration_ms"}
-    OPTIONAL_FIELDS = {"checkpoint", "image_verification", "step_delivery", "snapshot_hash", "step_receipts", "visual_assessments", "target_recovery"}
+    OPTIONAL_FIELDS = {"checkpoint", "image_verification", "step_delivery", "snapshot_hash", "step_receipts", "visual_assessments", "target_recovery", "continuation"}
     def __init__(self, state_dir):
         self.root = Path(state_dir) / "workflows"
         from repeat_profiles import RepeatProfiles
@@ -165,7 +262,7 @@ class WorkflowRunner:
     def progress(self, run_id):
         path = self._path(run_id)
         try:
-            if path.stat().st_size > 256000:
+            if path.stat().st_size > MAX_RUN_RECORD_BYTES:
                 raise ValueError("size")
             value = json.loads(path.read_text(encoding="utf-8"))
             if (not isinstance(value, dict) or not self.FIELDS <= set(value) or set(value)-self.FIELDS-self.OPTIONAL_FIELDS
@@ -229,7 +326,8 @@ class WorkflowRunner:
                             or receipt["step_index"] != index or not isinstance(receipt["step_id"], str)
                             or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}", receipt["step_id"])
                             or not (receipt["iteration_id"] is None or isinstance(receipt["iteration_id"], str)
-                                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}:[1-9][0-9]{0,2}", receipt["iteration_id"]))
+                                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}:[1-9][0-9]{0,5}", receipt["iteration_id"])
+                                and int(receipt["iteration_id"].rsplit(":", 1)[1]) <= MAX_ITERATIONS)
                             or receipt["status"] not in {"verified", "awaiting_verification"}):
                         raise ValueError("step_receipts")
             if "visual_assessments" in value:
@@ -241,6 +339,16 @@ class WorkflowRunner:
                             or not isinstance(proof["review_id"], str) or not re.fullmatch(r"review-[a-f0-9]{32}", proof["review_id"])
                             or proof["evidence_level"] != "visual_assessed"):
                         raise ValueError("visual_assessments")
+            if "continuation" in value:
+                continuation = value["continuation"]
+                if (not isinstance(continuation, dict) or set(continuation) != {"reason", "session_id"}
+                        or continuation["reason"] not in {"session_budget_exhausted", "workflow_chunk_complete"}
+                        or continuation["session_id"] != value["session_id"]
+                        or value["status"] != "interrupted" or value["pending_step"] is not None
+                        or value["completed_steps"] >= value["total_steps"]
+                        or "step_delivery" in value or "step_receipts" not in value
+                        or any(receipt["status"] != "verified" for receipt in value["step_receipts"])):
+                    raise ValueError("continuation")
             return value
         except (OSError, ValueError, AttributeError, TypeError):
             raise WorkflowError("실행 기록을 읽지 못했습니다. 원본은 유지됩니다.") from None
@@ -316,7 +424,7 @@ class WorkflowRunner:
         if "snapshot_hash" not in record: return None  # Existing v1 records retain strict hash checks.
         try:
             path = self._snapshot_path(run_id)
-            if path.stat().st_size > 32*1024*1024: raise ValueError("size")
+            if path.stat().st_size > MAX_SNAPSHOT_BYTES: raise ValueError("size")
             snapshot = json.loads(path.read_text(encoding="utf-8"))
             if (not isinstance(snapshot, dict) or set(snapshot) != {"format", "run_id", "task", "inputs"}
                     or snapshot["format"] != "computer-workflow-snapshot/v1" or snapshot["run_id"] != run_id
@@ -361,13 +469,15 @@ class WorkflowRunner:
                               "standard_requested" if execution_mode == "standard" else "first_run_or_changed_recipe",
                     "fixed_delay_ms": sum(s.get("duration_ms", 0) for s in task.get("steps", []) if s.get("operation") == "delay")}
                 try:
-                    # Incomplete/uncertain work disables the optimization until
-                    # a later full verified run. It never triggers a replay.
-                    self.repeat_profiles.record(signature, answer)
+                    # Uncertain work disables the optimization until a later
+                    # verified run. A deliberate continuation is not a failed
+                    # recipe and leaves its existing profile unchanged.
+                    if not answer.get("continuation"):
+                        self.repeat_profiles.record(signature, answer)
                 except (OSError, ValueError):
                     answer["execution"]["profile_saved"] = False
                 else:
-                    answer["execution"]["profile_saved"] = True
+                    answer["execution"]["profile_saved"] = not bool(answer.get("continuation"))
                 return answer
             except Exception:
                 # Validation/binding failures before the persisted run also
@@ -537,11 +647,21 @@ class WorkflowRunner:
                     "pending_step": None, "status": "running", "task_verified": False}
                 snapshot = {"format": "computer-workflow-snapshot/v1", "run_id": run_id,
                             "task": copy.deepcopy(task), "inputs": copy.deepcopy(values)}
+                if not _snapshot_fits(snapshot):
+                    raise WorkflowError("이어가기에 필요한 실행 원본이 너무 큽니다. 목록이나 이미지 수를 나눠 실행하세요. 아직 입력하지 않았습니다.")
                 snapshot_path = self._snapshot_path(run_id)
                 if snapshot_path.exists(): raise WorkflowError("동일 실행 원본이 이미 존재합니다. 새 실행으로 시작하세요.")
                 atomic_json(snapshot_path, snapshot)
                 record["snapshot_hash"] = digest(snapshot)
             record["session_id"] = runtime.id
+            record.pop("continuation", None)
+            # Receipts are derived from the frozen recipe and durable completed
+            # cursor. Rebuild once when entering/resuming, then append only new
+            # completions. In-flight checkpoints need not rewrite the whole
+            # completed history before and after every input.
+            record["step_receipts"] = []
+            awaiting_receipts = []
+            chunk_start = record["completed_steps"]
             engine = Operations(runtime)
             started = time.monotonic()
             latest = None
@@ -585,13 +705,35 @@ class WorkflowRunner:
                     return
                 bindings[key] = dict(target)
                 resolve(item)  # Recheck allowed executable and current HWND owner.
+            def sync_receipts():
+                receipts = record["step_receipts"]
+                for index in range(len(receipts), record["completed_steps"]):
+                    step = steps[index]
+                    if step["operation"] == "checkpoint":
+                        for pending in awaiting_receipts: receipts[pending]["status"] = "verified"
+                        awaiting_receipts.clear()
+                    deferred = deferred_input(step)
+                    receipts.append({"step_index": index, "step_id": step.get("step_id", "step-"+str(index+1)),
+                        "iteration_id": step.get("iteration_id"), "status": "awaiting_verification" if deferred else "verified"})
+                    if deferred: awaiting_receipts.append(index)
+
             def save(status):
                 record.update(status=status, updated_at=utc_now(), duration_ms=round((time.monotonic()-started)*1000, 2))
-                record["step_receipts"] = [{"step_index": index, "step_id": step.get("step_id", "step-"+str(index+1)),
-                    "iteration_id": step.get("iteration_id"), "status": "awaiting_verification" if deferred_input(step)
-                        and not any(later.get("operation") == "checkpoint" for later in steps[index+1:record["completed_steps"]]) else "verified"}
-                    for index, step in enumerate(steps[:record["completed_steps"]])]
-                atomic_json(path, record)
+                sync_receipts()
+                atomic_json(path, {key: value for key, value in record.items() if key != "step_receipts"}
+                    if status == "running" else record)
+
+            def continuation(reason):
+                # Called only at a known unattempted next-step boundary, after
+                # all earlier deliveries have their required verification.
+                record["pending_step"] = None
+                record.pop("step_delivery", None)
+                record["continuation"] = {"reason": reason, "session_id": runtime.id}
+                save("interrupted")
+                return {**record, "input_dispatched": False, "resume_run_id": run_id,
+                    "diagnostic": {"code": reason, "automatic_replay": False},
+                    "next_tool": "computer_run_task", "next_arguments": {"task_id": task["id"], "resume_run_id": run_id},
+                    "next_step": "완료한 단계는 저장했습니다. 같은 resume_run_id로 이어가면 현재 결과를 확인한 뒤 다음 단계부터 진행합니다. 완료한 입력은 반복하지 않습니다."}
             def progress_event(phase, index=None, operation=None):
                 report = getattr(runtime, "report_progress", None)
                 if callable(report):
@@ -823,7 +965,14 @@ class WorkflowRunner:
                             return {**record, "last_result": latest, "next_step": "마지막 확인 지점의 현재 화면이 달라 이어가기를 중지했습니다."}
                 for index in range(record["completed_steps"], len(steps)):
                     stage = "session_check"
+                    sync_receipts()
+                    if not awaiting_receipts and _session_budget_exhausted(runtime):
+                        return continuation("session_budget_exhausted")
                     runtime.check_active()
+                    if not awaiting_receipts and record["completed_steps"] > chunk_start and (
+                            record["completed_steps"] - chunk_start >= RUN_CHUNK_STEPS
+                            or time.monotonic() - started >= RUN_CHUNK_SECONDS):
+                        return continuation("workflow_chunk_complete")
                     item = steps[index]
                     progress_event("running_step", index, item["operation"])
                     stage = "window_binding"
@@ -882,6 +1031,13 @@ class WorkflowRunner:
                                 "message": "녹화한 첫 동작의 대상을 현재 화면에서 확인하지 못했습니다. "
                                     "해당 업무 화면을 연 뒤 같은 실행에서 이어가세요. 아직 업무 입력을 보내지 않았으며 재녹화는 필요하지 않습니다."}}
                     adopt_transition(item, latest)
+                    # Foreground activation can consume the final authorized
+                    # action before the actual input. An explicit non-delivery
+                    # result is safe to continue; any partial/unknown business
+                    # input below retains the ordinary review-only recovery.
+                    if (latest.get("task_verified") is not True and sent is False
+                            and not awaiting_receipts and _session_budget_exhausted(runtime)):
+                        return continuation("session_budget_exhausted")
                     if latest.get("task_verified") is not True and not (deferred_input(item)
                             and latest.get("verification_deferred") is True and latest.get("input_dispatched") is True):
                         progress_event("needs_review", index, item["operation"])
@@ -923,11 +1079,16 @@ class WorkflowRunner:
                         **({"business_result_verified": False} if all(s["operation"] in {"wait_for_image", "delay", "wait_for_window"} for s in steps) else {}),
                         **({"checkpoint_images_verified": False} if any(s["operation"] == "checkpoint" for s in steps) else {})}
             except BindingError:
+                if record["pending_step"] is None and not awaiting_receipts and _session_budget_exhausted(runtime):
+                    return continuation("session_budget_exhausted")
                 record["task_verified"] = False
                 save("needs_binding")
                 return {**record, "diagnostic": {"code": "needs_binding", "automatic_replay": False},
                         "next_step": "현재 창을 다시 관찰하고 targets를 연결한 뒤 같은 run_id로 이어가세요. 창이 없거나 모호한 단계의 입력은 보내지 않았습니다."}
             except Exception as error:
+                if (stage in {"session_check", "window_binding"} and record["pending_step"] is None
+                        and not awaiting_receipts and _session_budget_exhausted(runtime)):
+                    return continuation("session_budget_exhausted")
                 record["task_verified"] = False
                 if stage == "checkpoint_before_input":
                     # The operation was never called. A checkpoint write failure

@@ -215,7 +215,7 @@ class TypedInputTests(unittest.TestCase):
         task = self.task({"devices": {"type": "list", "items": {"type": "text"}}}, "unused")
         child = task["steps"][0]
         task["steps"] = [{"operation": "foreach", "input": "devices", "item": "device", "steps": [child]}]
-        for value in ([], ["item"]*101, [123]):
+        for value in ([], ["item"]*1001, [123]):
             with self.subTest(length=len(value)), self.assertRaises(ValueError): render_steps(task, {"devices": value})
         task["steps"][0]["steps"] = [copy.deepcopy(task["steps"][0])]
         with self.assertRaises(ValueError): render_steps(task, {"devices": ["item"]})

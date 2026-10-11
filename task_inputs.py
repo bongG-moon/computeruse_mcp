@@ -9,8 +9,13 @@ import re
 NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,39}\Z")
 STEP_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}\Z")
 PLACEHOLDER = re.compile(r"\$\{([A-Za-z][A-Za-z0-9_]{0,39})\}")
-MAX_EXPANDED_STEPS = 300
-MAX_ITERATIONS = 100
+# Technical bounds for finite, declarative work. Repetition stores one body;
+# it does not require the user to copy that body for every input item.
+MAX_EXPANDED_STEPS = 10000
+MAX_RECIPE_STEPS = 1000
+MAX_ITERATIONS = 1000
+MAX_RECORDING_EVENTS = 300
+MAX_RECORDED_WINDOWS = 300
 
 
 class InputError(ValueError):
@@ -61,7 +66,7 @@ def validate_spec(spec, name, *, item=False):
             raise InputError("선택 입력에는 중복 없는 values 목록이 필요합니다: " + name)
     if kind == "list":
         if type(spec.get("max_items", MAX_ITERATIONS)) is not int or not 1 <= spec.get("max_items", MAX_ITERATIONS) <= MAX_ITERATIONS:
-            raise InputError("목록 반복은 최대 100개입니다: " + name)
+            raise InputError(f"목록 반복은 최대 {MAX_ITERATIONS:,}개입니다: " + name)
         validate_spec(spec.get("items"), name, item=True)
     for field in ("minimum", "maximum"):
         if field in spec and (type(spec[field]) not in (int, float) or not math.isfinite(spec[field]) or abs(spec[field]) > 1e15):
@@ -129,8 +134,12 @@ def substitute_step(step, values, specs):
 
 
 def expand(steps, specs, values):
-    if not isinstance(steps, list) or not 1 <= len(steps) <= 30: raise InputError("작업은 1~30개의 단계 또는 반복 그룹으로 지정하세요.")
+    if not isinstance(steps, list) or not 1 <= len(steps) <= MAX_RECIPE_STEPS: raise InputError(f"작업은 1~{MAX_RECIPE_STEPS}개의 단계 또는 반복 그룹으로 지정하세요.")
     seen, result = set(), []
+    def reserve(count):
+        # Reject excessive expansion before rendering/copying its payload.
+        if len(result) + count > MAX_EXPANDED_STEPS:
+            raise InputError(f"반복을 펼친 전체 동작은 최대 {MAX_EXPANDED_STEPS:,}단계입니다. 반복 목록을 나누어 실행하세요.")
     def check_id(step):
         ident = step.get("step_id")
         if ident is not None:
@@ -140,6 +149,7 @@ def expand(steps, specs, values):
         if not isinstance(step, dict): raise InputError("작업 단계의 형식을 확인하세요.")
         check_id(step)
         if step.get("operation") != "foreach":
+            reserve(1)
             result.append(substitute_step(step, values, specs))
             continue
         if set(step)-{"operation", "step_id", "input", "item", "steps"}:
@@ -147,17 +157,20 @@ def expand(steps, specs, values):
         name, item, body = step.get("input"), step.get("item"), step.get("steps")
         if (not isinstance(name, str) or name not in specs or specs[name].get("type") != "list"
                 or not isinstance(item, str) or not NAME.fullmatch(item) or item in specs
-                or not isinstance(body, list) or not 1 <= len(body) <= 30):
-            raise InputError("foreach에는 목록 입력과 고유한 item 이름, 1~30단계가 필요합니다.")
+                or not isinstance(body, list) or not 1 <= len(body) <= MAX_RECIPE_STEPS):
+            raise InputError(f"foreach에는 목록 입력과 고유한 item 이름, 1~{MAX_RECIPE_STEPS}단계가 필요합니다.")
         for child in body:
             if not isinstance(child, dict) or child.get("operation") in {"foreach", "wait_for_window"}:
                 raise InputError("반복 안에는 중첩 반복이나 팝업 재연결을 사용할 수 없습니다.")
             check_id(child)
+        items = values.get(name)
+        if not isinstance(items, list) or not 1 <= len(items) <= specs[name].get("max_items", MAX_ITERATIONS):
+            raise InputError("반복에 사용할 목록 입력의 개수와 형식을 확인하세요: " + name)
+        reserve(len(items) * len(body))
         child_specs = {**specs, item: specs[name]["items"]}
-        for iteration, value in enumerate(values[name]):
+        for iteration, value in enumerate(items):
             for child in body:
                 rendered = substitute_step(child, {**values, item: value}, child_specs)
                 rendered["iteration_id"] = (step.get("step_id") or "group-"+str(index+1)) + ":" + str(iteration+1)
                 result.append(rendered)
-    if len(result) > MAX_EXPANDED_STEPS: raise InputError("목록을 펼친 전체 동작은 최대 300단계입니다.")
     return result

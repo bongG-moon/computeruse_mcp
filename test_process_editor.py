@@ -15,6 +15,7 @@ from unittest import mock
 
 from operations import OperationError
 from process_editor import ProcessDraft, ProcessEditors, task_view
+from task_inputs import MAX_RECIPE_STEPS, MAX_RECORDING_EVENTS, MAX_RECORDED_WINDOWS
 from server import ComputerManager
 from test_learning import TARGET
 from test_learning_tools import MutableRuntime, FIELD_SELECTOR
@@ -54,6 +55,25 @@ class DraftTests(unittest.TestCase):
         serialized = json.dumps(self.draft.steps)
         for forbidden in ("element_index", "parent_index", "element_token", "window_id", '"pid"', "TRANSIENT", "PRIVATE", "selection_id"):
             self.assertNotIn(forbidden, serialized)
+
+    def test_thousand_unicode_previews_fit_ipc_without_truncating_saved_inputs(self):
+        original = "복잡한 업무 조건😀" * 1000
+        self.draft.steps = [{"operation": "set_value", "program_id": "editor", "value": original,
+            "selector": {"name": "입력 대상😀" * 200},
+            "expect": [{"selector": {"name": "확인 대상😀" * 200}, "property": "value", "equals": original}]} for _ in range(MAX_RECIPE_STEPS)]
+        self.draft.labels = ["선택한 요소😀" * 200] * MAX_RECIPE_STEPS
+        self.draft.programs[0]["label"] = "프로그램😀" * 200
+        self.draft.targets[("editor", "main")]["label"] = self.draft.programs[0]["label"]
+        summaries = self.draft.summaries()
+        payload = {"nonce": "a" * 64, "timeout_seconds": 600, "max_steps": MAX_RECIPE_STEPS,
+            "programs": self.draft.program_views(), "draft": {"name": "large task", "description": "", "steps": summaries,
+                "recording_review": self.draft.recording_review()}}
+        encoded = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        self.assertLess(len(encoded), 2 * 1024 * 1024)
+        self.assertEqual(len(summaries), 1000)
+        self.assertTrue(summaries[-1]["detail"].endswith("…"))
+        self.assertEqual(self.draft.steps[-1]["value"], original)
+        self.assertEqual(self.draft.steps[-1]["expect"][0]["equals"], original)
 
     def test_direct_selector_or_handle_cannot_override_human_selection(self):
         for extra in ({"selector": {"name": "other"}}, {"element_token": "foreign"}, {"element_index": 2}):
@@ -409,6 +429,15 @@ class RecordingSemanticTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(OperationError):
                 ProcessEditors._recording_progress({**progress, **invalid}, 888)
 
+    def test_recording_progress_accepts_three_hundred_events_but_rejects_overflow(self):
+        progress = {"helper_pid": 888, "state": "review", "event_count": MAX_RECORDING_EVENTS,
+            "manual_count": MAX_RECORDING_EVENTS, "max_events": MAX_RECORDING_EVENTS,
+            "warning_codes": [], "probe": {"hooks": "available", "uia": "available"}}
+        self.assertEqual(ProcessEditors._recording_progress(progress, 888)["event_count"], 300)
+        for field in ("event_count", "manual_count", "max_events"):
+            with self.subTest(field=field), self.assertRaises(OperationError):
+                ProcessEditors._recording_progress({**progress, field: MAX_RECORDING_EVENTS + 1}, 888)
+
 
 class ImageDraftTests(unittest.TestCase):
     def setUp(self):
@@ -476,11 +505,55 @@ class ImageDraftTests(unittest.TestCase):
 
     def test_recording_capacity_includes_each_review_checkpoint(self):
         event = {**image_choice(), "operation": "click", "program_id": "editor"}
-        self.draft.recorded([event] * 15)
-        self.assertEqual(len(self.draft.steps), 30)
+        self.draft.recorded([event] * MAX_RECORDING_EVENTS)
+        self.draft.recorded([event] * (MAX_RECIPE_STEPS // 2 - MAX_RECORDING_EVENTS))
+        self.assertEqual(len(self.draft.steps), MAX_RECIPE_STEPS)
         with self.assertRaises((OperationError, ValueError)):
             self.draft.recorded([event])
-        self.assertEqual(len(self.draft.steps), 30)
+        self.assertEqual(len(self.draft.steps), MAX_RECIPE_STEPS)
+
+    def test_recording_packet_and_popup_boundaries_preserve_existing_draft(self):
+        event = {**image_choice(), "operation": "click", "program_id": "editor"}
+        with self.assertRaises(OperationError):
+            self.draft.recorded([event] * (MAX_RECORDING_EVENTS + 1))
+        self.assertEqual(self.draft.steps, [])
+        windows = [{"program_id": "editor", "window_ref": "popup" + str(index + 1), "owner_ref": "main", "pid": TARGET["pid"],
+            "window_id": TARGET["window_id"] + index + 1, "owner_window_id": TARGET["window_id"],
+            "owner_verified": True, "closed": True, "title": "", "class_name": "ComboLBox"} for index in range(MAX_RECORDED_WINDOWS)]
+        self.assertEqual(len(self.draft.recorded_windows(windows)), MAX_RECORDED_WINDOWS)
+        with self.assertRaises(OperationError):
+            self.draft.recorded_windows(windows + [windows[-1]])
+        self.assertEqual(self.draft.steps, [])
+
+    def test_recording_payload_overflow_preserves_prior_image_and_marks_only_suffix_for_repair(self):
+        event = {**image_choice(), "operation": "click", "program_id": "editor"}
+        pending = {"operation": "manual_entry", "requested_operation": "click", "program_id": "editor",
+            "reason": "recording_payload_limit", "capture_issue": "recording_payload_limit"}
+        self.draft.recorded([event, pending], warning_codes=["recording_payload_limit"])
+        self.assertEqual(len(self.draft.steps), 4)
+        self.assertEqual(self.draft.steps[0]["operation"], "image_click")
+        self.assertIn("image_target", self.draft.steps[0])
+        self.assertEqual(self.draft.steps[2]["operation"], "manual_entry")
+        self.assertEqual(self.draft.steps[2]["manual_reason"], "recording_payload_limit")
+        self.assertEqual(self.draft.steps[2]["repair_action"], "click")
+        self.assertFalse(self.draft.readiness()["runnable"])
+        self.assertIn("이미지 기록 용량", self.draft.summaries()[2]["detail"])
+        self.draft.validate(allow_pending=True)
+
+    def test_seven_closed_popup_episodes_import_and_reopen_without_live_targets(self):
+        windows, events = [], []
+        for index in range(7):
+            ref = "popup" + str(index + 1)
+            windows.append({"program_id": "editor", "window_ref": ref, "owner_ref": "main", "pid": TARGET["pid"],
+                "window_id": TARGET["window_id"] + index + 1, "owner_window_id": TARGET["window_id"],
+                "owner_verified": True, "closed": True, "title": "", "class_name": "ComboLBox"})
+            events.append({**image_choice(), "operation": "click", "program_id": "editor", "window_ref": ref})
+        self.draft.recorded(events, windows=windows)
+        self.assertEqual(len(self.draft.steps), 21)
+        self.assertEqual(sum(step["operation"] == "wait_for_window" for step in self.draft.steps), 7)
+        reopened = ProcessDraft([self.program], {"steps": self.draft.steps})
+        self.assertEqual(len(reopened.targets), 8)
+        self.assertTrue(all(row["window_id"] == 0 for key, row in reopened.targets.items() if key[1] != "main"))
 
     def test_unsupported_drag_and_missing_image_remain_reviewable_and_cannot_become_text(self):
         self.draft.recorded([{**image_choice(), "program_id": "editor", "operation": "manual_entry", "reason": "drag_requires_manual_setup"},
@@ -648,6 +721,27 @@ class EditorIPCTests(unittest.TestCase):
         self.assertEqual(answer["selection"]["recognition"], "uia")
         old_picker.assert_not_called()
 
+    def test_native_candidate_succeeds_when_small_image_quality_check_failed(self):
+        self.context(); self.start()
+        chosen = {**TARGET, "human_confirmed": True, "status": "selected", "native_target": native_choice(), "capture_issue": "template_low_detail"}
+        with mock.patch.object(self.editors, "_visual", return_value=chosen):
+            answer = self.command("pick_target", {**self.args["targets"][0], "purpose": "action"})
+        self.assertEqual(answer["status"], "ok", answer)
+        self.assertEqual(answer["selection"]["recognition"], "uia")
+        self.assertNotIn("thumbnail_png", answer["selection"])
+        self.assertFalse(answer["recording_review"]["partial"])
+
+    def test_unmatched_native_without_image_returns_recoverable_diagnostic(self):
+        self.context(); self.start()
+        chosen = {**TARGET, "human_confirmed": True, "status": "selected", "native_target": native_choice(), "capture_issue": "image_ambiguous"}
+        with mock.patch.object(self.editors, "_visual", return_value=chosen), \
+                mock.patch.object(ProcessDraft, "remember", side_effect=OperationError("missing", "picker_not_found")):
+            answer = self.command("pick_target", {**self.args["targets"][0], "purpose": "action"})
+        self.assertEqual(answer["status"], "error", answer)
+        self.assertEqual(answer["code"], "image_ambiguous")
+        self.assertIn("같은 모양", answer["message"])
+        self.assertEqual(answer["steps"], [])
+
     def test_trial_uses_isolated_draft_does_not_save_or_claim_unknown_success(self):
         self.context(); job = self.start()
         self.command("add_step", {**self.args["targets"][0], "action": "delay", "seconds": .1})
@@ -688,6 +782,36 @@ class EditorIPCTests(unittest.TestCase):
             self.editors.resume_test(job["editor_id"], self.runtime, observation_review=review)
         signal.assert_not_called()
         self.assertEqual(self.editors.test_runner.call_count, count)
+
+    def test_trial_chunk_can_resume_same_frozen_draft_without_a_review(self):
+        self.context(); job = self.start()
+        self.command("add_step", {**self.args["targets"][0], "action": "delay", "seconds": .1})
+        continuation = {"reason": "workflow_chunk_complete", "session_id": "trial-session"}
+        paused = {"status": "interrupted", "task_verified": False, "run_id": "trial-chunk", "pending_step": None, "continuation": continuation}
+        self.editors.test_runner = mock.Mock(return_value=paused)
+        answer = self.command("test_run", {"name": "chunk", "description": ""})
+        self.assertEqual(answer["test_result"]["continuation"], continuation)
+        with mock.patch.object(self.editors, "_trial_signal"), self.assertRaises(OperationError):
+            self.editors.resume_test(job["editor_id"], self.runtime, observation_review={"token": "unexpected"})
+        self.editors.test_runner.return_value = {"status": "verified", "task_verified": True, "run_id": "trial-chunk"}
+        with mock.patch.object(self.editors, "_trial_signal"):
+            result = self.editors.resume_test(job["editor_id"], self.runtime)
+        self.assertTrue(result["last_test"]["task_verified"])
+        self.assertEqual(self.editors.test_runner.call_args.kwargs["resume_run_id"], "trial-chunk")
+        self.assertIsNone(self.editors.test_runner.call_args.kwargs["observation_review"])
+        self.assertEqual(self.manager.tasks.all(), [])
+
+    def test_trial_unknown_or_session_budget_interrupt_is_not_chunk_resume(self):
+        self.context(); job = self.start()
+        self.command("add_step", {**self.args["targets"][0], "action": "delay", "seconds": .1})
+        for reason, pending in (("session_budget_exhausted", None), ("workflow_chunk_complete", 3)):
+            self.editors.test_runner = mock.Mock(return_value={"status": "interrupted", "task_verified": False, "run_id": "trial-chunk",
+                "pending_step": pending, "continuation": {"reason": reason, "session_id": "trial-session"}})
+            self.command("test_run", {"name": "chunk", "description": ""})
+            with self.subTest(reason=reason, pending=pending), mock.patch.object(self.editors, "_trial_signal") as signal, self.assertRaises(OperationError):
+                self.editors.resume_test(job["editor_id"], self.runtime)
+            signal.assert_not_called()
+            self.assertEqual(self.editors.test_runner.call_count, 1)
 
     def test_trial_resume_hidden_ack_failure_does_not_dispatch_or_mask_error(self):
         self.context(); job = self.start()
@@ -1041,21 +1165,63 @@ class EditorIPCTests(unittest.TestCase):
         self.assertEqual(self.runtime.mutations, [])
         self.status(job, cancel=True); self.terminal(job)
 
-    def test_recording_is_reviewable_not_saved_and_unknown_input_blocks_save(self):
+    def test_recording_reserves_remaining_step_capacity_without_changing_configuration(self):
+        self.context(); job = self.start()
+        draft = self.editors.jobs[job["editor_id"]]["draft"]
+        event = {**image_choice(), "operation": "click", "program_id": "editor"}
+        for count, expected in ((970, 10), (997, 1), (998, 0)):
+            draft = self.editors.jobs[job["editor_id"]]["draft"]
+            draft.steps = [{"operation": "delay", "program_id": "editor", "duration_ms": 0} for _ in range(count)]
+            draft.labels = ["현재 창"] * count
+            with self.subTest(count=count), mock.patch("replay_preflight.image_replay_preflight", return_value={"ready_for_input": True}), \
+                    mock.patch.object(self.editors, "_visual", return_value={"events": [event], "nonce": str(count)}) as visual:
+                result = self.command("record", {})
+                if expected:
+                    self.assertEqual(result["status"], "ok", result)
+                    self.assertEqual(visual.call_args.args[2]["max_events"], expected)
+                    self.assertEqual(len(self.editors.jobs[job["editor_id"]]["draft"].steps), count + 2)
+                else:
+                    self.assertNotEqual(result["status"], "ok")
+                    visual.assert_not_called()
+                    self.assertEqual(len(draft.steps), count)
+        self.status(job, cancel=True); self.terminal(job)
+
+    def test_recording_pending_input_saves_reopens_and_repairs_same_task(self):
         self.context(); job = self.start()
         event = {**image_choice(), "operation": "manual_entry", "program_id": "editor"}
         with mock.patch("replay_preflight.image_replay_preflight", return_value={"ready_for_input": True}), \
                 mock.patch.object(self.editors, "_visual", return_value={"events": [event]}) as visual:
             recorded = self.command("record", {})
         self.assertEqual(recorded["status"], "ok"); self.assertTrue(recorded["steps"][0]["requires_input"])
-        self.assertEqual(visual.call_args.args[2]["max_events"], 12)  # Five popup waits fit alongside review checkpoints.
+        self.assertEqual(visual.call_args.args[2]["max_events"], MAX_RECORDING_EVENTS)  # Each event reserves input, review and popup wait.
         self.assertEqual(self.manager.tasks.all(), [])
-        rejected = self.command("save", {"name": "recorded", "description": ""})
-        self.assertEqual(rejected["code"], "recording_input_required")
+        drafted = self.command("save", {"name": "recorded", "description": ""})
+        self.assertEqual(drafted["status"], "ok", drafted)
+        self.assertFalse(drafted["saved_task"]["runnable"])
+        self.assertEqual(drafted["saved_task"]["unresolved_steps"], 1)
+        task_id = drafted["saved_task"]["id"]
+        original = self.manager.tasks.get(task_id)
+        atomic_json(self.paths["response"], {"nonce": self.nonce, "status": "saved"})
+        self.terminal(job)
+        self.child = Child(); self.seq = 0
+        job = self.start(task_id=task_id)
+        self.assertEqual(job["status"], "editing", job)
+        self.assertTrue(job["steps"][0]["requires_input"])
+        self.assertEqual(self.editors.jobs[job["editor_id"]]["draft"].steps, original["steps"])
+        with mock.patch.object(self.editors, "test_runner") as run:
+            blocked = self.command("test_run", {"name": "recorded", "description": ""})
+        self.assertEqual(blocked["code"], "recording_input_required")
+        run.assert_not_called()
         resolved = self.command("resolve_input", {"index": 0, "value": "intended"})
         self.assertEqual(resolved["status"], "ok")
         saved = self.command("save", {"name": "recorded", "description": ""})
         self.assertEqual(saved["status"], "ok")
+        self.assertEqual(saved["saved_task"]["id"], task_id)
+        self.assertTrue(saved["saved_task"]["runnable"])
+        final = self.manager.tasks.get(task_id)
+        self.assertNotIn("draft", final)
+        self.assertEqual(final["steps"][0]["step_id"], original["steps"][0]["step_id"])
+        self.assertEqual(final["steps"][1:], original["steps"][1:])
         value = self.manager.call("computer_get_task", {"id": saved["saved_task"]["id"]})
         self.assertNotIn("template_png", json.dumps(value))
         self.assertEqual(self.runtime.mutations, [])
@@ -1078,6 +1244,37 @@ class EditorIPCTests(unittest.TestCase):
         visual.assert_not_called()
         self.assertEqual(draft.steps, previous)
         self.assertEqual(self.status(job)["recording_preflight"][0]["diagnostic"], blocked["diagnostic"])
+
+    def test_capture_backlog_partial_recording_saves_and_reopens_reviewable_draft(self):
+        self.context(); job = self.start()
+        receipt = {"events": [{**image_choice(), "operation": "click", "program_id": "editor"}],
+                   "warnings": ["recording_capture_backlog"]}
+        with mock.patch("replay_preflight.image_replay_preflight", return_value={"ready_for_input": True}), \
+                mock.patch.object(self.editors, "_visual", return_value=receipt):
+            recorded = self.command("record", {})
+        self.assertEqual(recorded["status"], "ok", recorded)
+        self.assertEqual(recorded["recording_review"]["warning_codes"], ["recording_capture_backlog"])
+        self.assertIn("캡처 처리 대기", recorded["recording_review"]["messages"][0])
+        self.assertEqual(len(recorded["steps"]), 2)
+        saved = self.command("save", {"name": "partial backlog", "description": ""})
+        self.assertEqual(saved["status"], "ok", saved)
+        self.assertFalse(saved["saved_task"]["runnable"])
+        self.assertTrue(saved["saved_task"]["review_required"])
+        task = self.manager.tasks.get(saved["saved_task"]["id"])
+        self.assertEqual(task["recording_review"]["warning_codes"], ["recording_capture_backlog"])
+        self.assertFalse(task["recording_review"]["acknowledged"])
+        self.assertEqual(task["steps"][0]["image_target"]["template_png"], receipt["events"][0]["template_png"])
+        atomic_json(self.paths["response"], {"nonce": self.nonce, "status": "saved"})
+        self.terminal(job)
+        self.child = Child(); self.seq = 0
+        reopened = self.start(task_id=task["id"])
+        self.assertEqual(reopened["status"], "editing", reopened)
+        with mock.patch.object(self.editors, "test_runner") as run:
+            blocked = self.command("test_run", {"name": "partial backlog", "description": ""})
+        self.assertEqual(blocked["code"], "recording_review_required")
+        run.assert_not_called()
+        self.status(reopened, cancel=True); self.terminal(reopened)
+        self.assertEqual(self.manager.tasks.get(task["id"]), task)
 
     def test_recording_receipt_reanalysis_is_readonly_and_never_duplicates_or_overwrites_edits(self):
         self.context(); opened = self.start(); job = self.editors.jobs[opened["editor_id"]]

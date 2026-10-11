@@ -20,7 +20,7 @@ class PackageSourceTests(unittest.TestCase):
     def test_sources_include_new_modules_all_tests_and_no_private_artifacts(self):
         files = set(build_portable.archive_source_files())
         required = {"easy_api.py", "interaction.py", "image_pixels.py", "task_inputs.py", "task_revision.py",
-            "visual_review.py", "visual_targets.py", "builtin_programs.py", "privileges.py", "REDESIGN_PLAN.html", "CHANGES_0.16.0.html"}
+            "visual_review.py", "visual_targets.py", "builtin_programs.py", "privileges.py", "REDESIGN_PLAN.html", f"CHANGES_{VERSION}.html"}
         self.assertTrue(required <= set(build_portable.source_files()))
         self.assertFalse({p.name for p in build_portable.SOURCE.glob("test_*.py")} - files)
         for name in files:

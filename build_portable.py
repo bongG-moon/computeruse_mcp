@@ -57,10 +57,12 @@ APP_FILES = (
     "window_transitions.py", "program_registration.py",
     "execution_progress.py", "image_delivery.py", "CHANGES_0.14.0.html", "CHANGES_0.14.1.html",
     "recording_windows.py",
-    "replay_preflight.py", "checkpoint_review.py", "CHANGES_0.15.0.html", "CHANGES_0.16.0.html",
+    "replay_preflight.py", "checkpoint_review.py", "CHANGES_0.15.0.html", "CHANGES_0.16.0.html", "CHANGES_0.17.0.html",
 )
 OPTIONAL_APP_FILES = ()
 SOURCE_SUPPORT_FILES = (
+    "test_task_capacity.py", "test_workflow_capacity.py",
+    "acceptance_phase1_recording.py", "fixtures/Phase1RecordingFixture.cs", "fixtures/PHASE1_ACCEPTANCE.md",
     "test_hosted_windows.py", "test_hosted_guard.py", "test_visual_targets.py", "test_workflow_target_review.py",
     "test_interaction.py", "test_workflow_visual_review.py", "test_task_revision.py", "test_easy_api.py", "test_visual_review.py", "test_builtin_programs.py", "test_bundle_packaging.py", "acceptance_apps016.py",
     "CheckpointReview.cs", "test_client_compatibility.py", "test_recorded_clicks.py", "test_recording_reliability.py", "test_native_recording_capture.py", "test_replay_readiness.py", "test_selector_reuse.py", "acceptance_record_replay015.py",

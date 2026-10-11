@@ -169,6 +169,7 @@ class SessionRuntime:
         self.transport = None
         self.state = "awaiting_approval"
         self.reason = ""
+        self.stop_cause = ""
         self.created_at = utc_now()
         self.deadline = time.monotonic() + self.minutes * 60
         self._deadline_thread = None
@@ -184,10 +185,11 @@ class SessionRuntime:
     def _check_not_stopped(self):
         if (self.stop_event.is_set() or self.request_cancel_event is not None and self.request_cancel_event.is_set()
                 or (self.run_dir / "stop.flag").exists()):
-            self.stop(self.reason or "중지됨")
+            cancelled = self.request_cancel_event is not None and self.request_cancel_event.is_set()
+            self.stop(self.reason or "중지됨", cause="requested_or_error" if cancelled else self.stop_cause or "requested_or_error")
             raise SessionError(self.reason or "세션이 중지되었습니다.")
         if time.monotonic() >= self.deadline:
-            self.stop("설정한 실행 시간이 지났습니다.")
+            self.stop("설정한 실행 시간이 지났습니다.", cause="time_budget")
             raise SessionError(self.reason)
 
     def check_active(self):
@@ -287,7 +289,7 @@ class SessionRuntime:
                 self.stop("로컬 중지 버튼으로 화면 작업을 중지했습니다.")
                 return
             if time.monotonic() >= self.deadline:
-                self.stop("설정한 실행 시간이 지났습니다.")
+                self.stop("설정한 실행 시간이 지났습니다.", cause="time_budget")
                 return
             if self.state == "active" and self._driver_ended():
                 self.stop("Cua Driver 연결이 종료되어 화면 작업을 중지했습니다. 적용된 결과를 확인한 뒤 computer_begin으로 다시 시작하세요.")
@@ -472,9 +474,19 @@ class SessionRuntime:
                 "created_at": self.created_at, "run_dir": str(self.run_dir),
                 "emergency_hotkey_available": bool(getattr(self.emergency, "available", False))}
 
-    def stop(self, reason="사용자가 화면 작업을 중지했습니다."):
+    def stop(self, reason="사용자가 화면 작업을 중지했습니다.", *, cause="requested_or_error"):
         # Set cancellation first: approval and in-flight calls see it immediately.
-        self.stop_event.set()
+        # An explicit stop wins even after a timed session has already ended.
+        # Consumers must not infer a restartable timeout from localized text.
+        with self.resource_lock:
+            requested = (cause not in {"time_budget", "workflow_budget"}
+                or self.request_cancel_event is not None and self.request_cancel_event.is_set()
+                or not self.stop_event.is_set() and (self.run_dir / "stop.flag").exists())
+            if requested:
+                self.stop_cause = "requested_or_error"
+            elif self.stop_cause != "requested_or_error" and (not self.stop_event.is_set() or cause == "workflow_budget"):
+                self.stop_cause = cause
+            self.stop_event.set()
         try:
             (self.run_dir / "stop.flag").touch()
         except OSError:

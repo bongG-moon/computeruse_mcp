@@ -20,6 +20,7 @@ from vendor.guard import ALLOWED_KEYS, DriverTransport, GuardError, atomic_json,
 from workflows import WorkflowRunner, WorkflowError, validate_recipe
 from operations import OPERATION_SCHEMA, SELECTOR_SCHEMA
 from close_actions import CLOSE_ACTION_SCHEMA
+from task_inputs import MAX_RECIPE_STEPS
 
 
 def object_schema(properties=None, required=()):
@@ -79,15 +80,18 @@ MANAGEMENT["computer_tasks"]["inputSchema"] = object_schema({
 MANAGEMENT["computer_tasks"]["description"] = "List paginated task summaries, without instructions or steps. Read selected details with computer_get_task."
 MANAGEMENT["computer_save_task"]["inputSchema"]["properties"].update({
     "variables": {"type": "object", "description": "Named text inputs: {name:{description,default?}}. Use ${name} in step string values."},
-    "steps": {"type": "array", "minItems": 1, "maxItems": 30, "items": {"type": "object"},
+    "steps": {"type": "array", "minItems": 1, "maxItems": MAX_RECIPE_STEPS, "items": {"type": "object"},
               "description": "Verified UIA steps with program_id, operation, selector, value and/or expect; no scripts or saved handles."}})
 RECORDING_WARNINGS = ["outside_target_not_recorded", "uia_text_unavailable", "uia_probe_unavailable",
     "recording_timeout_partial", "recording_hook_unavailable", "recording_mouse_failed", "recording_keyboard_failed",
-    "recording_progress_failed", "semantic_target_unverified", "recording_event_limit", "recording_final_value_unconfirmed", "recording_method_unverified"]
+    "recording_progress_failed", "semantic_target_unverified", "recording_event_limit", "recording_final_value_unconfirmed", "recording_method_unverified",
+    "recording_window_ambiguous", "recording_window_limit", "recording_capture_backlog", "recording_payload_limit"]
 MANAGEMENT["computer_save_task"]["inputSchema"]["properties"]["recording_review"] = object_schema({
-    "partial": {"type": "boolean", "enum": [True]}, "acknowledged": {"type": "boolean", "enum": [True]},
+    "partial": {"type": "boolean", "enum": [True]}, "acknowledged": {"type": "boolean"},
     "warning_codes": {"type": "array", "minItems": 1, "maxItems": 30, "uniqueItems": True,
                       "items": {"type": "string", "enum": RECORDING_WARNINGS}}}, ["partial", "acknowledged", "warning_codes"])
+MANAGEMENT["computer_save_task"]["inputSchema"]["properties"]["draft"] = {
+    "type": "object", "description": "Local process editor draft metadata. Drafts are saved but cannot execute until repaired and saved as ready."}
 MANAGEMENT["computer_save_task"]["description"] += " Optional declarative steps and variables enable computer_run_task; saved text is never evaluated as code."
 MANAGEMENT_TOOLS.extend([
     tool("computer_prepare_close", "Read-only: capture one live approved window and retain its original process identity BEFORE any close/menu/keyboard action. Returns a session-local close_id for computer_verify_closed, usable even after the process exits. scope=window verifies that window and related dialogs are gone; scope=process requires the exact original process to exit, not all same-name application instances. Hidden/minimized is not closed. No UI input. Works in UIA and visual sessions.",
@@ -276,7 +280,7 @@ class TaskStore:
     MAX_TASKS = 1000
     LOCK_TIMEOUT = 5
     TASK_FIELDS = {"id", "name", "instructions", "expected", "program_ids", "updated_at"}
-    OPTIONAL_FIELDS = {"steps", "variables", "revision", "recording_review", "revision_history"}
+    OPTIONAL_FIELDS = {"steps", "variables", "revision", "recording_review", "revision_history", "draft"}
 
     def __init__(self, state_dir, config):
         self.path = Path(state_dir) / "tasks.json"
@@ -301,17 +305,23 @@ class TaskStore:
         if "recording_review" in item:
             review = item["recording_review"]
             if (not isinstance(review, dict) or set(review) != {"partial", "acknowledged", "warning_codes"}
-                    or review["partial"] is not True or review["acknowledged"] is not True
+                    or review["partial"] is not True or type(review["acknowledged"]) is not bool
+                    or not review["acknowledged"] and "draft" not in item
                     or not isinstance(review["warning_codes"], list) or not 1 <= len(review["warning_codes"]) <= 30
                     or any(not isinstance(code, str) or code not in RECORDING_WARNINGS for code in review["warning_codes"])
                     or len(set(review["warning_codes"])) != len(review["warning_codes"])):
                 raise SessionError("부분 녹화의 누락 경고와 사용자 확인을 보존해야 합니다.")
         if "steps" in item:
             try:
-                validate_recipe(item["steps"], item.get("variables", {}), item["program_ids"])
+                if "draft" in item:
+                    from workflows import validate_draft_recipe, validate_draft_metadata
+                    validate_draft_recipe(item["steps"], item.get("variables", {}), item["program_ids"])
+                    validate_draft_metadata(item["draft"], item["steps"])
+                else:
+                    validate_recipe(item["steps"], item.get("variables", {}), item["program_ids"])
             except ValueError as exc:
                 raise SessionError(str(exc)) from exc
-        elif item.get("variables"):
+        elif item.get("variables") or "draft" in item:
             raise SessionError("입력 변수를 사용하려면 실행 단계를 함께 저장하세요.")
         try:
             for key in ("name", "instructions", "expected"):
@@ -433,7 +443,7 @@ class TaskStore:
             tasks = self._read()
             previous = next((item for item in tasks if item["id"] == task_id), {})
             # The existing human editor edits text only; retain its stored workflow.
-            for key in ("steps", "variables", "recording_review"):
+            for key in ("steps", "variables", "recording_review", "draft"):
                 if key in args or key in previous:
                     entry[key] = copy.deepcopy(args.get(key, previous.get(key)))
             entry["revision"] = (previous.get("revision", 1) if previous else 0) + 1
@@ -626,7 +636,7 @@ class ComputerManager:
             tools[0]["description"] += " Driver unavailable: " + self.schema_error
         return {"tools": tools, "_meta": {"driver_schema_error": self.schema_error or None}}
 
-    def begin(self, args, cancel_event=None):
+    def begin(self, args, cancel_event=None, *, renewal=None):
         validate_management("computer_begin", args)
         args = copy.deepcopy(args)
         task = self.tasks.get(args["task_id"]) if args.get("task_id") else {"instructions": "", "expected": ""}
@@ -653,6 +663,11 @@ class ComputerManager:
         with self.lock:
             if cancel_event is not None and cancel_event.is_set():
                 raise SessionError("작업 시작 요청이 취소되었습니다.")
+            if renewal is not None and (self.session is not renewal["runtime"]
+                    or self.stop_generation != renewal["stop_generation"]
+                    or self.session.state != "stopped"
+                    or getattr(self.session, "stop_cause", "") != "workflow_budget"):
+                raise SessionError("연결 갱신 도중 중지 요청이나 다른 연결 변경이 있어 이어가지 않았습니다.")
             if self.session is not None and self.session.state != "stopped":
                 raise SessionError("화면 작업이 이미 진행 중입니다. computer_end 후 새 작업을 시작하세요.")
             current = self.runtime_factory(self.config, [enabled[i] for i in args["program_ids"]], mode, task,
@@ -661,7 +676,7 @@ class ComputerManager:
             current.progress_callback = self.progress_reporter
         return current.start()
 
-    def stop(self, reason="사용자가 화면 작업을 중지했습니다."):
+    def stop(self, reason="사용자가 화면 작업을 중지했습니다.", *, cause="requested_or_error"):
         with self.lock:
             self.stop_generation += 1
             current, probe = self.session, self.probe_transport
@@ -669,7 +684,8 @@ class ComputerManager:
         self.process_editors.stop(current)
         self.checkpoint_reviews.stop(current)
         if current is not None:
-            current.stop(reason)
+            if cause == "requested_or_error": current.stop(reason)
+            else: current.stop(reason, cause=cause)
         self.easy.close()
         self.workflows.close()
         probe_stopped = self._close_probe(probe) if probe is not None else True
@@ -816,7 +832,10 @@ class ComputerManager:
                 tasks = [t for t in self.tasks.all() if query in (t["name"] + " " + t["id"]).casefold()]
                 offset, limit = args.get("offset", 0), args.get("limit", 20)
                 items = [{k: t[k] for k in ("id", "name", "program_ids", "updated_at", "revision") if k in t} |
-                         {"runnable": bool(t.get("steps")), "step_count": len(t.get("steps", [])),
+                         {"runnable": bool(t.get("steps")) and "draft" not in t,
+                          "state": "draft" if "draft" in t else "ready" if t.get("steps") else "description",
+                          "unresolved_steps": sum(s.get("operation") == "manual_entry" for s in t.get("steps", [])),
+                          "step_count": len(t.get("steps", [])),
                           "partial_recording": bool(t.get("recording_review", {}).get("partial"))} for t in tasks[offset:offset+limit]]
                 return result({"tasks": items, "total": len(tasks), "offset": offset, "next_offset": offset+limit if offset+limit < len(tasks) else None})
             if name == "computer_save_task":

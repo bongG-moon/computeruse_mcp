@@ -167,12 +167,14 @@ class CheckpointCaptureTests(unittest.TestCase):
         runtime.guard, runtime.transport = self.guard, self.transport
         runtime.execution_lock = threading.RLock()
         runtime.mode, runtime.state, runtime.reason = "uia", "active", ""
+        runtime.stop_cause = ""
         runtime.stop_event = threading.Event()
         runtime.request_cancel_event = threading.Event()
         runtime.deadline = time.monotonic()+60
         runtime.run_dir = self.path
-        def stop(reason):
+        def stop(reason, *, cause="requested_or_error"):
             runtime.reason, runtime.state = reason, "stopped"
+            runtime.stop_cause = cause
             runtime.stop_event.set()
         runtime.stop = stop
         return runtime
@@ -196,6 +198,7 @@ class CheckpointCaptureTests(unittest.TestCase):
             with self.subTest(cause=cause), self.assertRaises(SessionError):
                 runtime.capture_checkpoint(TARGET)
             self.assertEqual(runtime.state, "stopped")
+            self.assertEqual(runtime.stop_cause, "requested_or_error")
             self.assertEqual(self.guard.observed_targets, set())
 
     def test_runtime_serializes_capture_with_other_actions(self):

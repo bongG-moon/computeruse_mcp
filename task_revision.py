@@ -153,13 +153,16 @@ class TaskRevisions:
     def save(self, args, *, expected_revision):
         """Full raw draft save for the native editor; chat uses update instead."""
         if not isinstance(args, dict) or not args.get("id"): raise TaskRevisionError("기존 작업 ID가 필요합니다.")
-        if set(args)-{"id", "name", "instructions", "expected", "program_ids", "steps", "variables", "recording_review"}:
+        if set(args)-{"id", "name", "instructions", "expected", "program_ids", "steps", "variables", "recording_review", "draft"}:
             raise TaskRevisionError("지원하지 않는 작업 저장 필드입니다.")
         with self.store._locked():
             tasks = self.store._read()
             current = self._current(tasks, args["id"])
             self._expect(current, expected_revision)
             candidate = stable_task(current)
+            if "steps" in args:
+                for field in ("draft", "recording_review"):
+                    if field not in args: candidate.pop(field, None)
             candidate.update(copy.deepcopy(args))
             return self._commit(tasks, current, candidate)
 
@@ -232,6 +235,16 @@ class TaskRevisions:
                     insert(moving, change["after_step_id"])
                     summaries.append({"step_id": change["step_id"], "change": "moved", "after_step_id": change["after_step_id"]})
                 else: raise TaskRevisionError("지원하지 않는 작업 변경입니다.")
+            if "draft" in candidate:
+                # Labels follow stable IDs through chat reordering. Deleting
+                # an unresolved event requires review; it cannot certify it.
+                old_labels = {step["step_id"]: label for step, label in zip(stable_task(current)["steps"], current["draft"]["labels"])}
+                metadata = candidate["draft"]
+                pending = {step.get("step_id") for step in candidate["steps"] if step.get("operation") == "manual_entry"}
+                tracked = set(metadata["target_warning_steps"])
+                if tracked - pending: metadata["persistent_semantic_warning"] = True
+                metadata["target_warning_steps"] = sorted(tracked & pending)
+                metadata["labels"] = [old_labels.get(step.get("step_id"), step.get("selector", {}).get("name", "추가한 단계")) for step in candidate["steps"]]
             saved = self._commit(tasks, current, candidate)
             return {"task": saved, "changes": summaries, "previous_revision": current.get("revision", 1), "revision": saved["revision"]}
 
@@ -246,6 +259,8 @@ class TaskRevisions:
 
     def export_skill(self, task_id, revision=None):
         task = self.get(task_id, revision)
+        from workflows import require_runnable
+        require_runnable(task)
         if not task.get("steps"): raise TaskRevisionError("실행 단계가 저장된 작업만 스킬로 내보낼 수 있습니다.")
         names = {p["id"]: p.get("name", p["id"]) for p in self.store.config["programs"]}
         manifest = {"format": "computer-task-skill/v1", "task_id": task["id"], "pinned_revision": task.get("revision", 1),

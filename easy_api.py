@@ -10,8 +10,9 @@ import time
 from operations import OperationError, _payload
 from session_runtime import SessionError
 from task_revision import TaskRevisions, TaskRevisionError
+from workflows import DraftNotReady
 
-INSTRUCTIONS = """Two workflows: (1) computer_open -> computer_observe -> computer_act for conversational work; (2) computer_process_editor for ALL human picking, recording and editing, then computer_run_task. Use computer_programs and computer_register_program for apps; never search the user's disk or edit configuration. computer_open manages bounded sessions and returns logical window_ref; do not guess OS handles. Request image_delivery=vision only when this host/model supports images and screen use is authorized; otherwise text works with UIA and local saved images. Images are sent only to the connected host, no external model API is called. If UIA is sparse, inspect the returned image; do not repeat tree dumps. Use an observed target_ref or image_region with observation_id. For identical buttons include their distinguishing row in scope_region. Input dispatched is not success. If needs_observation_review, observe the current result and submit computer_act action=review with exact action/frame/observation IDs, a verdict and visible evidence; this is visual_assessed, not deterministic verification. Never repeat uncertain input. User teaching occurs ONLY in computer_process_editor. Poll computer_status(editor_id) while authoring. Recording performs real actions, returns an editable draft and does not save or replay automatically. Saved tasks have typed inputs and stable step IDs: use computer_tasks action=get/history, computer_update_task with expected_revision, and computer_export_skill. Run inputs can differ without editing the task; resume retains its original inputs/revision and never repeats uncertain steps. Saved image tasks may return a visual_review request; observe the delivered frame and pass observation_review on resume. Human checkpoints require the actual human's confirmation. computer_stop stops automation, not business apps. Use computer_act action=close with the user's save/discard policy, then verify closure; never force kill. Report final tool results promptly; computer_status exposes progress and phase timings."""
+INSTRUCTIONS = """Two workflows: (1) computer_open -> computer_observe -> computer_act for conversational work; (2) computer_process_editor for ALL human picking, recording and editing, then computer_run_task. Use computer_programs and computer_register_program for apps; never search the user's disk or edit configuration. computer_open manages bounded sessions and returns logical window_ref; do not guess OS handles. Request image_delivery=vision only when this host/model supports images and screen use is authorized; otherwise text works with UIA and local saved images. Images are sent only to the connected host, no external model API is called. If UIA is sparse, inspect the returned image; do not repeat tree dumps. Use an observed target_ref or image_region with observation_id. For identical buttons include their distinguishing row in scope_region. Input dispatched is not success. If needs_observation_review, observe the current result and submit computer_act action=review with exact action/frame/observation IDs, a verdict and visible evidence; this is visual_assessed, not deterministic verification. Never repeat uncertain input. User teaching occurs ONLY in computer_process_editor. Poll computer_status(editor_id) while authoring. Recording performs real actions, returns an editable draft and does not save or replay automatically. Saved tasks have typed inputs and stable step IDs: use computer_tasks action=get/history, computer_update_task with expected_revision, and computer_export_skill. Run inputs can differ without editing the task; resume retains its original inputs/revision and never repeats uncertain steps. For finite list work, store one foreach body instead of duplicating steps per row. When a saved run returns continuation with next_tool/next_arguments, use those exact arguments to continue the already authorized same run; no new task or repeated completed input. Session renewal retains the configured scope/budget and does not override a user stop. Editor trial chunk continuation uses computer_process_editor(action=resume_test), never computer_run_task with a temporary trial id. Saved image tasks may return a visual_review request; observe the delivered frame and pass observation_review on resume. Human checkpoints require the actual human's confirmation. computer_stop stops automation, not business apps. Use computer_act action=close with the user's save/discard policy, then verify closure; never force kill. Report final tool results promptly; computer_status exposes progress and phase timings."""
 
 INSTRUCTIONS += " If a saved image task returns needs_target_review, compare the saved target reference (its anchor identifies the intended point) with the delivered current frame. Resume the SAME run with target_review containing the exact challenge IDs, target_region whose CENTER is the intended click, and visible evidence; include distinguishing context in scope_region for repeated icons. This is one-run model targeting, not human teaching or a saved-task edit. Never use this path for an already-dispatched or uncertain action."
 
@@ -40,7 +41,7 @@ def schemas(legacy):
         tool("computer_process_editor", "The ONE human teaching entry: select on screen, record real actions, edit values/conditions and trial-run, then save. App windows attach automatically. Reopening task_id edits the SAME version using conflict checks. Poll computer_status(editor_id). For a trial's visual_review use action=resume_test with editor_id and the bound observation_review; it resumes the unchanged draft without saving or replaying completed input.", object_schema({"action": enum("open", "resume_test"), "editor_id": STRING, "observation_review": obj, "acknowledge_checkpoint": STRING, "program_ids": PROGRAM_IDS, "task_id": STRING, "name": STRING, "window_refs": {"type": "object", "description": "Optional program_id to window_ref returned by computer_open."}, "timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 1800}})),
         tool("computer_tasks", "List saved processes, get one with stable step IDs and typed inputs, or read revision history. Local image pixels stay private in storage.", object_schema({"action": enum("list", "get", "history"), "task_id": STRING, "revision": pos, "query": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}), True),
         tool("computer_update_task", "Change a process by stable step IDs without rerecording. expected_revision prevents overwriting another edit. Changes: set_step(step_id,fields), set_input(name,spec), set_default(name,value), set_text(fields), insert_step(after_step_id,step), delete_step(step_id), move_step(step_id,after_step_id). Image targets are changed only in editor. restore_revision restores as a new revision. Does not run anything.", object_schema({"task_id": STRING, "expected_revision": pos, "changes": {"type": "array", "items": obj, "minItems": 1, "maxItems": 60}, "restore_revision": pos}, ["task_id", "expected_revision"])),
-        tool("computer_run_task", "Run a saved process with current app windows and optional typed inputs; successful routes reuse scoped verification. No manual PID setup. On pause, resume_run_id reuses the immutable original inputs/revision. observation_review answers the exact returned visual_review challenge. target_review identifies the same saved image target on its delivered current frame, only before input: use exact challenge IDs, target_region CENTER and visible evidence. Neither review replays dispatched input or rewrites the saved process. Human checkpoint acknowledgement must come from actual human review.", object_schema({"task_id": STRING, "revision": pos, "inputs": obj, "window_refs": obj, "resume_run_id": STRING, "observation_review": obj, "target_review": target_review_schema, "acknowledge_checkpoint": STRING, "execution_mode": enum("auto", "standard", "fast")}, ["task_id"])),
+        tool("computer_run_task", "Run a saved process with current app windows and optional typed inputs; successful routes reuse scoped verification. No manual PID setup. Long runs yield a continuation at verified boundaries. Follow next_arguments with the same run_id, without asking the user to split the process. On pause, resume_run_id reuses the immutable original inputs/revision. observation_review answers the exact returned visual_review challenge. target_review identifies the same saved image target on its delivered current frame, only before input: use exact challenge IDs, target_region CENTER and visible evidence. Neither review replays dispatched input or rewrites the saved process. Human checkpoint acknowledgement must come from actual human review.", object_schema({"task_id": STRING, "revision": pos, "inputs": obj, "window_refs": obj, "resume_run_id": STRING, "observation_review": obj, "target_review": target_review_schema, "acknowledge_checkpoint": STRING, "execution_mode": enum("auto", "standard", "fast")}, ["task_id"])),
         tool("computer_export_skill", "Export a thin local SKILL.md that calls the pinned saved process and its typed inputs. Does not embed screenshots or scripts, install into user profiles, or run the process.", object_schema({"task_id": STRING, "revision": pos}, ["task_id"])),
         tool("computer_status", "Read environment/progress or editor/run/checkpoint status while work is running. An explicit human trial checkpoint may open its local review window. editor_id + cancel closes the editor without running or saving its draft.", object_schema({"editor_id": STRING, "run_id": STRING, "review_id": STRING, "wait_ms": {"type": "integer", "minimum": 0, "maximum": 5000}, "cancel": {"type": "boolean"}})),
         copy.deepcopy(legacy["computer_stop"]),
@@ -91,7 +92,12 @@ class EasyApi:
             self.close(); self.runtime = current; self.engine = InteractionEngine(current)
         return self.engine
 
-    def _session(self, ids, description, cancel_event):
+    def _session(self, ids, description, cancel_event, *, renewal=None):
+        if renewal is not None:
+            self.close()
+            self.manager.begin({"program_ids": ids, "task_description": description, "mode": "uia"}, cancel_event,
+                               renewal=renewal)
+            return
         from vendor.guard import check_app
         def scope(program):
             return (check_app(program['exe']),
@@ -112,7 +118,47 @@ class EasyApi:
             self.manager.stop("등록한 프로그램의 현재 실행 경로와 허용 범위로 작업 연결을 새로 준비합니다.")
             if not current.wait_stopped(10): raise SessionError("이전 연결 정리가 진행 중입니다. 상태를 확인하세요.")
         self.close()
-        self.manager.begin({"program_ids": ids, "task_description": description, "mode": "uia"}, cancel_event)
+        self.manager.begin({"program_ids": ids, "task_description": description, "mode": "uia"}, cancel_event,
+                           **({"renewal": renewal} if renewal is not None else {}))
+
+    def _renew_workflow_budget(self, run_id, cancel_event):
+        """Renew only a proven step boundary, with the same configured policy.
+
+        The caller has already checked the frozen task/inputs. No pending or
+        uncertain action, user stop, or host cancellation permits a renewal.
+        """
+        from workflows import _session_budget_exhausted
+        current = self.manager.session
+        if cancel_event is not None and cancel_event.is_set():
+            raise SessionError("실행 요청이 취소되어 이어가지 않았습니다.")
+        if current is None:
+            return
+        with current.execution_lock:
+            with self.manager.lock:
+                stop_generation = self.manager.stop_generation
+            run_dir = getattr(current, "run_dir", None)
+            cancelled = getattr(current, "request_cancel_event", None)
+            timed_stop = (getattr(current, "stop_cause", "") == "time_budget"
+                and current.state in {"stopping", "stopped"}
+                and time.monotonic() >= current.deadline)
+            if ((current.state != "active" or current.stop_event.is_set()) and not timed_stop
+                    or cancelled is not None and cancelled.is_set()
+                    or not timed_stop and run_dir is not None and (Path(run_dir) / "stop.flag").exists()):
+                raise SessionError("중지된 연결은 자동으로 다시 시작하지 않습니다. 현재 상태를 확인하고 프로그램을 다시 연결한 뒤 같은 실행을 이어가세요.")
+            if not _session_budget_exhausted(current):
+                return
+            record = self.manager.workflows.progress(run_id)
+            boundary = record.get("continuation", {})
+            if (boundary.get("reason") not in {"session_budget_exhausted", "workflow_chunk_complete"}
+                    or boundary.get("session_id") != current.id or record.get("pending_step") is not None
+                    or record.get("status") != "interrupted"):
+                raise SessionError("연결 한도에 도달했지만 입력이 끝난 경계를 확인하지 못했습니다. 현재 결과부터 확인하며 미확인 입력은 반복하지 않습니다.")
+            if self.manager.process_editors.pending(current):
+                raise SessionError("열린 편집창을 닫은 뒤 저장한 작업을 이어가세요.")
+            self.manager.stop("긴 작업의 완료 지점을 보존하고 같은 허용 범위로 연결을 갱신합니다.", cause="workflow_budget")
+            if not current.wait_stopped(10):
+                raise SessionError("이전 연결 정리를 기다리고 있습니다. 같은 실행을 이어가세요.")
+            return {"runtime": current, "stop_generation": stop_generation + 1}
 
     def _windows(self, program_id):
         from vendor.guard import check_app
@@ -344,12 +390,17 @@ class EasyApi:
                 if name == "computer_process_editor" and any(key in args for key in ("editor_id", "observation_review", "acknowledge_checkpoint")):
                     raise SessionError("시험 결과 확인은 action=resume_test와 editor_id로 이어가세요.")
                 task = revisions.get(args["task_id"], args.get("revision")) if args.get("task_id") else None
+                renewal = None
                 if name == "computer_run_task" and args.get("resume_run_id"):
                     frozen = m.workflows.resume_snapshot(args["resume_run_id"], task["id"], args.get("inputs", {}))
                     if frozen: task = frozen[0]
+                    renewal = self._renew_workflow_budget(args["resume_run_id"], cancel_event)
+                if name == "computer_run_task" and task is not None:
+                    from workflows import require_runnable
+                    require_runnable(task)
                 ids = args.get("program_ids") or (task["program_ids"] if task else [p["id"] for p in m.session.programs] if m.session else [])
                 if not ids: raise SessionError("program_ids로 가르칠 프로그램을 지정하거나 computer_open으로 먼저 연결하세요.")
-                self._session(ids, task["instructions"] if task else "사용자가 프로세스를 녹화하고 편집합니다.", cancel_event)
+                self._session(ids, task["instructions"] if task else "사용자가 프로세스를 녹화하고 편집합니다.", cancel_event, renewal=renewal)
                 with m.session.execution_lock:
                     targets, pending = self._targets(ids, args.get("window_refs", {}), cancel_event)
                     if pending: return result(pending)
@@ -396,7 +447,7 @@ class EasyApi:
                     return result(request_close(m.session, engine.target(ref), args["step"], scope=args.get("scope", "window"), delivery_mode="foreground", timeout_ms=args.get("timeout_ms", 1500)))
                 if not args.get("step"): raise SessionError("실행할 step을 지정하세요.")
                 return result(engine.act(ref, args["step"], **{k:args[k] for k in ("target_ref", "observation_id", "image_region", "scope_region", "completion") if k in args}, image_delivery_enabled=vision))
-        except (OperationError, TaskRevisionError) as exc:
+        except (OperationError, TaskRevisionError, DraftNotReady) as exc:
             return result({"status":"blocked", "task_verified":False, "diagnostic":{"code":getattr(exc,"code","invalid_request"),"message":str(exc)}}, error=True)
 
     def _observation_response(self, answer):
@@ -406,6 +457,12 @@ class EasyApi:
         content = answer.pop("observation_content", [])
         checkpoint_content = answer.pop("checkpoint_content", [])
         trial = answer.get("last_test", {})
+        if (trial.get("continuation", {}).get("reason") == "workflow_chunk_complete"
+                and trial.get("status") == "interrupted"
+                and answer.get("editor_id") and trial.get("pending_step") is None):
+            answer["next_tool"] = "computer_process_editor"
+            answer["next_arguments"] = {"action": "resume_test", "editor_id": answer["editor_id"]}
+            answer["next_step"] = "완료한 시험 단계는 보존했습니다. 같은 편집창의 시험 실행을 이어가세요. 새 시험으로 처음부터 실행하지 않습니다."
         if checkpoint_content and trial.get("checkpoint", {}).get("capture_available") and not trial.get("visual_review"):
             answer["local_review"] = self.manager.checkpoint_reviews.open(self.manager.session, trial, checkpoint_content, {})
             identity = answer["local_review"].get("review_id")

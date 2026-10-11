@@ -64,6 +64,20 @@ class EasyApiTests(unittest.TestCase):
         return self.manager.tasks.save({'id': 'demo', 'name': 'Demo', 'instructions': 'Read current app',
             'expected': 'Done', 'program_ids': ['editor'], 'steps': [{'operation': 'delay', 'duration_ms': 0, 'program_id': 'editor'}]})
 
+    def test_saved_draft_is_listed_and_blocked_before_app_attach_or_launch(self):
+        task = self.manager.tasks.save({'id': 'unfinished', 'name': 'Draft', 'instructions': 'Repair first',
+            'expected': 'Done', 'program_ids': ['editor'],
+            'steps': [{'operation': 'manual_entry', 'program_id': 'editor', 'manual_reason': 'image_capture_required', 'repair_action': 'click'}],
+            'draft': {'format': 'computer-process-draft/v1', 'labels': ['Target'], 'target_warning_steps': [], 'persistent_semantic_warning': False}})
+        listing = self.manager.call('computer_tasks', {})['structuredContent']['tasks'][0]
+        self.assertFalse(listing['runnable'])
+        self.assertEqual(listing['state'], 'draft')
+        self.assertEqual(listing['unresolved_steps'], 1)
+        answer = self.manager.call('computer_run_task', {'task_id': task['id']})
+        self.assertTrue(answer['isError'])
+        self.assertEqual(answer['structuredContent']['diagnostic']['code'], 'draft_not_ready')
+        self.assertIsNone(self.manager.session)
+
     def test_default_schema_has_twelve_tools_and_concrete_action_contract(self):
         tools = schemas(MANAGEMENT)
         self.assertEqual(len(tools), 12)
@@ -322,6 +336,23 @@ class EasyApiTests(unittest.TestCase):
             self.manager.call('computer_run_task', {'task_id': 'demo', 'resume_run_id': 'a'*32})
         self.assertEqual(run.call_args.args[1], frozen)
         self.assertEqual(run.call_args.kwargs['resume_run_id'], 'a'*32)
+
+    def test_resume_ready_snapshot_survives_new_draft_but_frozen_draft_is_blocked(self):
+        original = self.task()
+        args = {key: value for key, value in original.items() if key not in {'updated_at', 'revision', 'revision_history'}}
+        pending = self.manager.tasks.save({**args,
+            'draft': {'format': 'computer-process-draft/v1', 'labels': ['unfinished review'], 'target_warning_steps': [], 'persistent_semantic_warning': False},
+            'recording_review': {'partial': True, 'acknowledged': False, 'warning_codes': ['recording_timeout_partial']}})
+        for frozen, permitted in ((original, True), (pending, False)):
+            with self.subTest(permitted=permitted), mock.patch.object(self.manager.workflows, 'resume_snapshot', return_value=(frozen, {})), \
+                    mock.patch.object(self.manager.workflows, 'run', return_value={'status': 'verified', 'task_verified': True}) as run:
+                answer = self.manager.call('computer_run_task', {'task_id': 'demo', 'resume_run_id': 'a'*32})
+            if permitted:
+                self.assertFalse(answer.get('isError'), answer)
+                self.assertEqual(run.call_args.args[1], original)
+            else:
+                run.assert_not_called()
+                self.assertEqual(answer['structuredContent']['diagnostic']['code'], 'draft_not_ready')
 
     def test_editor_status_is_single_public_poll_and_passes_cancel(self):
         with mock.patch.object(self.manager.process_editors, 'status', return_value={'status': 'editing'}) as status:
