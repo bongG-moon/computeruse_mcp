@@ -1,0 +1,34 @@
+name: Publication integrity
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Run publication regression tests
+        run: python -m unittest discover -s tools -p test_publication.py
+      - name: Download the primary release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          version=$(python -c "from pathlib import Path; from tools.publication import version_from; print(version_from(Path('settings.py').read_bytes()))")
+          mkdir -p "$RUNNER_TEMP/release-assets"
+          gh release download "v$version" --dir "$RUNNER_TEMP/release-assets" --pattern "Computer-Use-MCP-$version*.zip" --pattern 'cua-driver.exe' --pattern 'CUA-DRIVER-LICENSE.md' --pattern 'DRIVER-BUNDLE-MANIFEST.json' --pattern 'SHA256SUMS.txt'
+          gh api "repos/$GH_REPO/releases/tags/v$version" > "$RUNNER_TEMP/release.json"
+      - name: Verify committed manifests and published files
+        shell: bash
+        run: |
+          status=$(python -c "import json,os; from pathlib import Path; print('prerelease' if json.loads((Path(os.environ['RUNNER_TEMP'])/'release.json').read_text())['prerelease'] else 'release')")
+          python tools/publication.py check --repo . --assets "$RUNNER_TEMP/release-assets" --git-ref HEAD --release-json "$RUNNER_TEMP/release.json" --release-status "$status"
