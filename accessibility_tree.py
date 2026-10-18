@@ -13,7 +13,7 @@ import re
 MAX_TREE_CHARS = 2_000_000
 MAX_ROWS = 20_000
 MAX_DEPTH = 100
-ANCESTOR_ROLES = {"Window", "Group", "Pane", "List", "Tree", "Menu", "MenuBar", "ToolBar", "Tab", "Custom"}
+ANCESTOR_ROLES = {"Window", "Group", "Pane", "List", "Tree", "Menu", "MenuBar", "ToolBar", "Tab", "Custom", "Table", "DataGrid"}
 KNOWN_ROLES = ANCESTOR_ROLES | {"Button", "Calendar", "CheckBox", "ComboBox", "DataGrid", "DataItem",
     "Document", "Edit", "Header", "HeaderItem", "Hyperlink", "Image", "ListItem", "MenuItem", "ProgressBar",
     "RadioButton", "ScrollBar", "Separator", "Slider", "Spinner", "SplitButton", "StatusBar", "TabItem",
@@ -79,7 +79,7 @@ def _attributes(text):
     return result
 
 
-def _parse(tree):
+def _parse(tree, *, projected=False):
     if not isinstance(tree, str) or not tree or len(tree) > MAX_TREE_CHARS:
         raise _Reject("tree_size_or_type")
     lines = tree.split("\n")
@@ -95,7 +95,7 @@ def _parse(tree):
         if not match or len(match[1]) % 2:
             raise _Reject("invalid_row_or_indent")
         depth, index, role, tail = len(match[1]) // 2, match[2], match[3], match[4]
-        if depth > MAX_DEPTH or depth > len(stack) or (nodes and depth == 0):
+        if depth > MAX_DEPTH or (depth > len(stack) and not projected) or (nodes and depth == 0):
             raise _Reject("invalid_tree_structure")
         if not nodes and (depth != 0 or role not in ANCESTOR_ROLES):
             raise _Reject("invalid_root")
@@ -116,14 +116,32 @@ def _parse(tree):
                 attrs = _attributes(tail)
             elif label is None:
                 raise _Reject("invalid_row_suffix")
+        # Driver 0.28.2 can omit anonymous intermediate containers from an
+        # incomplete projection while preserving the real depth of descendants.
+        # Preserve that gap; never invent a Pane/name/identity to fill it. The
+        # entire indexed projection is still checked below before any enrichment.
+        if depth > len(stack):
+            stack.extend([None] * (depth - len(stack)))
+        parent = next((entry for entry in reversed(stack[:depth]) if entry is not None), None)
         node = {"index": int(index) if index is not None else None, "role": role, "label": label,
-                "depth": depth, "attrs": attrs, "parent": stack[depth - 1] if depth else None, "children": []}
+                "depth": depth, "attrs": attrs, "parent": parent, "children": [],
+                "parent_gap": bool(depth and stack[depth - 1] is None)}
         if index is None and role not in KNOWN_ROLES:
             raise _Reject("unknown_unindexed_role")
         if node["parent"] is not None:
             nodes[node["parent"]]["children"].append(len(nodes))
         stack[depth:] = [len(nodes)]
         nodes.append(node)
+    # A skipped level must be witnessed by an indexed row whose exact depth is
+    # checked against the structured projection. Do not accept arbitrary dangling
+    # indented prose/containers merely because the Driver projection is partial.
+    witnesses = [False] * (MAX_DEPTH + 1)
+    for node in reversed(nodes):
+        witnesses[node["depth"] + 1:] = [False] * (MAX_DEPTH - node["depth"])
+        if node["index"] is not None:
+            witnesses[:node["depth"] + 1] = [True] * (node["depth"] + 1)
+        if node["parent_gap"] and not witnesses[node["depth"]]:
+            raise _Reject("unwitnessed_parent_gap")
     return nodes
 
 
@@ -159,7 +177,7 @@ def normalize_snapshot(snapshot):
             if type(element.get("depth")) is not int or not 0 <= element["depth"] <= MAX_DEPTH:
                 raise _Reject("invalid_structured_depth")
             indexed[index] = element
-        nodes = _parse(snapshot["tree_markdown"])
+        nodes = _parse(snapshot["tree_markdown"], projected=snapshot.get("elements_complete") is False)
         covered, id_additions = set(), {}
         for node in nodes:
             index = node["index"]
@@ -223,11 +241,59 @@ def normalize_snapshot(snapshot):
                 if element.get("parent_index") != parent:
                     links += 1
                 element["parent_index"] = parent
+            if node["parent_gap"]:
+                element["rendered_parent_gap"] = True
             if node["index"] in id_additions:
                 element["automation_id"] = id_additions[node["index"]]
+        # Plain Text leaves are omitted by the Driver's action-oriented element
+        # list. Keep their rendered context separately: no handle, action, value,
+        # inferred geometry, or selector can be obtained from these text rows.
+        labels = []
+        def protected_path(offset):
+            while offset is not None:
+                item = indexed.get(nodes[offset]["index"], {})
+                if item.get("role") == "Password" or any(item.get(key) is True for key in
+                        ("protected", "is_protected", "is_password", "password")):
+                    return True
+                offset = nodes[offset]["parent"]
+            return False
+        plain_labels = {offset for offset, node in enumerate(nodes)
+                        if node["index"] is None and not node["children"] and node["role"] == "Text"
+                        and isinstance(node["label"], str) and node["label"].strip() and len(node["label"]) <= 200
+                        and not node["attrs"].get("actions") and "value" not in node["attrs"] and not protected_path(offset)}
+        # A reverse pass avoids repeatedly walking a long run of label leaves.
+        following_by_offset, following = {}, None
+        for offset in range(len(nodes) - 1, -1, -1):
+            node = nodes[offset]
+            if node["index"] is not None:
+                following = offset if not protected_path(offset) else None
+            elif offset in plain_labels and following is not None:
+                candidate = nodes[following]
+                if candidate["depth"] == node["depth"] and candidate["parent"] == node["parent"]:
+                    following_by_offset[offset] = candidate["index"]
+                else:
+                    following = None
+            else:
+                following = None
+        for offset, node in enumerate(nodes):
+            if offset not in plain_labels:
+                continue
+            parent = identities.get(node["parent"])
+            if parent is None:
+                continue
+            entry = {"element_index": -1 - len(synthetic) - len(labels), "parent_index": parent,
+                     "role": "Text", "label": node["label"], "read_only": True,
+                     "source": "driver.tree_markdown", "relation": "rendered_parent_only"}
+            # Ordering is a suggestion for visual cross-checking, never a
+            # provider LabeledBy relationship or permission to target a control.
+            if offset in following_by_offset:
+                entry["following_element_index"] = following_by_offset[offset]
+            labels.append(entry)
         answer["elements"].extend(synthetic)
+        answer["read_only_labels"] = labels
         return _result(answer, "augmented" if synthetic or links or id_additions else "verified",
                        original_element_count=len(elements), synthetic_ancestor_count=len(synthetic),
-                       parent_links_added=links, automation_ids_added=len(id_additions))
+                       parent_links_added=links, automation_ids_added=len(id_additions),
+                       read_only_label_count=len(labels), omitted_parent_gaps=sum(node["parent_gap"] for node in nodes))
     except _Reject as error:
         return _result(snapshot, "rejected", str(error))

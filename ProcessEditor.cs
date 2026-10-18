@@ -30,6 +30,46 @@ internal static class ProcessEditor
     { long result; return Int64.TryParse(Str(data, key, ""), out result) ? result : fallback; }
     internal static Dictionary<string, object> Map(Dictionary<string, object> data, string key)
     { object value; return data != null && data.TryGetValue(key, out value) ? value as Dictionary<string, object> : null; }
+    internal static bool PreviewAnchorPoint(Dictionary<string, object> anchor, Size image, Size viewport, out PointF point)
+    {
+        point = PointF.Empty;
+        if (anchor == null || anchor.Count != 2 || !anchor.ContainsKey("x") || !anchor.ContainsKey("y")
+                || image.Width <= 0 || image.Height <= 0 || viewport.Width <= 0 || viewport.Height <= 0) return false;
+        double x, y;
+        if (!PreviewUnit(anchor["x"], out x) || !PreviewUnit(anchor["y"], out y)) return false;
+        // Match PictureBox Zoom's integer destination rectangle, including
+        // letterboxing. The recorded anchor addresses a source pixel.
+        float ratio = Math.Min((float)viewport.Width / image.Width, (float)viewport.Height / image.Height);
+        int width = (int)(image.Width * ratio), height = (int)(image.Height * ratio);
+        if (width < 1 || height < 1) return false;
+        int pixelX = Math.Min(image.Width - 1, (int)(x * image.Width));
+        int pixelY = Math.Min(image.Height - 1, (int)(y * image.Height));
+        point = new PointF((viewport.Width - width) / 2 + (pixelX + .5f) * width / image.Width,
+                           (viewport.Height - height) / 2 + (pixelY + .5f) * height / image.Height);
+        return true;
+    }
+    static bool PreviewUnit(object value, out double number)
+    {
+        number = 0;
+        if (!(value is int || value is long || value is float || value is double || value is decimal)) return false;
+        number = Convert.ToDouble(value);
+        return !Double.IsNaN(number) && !Double.IsInfinity(number) && number >= 0 && number <= 1;
+    }
+    internal static void PaintPreviewAnchor(Graphics graphics, PointF point, float scale)
+    {
+        var previous = graphics.SmoothingMode;
+        graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        float radius = 7 * scale, arm = 12 * scale;
+        using (var outline = new Pen(Color.White, 4 * scale))
+        using (var marker = new Pen(Color.FromArgb(0, 118, 230), 2 * scale)) {
+            foreach (Pen pen in new[] { outline, marker }) {
+                graphics.DrawEllipse(pen, point.X - radius, point.Y - radius, radius * 2, radius * 2);
+                graphics.DrawLine(pen, point.X - arm, point.Y, point.X + arm, point.Y);
+                graphics.DrawLine(pen, point.X, point.Y - arm, point.X, point.Y + arm);
+            }
+        }
+        graphics.SmoothingMode = previous;
+    }
     internal static string TrialMessage(Dictionary<string, object> tested)
     {
         if (Object.Equals(tested != null && tested.ContainsKey("task_verified") ? tested["task_verified"] : null, true))
@@ -400,6 +440,7 @@ internal static class ProcessEditor
         }
         void ShowStepEdit(Dictionary<string, object> item)
         {
+            if (IsInputCandidate(item)) { ShowInputCandidate(item); return; }
             var editable = Map(item, "editable") ?? new Dictionary<string, object>();
             string operation = Str(item, "action", "");
             if (operation == "manual_entry") { ResolveInput(); return; }
@@ -467,8 +508,64 @@ internal static class ProcessEditor
                 if (dialog.ShowDialog(this) == DialogResult.OK) Send("edit_step", changes, null);
             }
         }
+        static bool IsInputCandidate(Dictionary<string, object> item)
+        {
+            var proof = Map(item, "input_target_candidate");
+            return Str(item, "action", "") == "manual_entry" && Str(item, "recognition", "") == "image_candidate"
+                && proof != null && proof.Count == 4 && Str(proof, "source", "") == "preceding_recorded_click"
+                && proof.ContainsKey("verified") && Object.Equals(proof["verified"], false)
+                && proof.ContainsKey("requires_user_confirmation") && Object.Equals(proof["requires_user_confirmation"], true)
+                && proof.ContainsKey("typed_text_recorded") && Object.Equals(proof["typed_text_recorded"], false)
+                && Str(item, "thumbnail_png", "").Length > 0;
+        }
+        void ShowInputCandidate(Dictionary<string, object> item)
+        {
+            bool accepted = false, retarget = false;
+            string chosenValue = "";
+            using (var dialog = new Form()) {
+                dialog.Text = "입력 위치와 내용 확인"; dialog.Font = Font; dialog.BackColor = Color.FromArgb(245, 247, 251);
+                dialog.StartPosition = FormStartPosition.CenterParent; dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
+                dialog.MaximizeBox = dialog.MinimizeBox = false; dialog.ClientSize = new Size(Px(540), Px(520));
+                dialog.Controls.Add(new Label { Text = "입력 위치 후보 · 값 확인 필요", Bounds = Box(24, 18, 492, 38), ForeColor = ink });
+                dialog.Controls.Add(new Label { Text = "직전에 클릭한 위치의 이미지입니다. 입력칸으로 확인된 것은 아닙니다.\n아래 이미지와 입력할 내용을 확인해 주세요. 녹화 중 입력한 글자는 저장하지 않았습니다.", Bounds = Box(24, 60, 492, 66), ForeColor = muted });
+                using (var picture = new PictureBox { Bounds = Box(24, 132, 492, 150), SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.White,
+                    Name = "InputCandidatePreview", AccessibleName = "입력 위치 후보 이미지" }) {
+                    dialog.Controls.Add(picture);
+                    var previewAnchor = Map(item, "preview_anchor");
+                    picture.Paint += delegate(object sender, PaintEventArgs args) {
+                        PointF point;
+                        if (picture.Image != null && PreviewAnchorPoint(previewAnchor, picture.Image.Size, picture.ClientSize, out point))
+                            PaintPreviewAnchor(args.Graphics, point, scale);
+                    };
+                    string encoded = Str(item, "thumbnail_png", "");
+                    try { if (encoded.Length <= 1500000) using (var stream = new MemoryStream(Convert.FromBase64String(encoded))) using (Image source = Image.FromStream(stream)) picture.Image = new Bitmap(source); }
+                    catch (ArgumentException) { } catch (FormatException) { }
+                    if (picture.Image == null) dialog.Controls.Add(new Label { Text = "이미지를 표시하지 못했습니다. 다른 위치 선택으로 대상을 지정하세요.", Bounds = Box(40, 174, 460, 70), BackColor = Color.White, ForeColor = muted });
+                    dialog.Controls.Add(new Label { Text = "다시 실행할 때 입력할 내용", Bounds = Box(24, 294, 492, 30), ForeColor = ink });
+                    var input = new TextBox { Multiline = true, MaxLength = 16000, ScrollBars = ScrollBars.Vertical, Bounds = Box(24, 328, 492, 76),
+                        Name = "CandidateInputValue", AccessibleName = "입력할 값" }; dialog.Controls.Add(input);
+                    dialog.Controls.Add(new Label { Text = "실행할 때 기존 내용을 전체 바꿉니다. 값을 비워두면 기존 내용이 지워집니다.\n지금 확인해도 프로그램에 입력하거나 재생하지 않습니다.", Bounds = Box(24, 410, 492, 46), ForeColor = muted });
+                    var choose = new Button(); ButtonStyle(choose, "RetargetInputCandidate", "다른 위치 선택", Box(24, 472, 160, 34), false, dialog);
+                    choose.Click += delegate { chosenValue = input.Text; retarget = true; dialog.DialogResult = DialogResult.OK; dialog.Close(); };
+                    var confirm = new Button(); ButtonStyle(confirm, "ConfirmInputCandidate", "이 위치와 값 사용", Box(196, 472, 200, 34), true, dialog); confirm.Enabled = picture.Image != null;
+                    confirm.Click += delegate { if (picture.Image == null) return; chosenValue = input.Text; accepted = true; dialog.DialogResult = DialogResult.OK; dialog.Close(); };
+                    var cancel = new Button(); ButtonStyle(cancel, "CancelInputCandidate", "취소", Box(408, 472, 108, 34), false, dialog); cancel.DialogResult = DialogResult.Cancel;
+                    dialog.CancelButton = cancel; dialog.AcceptButton = confirm;
+                    Rectangle working = Screen.FromControl(this).WorkingArea;
+                    if (dialog.Height > working.Height) { dialog.AutoScroll = true; dialog.AutoScrollMinSize = dialog.ClientSize; dialog.Height = working.Height; }
+                    dialog.ShowDialog(this); if (picture.Image != null) picture.Image.Dispose();
+                }
+            }
+            int index = Num(item, "index", -1);
+            if (accepted) Send("resolve_input", new Dictionary<string, object> { { "index", index }, { "value", chosenValue } }, null);
+            if (retarget) {
+                Send("retarget_step", new Dictionary<string, object> { { "index", index }, { "action", "set_value" }, { "value", chosenValue } }, null);
+                if (busy) { hiddenForPicker = true; Hide(); }
+            }
+        }
         void ShowStepPreview(Dictionary<string, object> item)
         {
+            if (IsInputCandidate(item)) { ShowInputCandidate(item); return; }
             bool replace = false, completionRequested = false;
             string repairAction = Str(item, "repair_action", ""), repairValue = "", repairMethod = "auto";
             bool manual = Str(item, "action", "") == "manual_entry";

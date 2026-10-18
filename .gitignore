@@ -11,3 +11,5 @@ dist/
 *.dll
 *.node
 *.zip
+image_backend_runtime/
+flaui/

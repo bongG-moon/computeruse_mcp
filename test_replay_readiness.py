@@ -83,6 +83,22 @@ class LegacyCoordinateTests(unittest.TestCase):
         self.assertNotIn("template_png", details)
         self.assertFalse(result["input_dispatched"])
 
+    def test_unfinished_candidate_search_preserves_budget_reason_without_duplicate_claim_or_input(self):
+        self.match.update(status="ambiguous", score=.932, backend="airtest-template-rgb",
+            search_diagnostic="candidate_budget_exceeded", search_complete=False,
+            candidate_evaluations=256, candidate_budget=256)
+        self.match.pop("candidate_count", None)
+        result = self.run_step()
+        details = result["diagnostic"]["image_match"]
+        self.assertEqual(details["search_diagnostic"], "candidate_budget_exceeded")
+        self.assertEqual(details["backend"], "airtest-template-rgb")
+        self.assertEqual(details["score"], .932)
+        self.assertFalse(details["search_complete"])
+        self.assertNotIn("candidate_count", details)
+        self.assertIn("탐색 한도", result["diagnostic"]["message"])
+        self.assertFalse(result["input_dispatched"])
+        self.assertEqual(self.mutations(), [])
+
     def test_preflight_preserves_driver_refusal_instead_of_claiming_capture_failure(self):
         def refuse(request, result):
             result.clear()
@@ -312,7 +328,11 @@ class ExactImageCacheTests(unittest.TestCase):
                     "rect": {"x": 10, "y": 10, "width": 16, "height": 16}}
                 Path(args[3]).write_text(json.dumps(response), encoding="utf-8")
                 return SimpleNamespace(poll=lambda: 0, returncode=0)
-            with mock.patch("image_targets.subprocess.Popen", side_effect=matcher_process):
+            # This test exercises the native child-process cache boundary.
+            # The optional Airtest engine has the same cross-backend invariant
+            # covered in test_image_backend_routing; installed dependencies must
+            # not change which implementation this protocol double exercises.
+            with mock.patch("airtest_backend.available", return_value=False), mock.patch("image_targets.subprocess.Popen", side_effect=matcher_process):
                 first = match_image(runtime, image_target(), png(100, 100))
                 same = match_image(runtime, image_target(), png(100, 100))
                 changed = match_image(runtime, image_target(), png(101, 100))

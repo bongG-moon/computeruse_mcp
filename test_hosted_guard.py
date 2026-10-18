@@ -114,6 +114,27 @@ class HostedGuardTests(unittest.TestCase):
         self.native.focused = 12
         with self.assertRaises(GuardError): self.guard.image_focus_resolver(self.target)
 
+    def test_checkpoint_readiness_uses_only_original_guard_owned_child(self):
+        with mock.patch('vendor.guard.windows_checkpoint_ready', return_value=True) as ready:
+            self.assertTrue(self.guard.checkpoint_ready_resolver(10))
+            ready.assert_called_once_with(10, hosted_window_id=11)
+        self.native.identities[200]['started'] += 1
+        with mock.patch('vendor.guard.windows_checkpoint_ready', return_value=True) as ready:
+            self.assertFalse(self.guard.checkpoint_ready_resolver(10))
+            ready.assert_not_called()
+
+    def test_checkpoint_child_replacement_during_native_read_fails_closed(self):
+        def swapped(*args, **kwargs):
+            self.native.identities[200]['package'] = 'Another.Package'
+            return True
+        with mock.patch('vendor.guard.windows_checkpoint_ready', side_effect=swapped):
+            self.assertFalse(self.guard.checkpoint_ready_resolver(10))
+
+    def test_unbound_sibling_gets_no_hosted_foreground_exception(self):
+        with mock.patch('vendor.guard.windows_checkpoint_ready', return_value=False) as ready:
+            self.assertFalse(self.guard.checkpoint_ready_resolver(99))
+            ready.assert_called_once_with(99)
+
     def test_owner_read_failure_is_not_proof_that_hosted_window_closed(self):
         probe = HostedWindowProbe(self.guard, self.target)
         self.guard.window_resolver = mock.Mock(side_effect=OSError('owner read unavailable'))

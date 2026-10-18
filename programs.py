@@ -19,6 +19,7 @@ import uuid
 
 from consent import _plain_chain
 from settings import validate_config
+from program_launch import appref_launch_profile
 from vendor.guard import GuardError, check_app
 
 
@@ -197,6 +198,7 @@ def main(argv=None) -> int:
             command.add_argument("--hints", default="")
             command.add_argument("--control-exe", action="append", type=Path, default=[])
             command.add_argument("--launch-uri", help="Windows에 전달할 전용 protocol:// 또는 http(s):// 주소")
+            command.add_argument("--launch-appref", help="Windows에서 열 로컬 ClickOnce .appref-ms 파일의 전체 경로")
             command.add_argument("--argument", action="append", default=[], help="실행 인자 한 개. --argument=--flag 형태로 반복")
             command.add_argument("--working-directory", type=Path, help="EXE 실행 시 시작 폴더")
         if action == "add":
@@ -206,9 +208,12 @@ def main(argv=None) -> int:
         if args.action in {"inspect", "list"}:
             result = inspect_programs(args.config)
         else:
-            if args.launch_uri and (args.argument or args.working_directory):
+            if args.launch_appref and args.launch_uri:
+                raise ProgramError("실행 주소와 응용 프로그램 참조 중 하나만 지정하세요.")
+            if (args.launch_uri or args.launch_appref) and (args.argument or args.working_directory):
                 raise ProgramError("주소 실행과 EXE 인자·시작 폴더는 함께 지정하지 않습니다.")
-            launch = ({"kind": "uri", "target": args.launch_uri} if args.launch_uri else
+            launch = (appref_launch_profile(args.launch_appref) if args.launch_appref else
+                      {"kind": "uri", "target": args.launch_uri} if args.launch_uri else
                       {"kind": "exe", "arguments": args.argument} if args.argument or args.working_directory else None)
             if args.working_directory:
                 launch["cwd"] = str(args.working_directory)

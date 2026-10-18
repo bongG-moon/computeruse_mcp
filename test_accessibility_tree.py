@@ -173,6 +173,110 @@ class AccessibilityTreeTests(unittest.TestCase):
                 self.assert_rejected(observed())
         self.assertIsNone(normalize_snapshot(None))
 
+    @staticmethod
+    def projected_business():
+        # Shape captured from the actual Windows fixture: the unnamed Panel
+        # under the archive Group is absent, but descendants retain depth 3.
+        return {"elements_complete": False, "elements": [
+            {"element_index": 0, "depth": 3, "role": "Edit", "label": "[Editor] Edit Area",
+             "value": "MAIN", "actions": ["set_value"], "element_token": "fresh:0"},
+            {"element_index": 1, "depth": 2, "role": "Button", "label": "조회", "actions": ["invoke"]},
+            {"element_index": 2, "depth": 3, "role": "Edit", "label": "[Editor] Edit Area",
+             "value": "ARCHIVE", "actions": ["set_value"], "element_token": "fresh:2"},
+            {"element_index": 3, "depth": 2, "role": "Button", "label": "조회", "actions": ["invoke"]},
+            {"element_index": 4, "depth": 3, "role": "Header", "label": "Family", "actions": ["invoke"]}],
+            "tree_markdown": '''- Window "Synthetic business"
+  - Group "조회 조건"
+    - Pane
+      - Text "Device"
+      - [0] Edit "[Editor] Edit Area" [id=100 actions=[set_value]]
+    - [1] Button "조회" [id=101 actions=[invoke]]
+  - Group "보관 조건"
+      - Text "Device"
+      - [2] Edit "[Editor] Edit Area" [id=200 actions=[set_value]]
+    - [3] Button "조회" [id=201 actions=[invoke]]
+  - Table "결과"
+    - Custom "상위 행"
+      - [4] Header "Family" [actions=[invoke]]
+'''}
+
+    def test_incomplete_driver_projection_preserves_witnessed_omitted_containers(self):
+        from operations import _unique
+        source = self.projected_business()
+        result = normalize_snapshot(source)
+        self.assertEqual(result["accessibility_normalization"]["status"], "augmented")
+        self.assertEqual(result["accessibility_normalization"]["omitted_parent_gaps"], 2)
+        for group, token in (("조회 조건", "fresh:0"), ("보관 조건", "fresh:2")):
+            found = _unique(result, {"role": "Edit", "name": "[Editor] Edit Area", "within": {"name": group}})
+            self.assertEqual(found["element_token"], token)
+        self.assertEqual(result["elements"][2]["automation_id"], "200")
+        self.assertTrue(result["elements"][2]["rendered_parent_gap"])
+        self.assertEqual([e["element_token"] for e in result["elements"] if "element_token" in e], ["fresh:0", "fresh:2"])
+        self.assertEqual(source["elements"][2].get("automation_id"), None)
+
+    def test_gaps_require_incomplete_projection_and_matching_indexed_depths(self):
+        for change in (lambda s: s.update(elements_complete=True),
+                       lambda s: s.pop("elements_complete"),
+                       lambda s: s["elements"][2].update(depth=2),
+                       lambda s: s["elements"][2].update(parent_index=0),
+                       lambda s: s.update(tree_markdown=s["tree_markdown"].replace('  - Table "결과"', '        - Group "unwitnessed"\n  - Table "결과"'))):
+            source = self.projected_business(); change(source)
+            self.assert_rejected(source)
+
+    def test_rendered_labels_remain_separate_from_actionable_elements_and_values(self):
+        source = self.projected_business()
+        result = normalize_snapshot(source)
+        labels = result["read_only_labels"]
+        self.assertEqual([e["label"] for e in labels], ["Device", "Device"])
+        self.assertEqual([e["following_element_index"] for e in labels], [0, 2])
+        self.assertNotEqual(labels[0]["parent_index"], labels[1]["parent_index"])
+        indices = {e["element_index"] for e in result["elements"]}
+        for label in labels:
+            self.assertNotIn(label["element_index"], indices)
+            for key in ("actions", "value", "element_token", "automation_id", "frame", "bounds"):
+                self.assertNotIn(key, label)
+            self.assertEqual(label["relation"], "rendered_parent_only")
+        source["tree_markdown"] = source["tree_markdown"].replace('Text "Device"', 'Text "SECRET" [value="SECRET"]')
+        self.assertEqual(normalize_snapshot(source)["read_only_labels"], [])
+
+    def test_protected_subtrees_do_not_contribute_rendered_text_context(self):
+        source = observed()
+        source["elements"][0]["protected"] = True
+        source["tree_markdown"] = TREE.replace('  - Group "왼쪽 그룹"', '    - Text "SECRET"\n  - Group "왼쪽 그룹"')
+        result = normalize_snapshot(source)
+        self.assertNotEqual(result["accessibility_normalization"]["status"], "rejected")
+        self.assertNotIn("SECRET", str(result["read_only_labels"]))
+
+    def test_preceding_text_does_not_bridge_value_bearing_or_protected_rows(self):
+        source = self.projected_business()
+        source["tree_markdown"] = source["tree_markdown"].replace('      - [0] Edit',
+            '      - Text "dynamic value" [value="current"]\n      - [0] Edit')
+        result = normalize_snapshot(source)
+        self.assertEqual(len(result["read_only_labels"]), 2)
+        self.assertNotIn("following_element_index", result["read_only_labels"][0])
+        source = self.projected_business(); source["elements"][0]["protected"] = True
+        self.assertNotIn("following_element_index", normalize_snapshot(source)["read_only_labels"][0])
+
+    def test_many_rendered_labels_are_bounded_and_do_not_enter_actionable_projection(self):
+        source = self.projected_business()
+        source["tree_markdown"] = source["tree_markdown"].replace('      - Text "Device"',
+            '\n'.join('      - Text "Hint %d"' % index for index in range(4000)), 1)
+        result = normalize_snapshot(source)
+        self.assertEqual(result["accessibility_normalization"]["status"], "augmented")
+        self.assertEqual(len(result["read_only_labels"]), 4001)
+        self.assertTrue(all(label["following_element_index"] == 0 for label in result["read_only_labels"][:-1]))
+        self.assertLess(len(result["elements"]), 20)
+
+    def test_current_complex_fixture_artifact_restores_ids_when_available(self):
+        path = Path(__file__).parent / ".data/acceptance018-complex-20261017/raw-business-uia.json"
+        if not path.exists():
+            self.skipTest("Developer-only live artifact; static captured-shape test always runs")
+        from live_validation import decoded
+        result = normalize_snapshot(decoded(json.loads(path.read_text(encoding="utf-8"))))
+        self.assertEqual(result["accessibility_normalization"]["status"], "augmented")
+        self.assertEqual(result["accessibility_normalization"]["automation_ids_added"], 24)
+        self.assertEqual(sum(e["label"] == "Device" for e in result["read_only_labels"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

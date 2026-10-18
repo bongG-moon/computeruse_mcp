@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 import programs
 from settings import validate_config
-from program_launch import validate_launch_profile
+from program_launch import validate_launch_profile, inspect_appref, appref_launch_profile
 from vendor.guard import check_app, _same_windows_user_session, GuardError
 
 
@@ -175,9 +175,22 @@ class ProgramRegistration:
                 'next_arguments': {'launch_uri': uri, **{key: args[key] for key in ('name', 'program_id', 'hints') if key in args}},
                 'message': '주소를 등록할 실제 업무 창을 목록에서 선택하세요. 선택한 candidate_id와 launch_uri를 함께 전달하면 바로 등록됩니다. 창이 없으면 사용자가 평소 방식으로 한 번 연 뒤 목록을 다시 확인하세요. 설정 파일을 찾거나 편집할 필요가 없습니다.'}
 
+    def appref_candidates(self, args, cancel_event=None):
+        info = inspect_appref(args['launch_appref'])
+        profile = {'kind': 'appref', 'target': info['path'], 'sha256': info['sha256']}
+        known = [p for p in self.manager.config['programs'] if p.get('launch') == profile]
+        if len(known) == 1:
+            return self.register({**args, 'exe': known[0]['exe'], 'program_id': known[0]['id']}, cancel_event)
+        choices = self.list_candidates()
+        return {**choices, 'status': 'choose_program_window', 'saved': False,
+                'applied_to_next_session': False, 'reconnect_required': False,
+                'launch_appref': info['path'], 'reference': info, 'automatic_retry': False,
+                'next_arguments': {'launch_appref': info['path'], **{key: args[key] for key in ('name', 'program_id', 'hints') if key in args}},
+                'message': '응용 프로그램 참조를 확인했습니다. 이 파일로 여는 실제 업무 창을 목록에서 선택하고 candidate_id와 launch_appref를 함께 전달하세요. 창이 없으면 사용자가 참조 파일을 한 번 열어 주세요. 등록만으로 실행하거나 인터넷에 접속하지 않습니다. 설정 파일을 편집할 필요가 없습니다.'}
+
     def _options(self, args, loaded):
         if args.get("builtin") is not None:
-            if any(key in args for key in ("exe", "candidate_id", "arguments", "working_directory", "launch_uri", "control_exes")):
+            if any(key in args for key in ("exe", "candidate_id", "arguments", "working_directory", "launch_uri", "launch_appref", "control_exes")):
                 raise RegistrationError("invalid_builtin", "기본 프로그램은 builtin 이름으로 지정하세요. 실행 경로나 실행 인자를 함께 지정하지 않습니다.")
             from builtin_programs import resolve_builtin, is_previous_package_path
             try:
@@ -225,9 +238,10 @@ class ProgramRegistration:
             if len(matches) != 1:
                 raise RegistrationError("candidate_stale", "선택했던 창이 바뀌거나 닫혔습니다. computer_program_candidates로 현재 목록을 다시 확인하세요.")
             exe = matches[0]["exe"]
-        if args.get("launch_uri") and (args.get("arguments") or args.get("working_directory")):
+        if (args.get("launch_uri") or args.get("launch_appref")) and (args.get("arguments") or args.get("working_directory")):
             raise RegistrationError("invalid_launch", "주소 실행과 EXE 인자·시작 폴더는 함께 지정하지 않습니다.")
-        launch = ({"kind": "uri", "target": args["launch_uri"]} if args.get("launch_uri") else
+        launch = (appref_launch_profile(args["launch_appref"]) if args.get("launch_appref") else
+                  {"kind": "uri", "target": args["launch_uri"]} if args.get("launch_uri") else
                   {"kind": "exe", "arguments": args.get("arguments", [])} if "arguments" in args or args.get("working_directory") else None)
         if args.get("working_directory"):
             launch["cwd"] = args["working_directory"]
@@ -289,6 +303,11 @@ class ProgramRegistration:
     def register(self, args, cancel_event=None):
         manager = self.manager
         with manager.lock:
+            if args.get('launch_appref'):
+                if args.get('launch_uri') or args.get('arguments') or args.get('working_directory') or args.get('builtin'):
+                    raise RegistrationError('invalid_launch', '응용 프로그램 참조에는 launch_appref만 지정하세요. 주소·EXE 인자·시작 폴더·기본 앱과 함께 지정하지 않습니다.')
+                if not args.get('exe') and not args.get('candidate_id'):
+                    return self.appref_candidates(args, cancel_event)
             if args.get('launch_uri') and not args.get('exe') and not args.get('candidate_id'):
                 return self.uri_candidates(args, cancel_event)
             if manager.config_path is None:

@@ -451,9 +451,9 @@ class SessionRuntime:
                 self.guard.action_count += 1
                 self.guard.observed_targets.clear()
             result = observation.finish(proc)
-            uri_launch = app.get("launch", {}).get("kind") == "uri"
-            result.update(program_id=program_id, working_directory=None if uri_launch else app.get("launch", {}).get("cwd", str(Path(executable).parent)),
-                          runtime_environment_isolated=not uri_launch)
+            shell_launch = app.get("launch", {}).get("kind") in {"uri", "appref", "builtin"}
+            result.update(program_id=program_id, working_directory=None if shell_launch else app.get("launch", {}).get("cwd", str(Path(executable).parent)),
+                          runtime_environment_isolated=not shell_launch)
             call_id = uuid.uuid4().hex
             self.guard.log("result", request_id=call_id, tool="computer_launch", route="management",
                            pid=proc.pid, exe=executable, success=result["launch_status"] != "startup_failed",

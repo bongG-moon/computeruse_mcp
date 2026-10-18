@@ -118,6 +118,14 @@ def validate_match(answer, image_target, screenshot_png):
         details["scale"] = round(answer["scale"], 6)
     if answer.get("code") == "template_low_detail":
         details["low_detail"] = True
+    if answer.get("code") == "candidate_budget_exceeded":
+        evaluations, budget = answer.get("candidate_evaluations"), answer.get("candidate_budget")
+        if (answer["status"] != "ambiguous" or answer.get("search_complete") is not False
+                or type(evaluations) is not int or type(budget) is not int
+                or not 1 <= evaluations == budget <= 100000 or "candidate_count" in answer):
+            raise OperationError("이미지 탐색 예산 진단의 형식을 확인하지 못했습니다.", "image_match_invalid")
+        details.update(search_diagnostic="candidate_budget_exceeded", search_complete=False,
+                       candidate_evaluations=evaluations, candidate_budget=budget)
     if answer["status"] != "matched":
         return {"status": answer["status"], "code": "image_ambiguous" if answer["status"] == "ambiguous" else
                 "image_template_low_detail" if details.get("low_detail") else "image_not_found", **details}
@@ -169,26 +177,11 @@ def validate_match(answer, image_target, screenshot_png):
     return {**details, "status": "matched", "x": x, "y": y, "score": score, "rect": dict(rect), "screenshot": screenshot}
 
 
-def match_image(runtime, image_target, screenshot_png):
-    """Launch our fixed matcher only; no business process or global input hooks."""
+def _native_match(runtime, target, screenshot_png, helper, deadline):
+    """Cancellable fixed helper; this function never dispatches input."""
     from learning import ElementLibrary
-    target = validate_image_target(image_target)
-    png_dimensions(screenshot_png)
-    runtime.check_active()
-    helper = Path(__file__).resolve().with_name(HELPER_NAME)
-    ElementLibrary._reject_link(helper, file=True)
     if not helper.is_file():
         raise OperationError("이미지 도구 실행파일이 없습니다. 전체 배포 ZIP으로 업데이트하세요.", "image_helper_missing")
-    # A fresh capture is mandatory at every caller. Reuse the expensive global
-    # search only when *all* screenshot bytes, template settings and helper
-    # version are identical. Region-only reuse could miss a new duplicate.
-    stat = helper.stat()
-    key = hashlib.sha256((json.dumps(target, sort_keys=True, separators=(",", ":")) + "\0" + screenshot_png
-        + "\0" + str(stat.st_mtime_ns) + ":" + str(stat.st_size)).encode("utf-8")).hexdigest()
-    cache = getattr(runtime, "_image_match_cache", {})
-    if isinstance(cache, dict) and key in cache:
-        runtime.check_active()
-        return {**copy.deepcopy(cache[key]), "search_reused": True}
     root = Path(runtime.run_dir) / "im"
     ElementLibrary._reject_link(root)
     root.mkdir(exist_ok=True)
@@ -204,7 +197,6 @@ def match_image(runtime, image_target, screenshot_png):
         child = subprocess.Popen([str(helper), "--match", str(request), str(response)], cwd=str(helper.parent),
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0)
-        deadline = time.monotonic()+22
         while child.poll() is None:
             runtime.check_active()
             if time.monotonic() >= deadline:
@@ -217,13 +209,7 @@ def match_image(runtime, image_target, screenshot_png):
         answer = json.loads(response.read_text(encoding="utf-8-sig"))
         if answer.get("nonce") != nonce:
             raise OperationError("다른 이미지 비교 요청의 응답입니다.", "image_match_invalid")
-        validated = validate_match(answer, target, screenshot_png)
-        cache = dict(cache) if isinstance(cache, dict) else {}
-        while len(cache) >= 8:
-            cache.pop(next(iter(cache)))
-        cache[key] = copy.deepcopy(validated)
-        runtime._image_match_cache = cache
-        return {**validated, "search_reused": False}
+        return answer
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         if isinstance(error, OperationError):
             raise
@@ -242,3 +228,100 @@ def match_image(runtime, image_target, screenshot_png):
                 path.unlink(missing_ok=True)
             except (OSError, OperationError):
                 pass
+
+
+class _BackendCheckAborted(BaseException):
+    """Preserve any session cancellation exception across backend fallbacks."""
+    def __init__(self, cause):
+        self.cause = cause
+
+
+def _backend_fingerprint(helper):
+    """Cache results only for byte-identical adapters and declared runtimes."""
+    from learning import ElementLibrary
+    root = Path(__file__).resolve().parent
+    parts = []
+    for path in (helper, root/"airtest_backend.py", root/"image_backend_runtime/BACKEND-MANIFEST.json"):
+        ElementLibrary._reject_link(path, file=True)
+        if not path.is_file():
+            parts.append(path.name+":missing")
+        elif path == helper:
+            stat = path.stat()
+            parts.append(path.name+":"+str(stat.st_mtime_ns)+":"+str(stat.st_size))
+        else:
+            parts.append(path.name+":"+hashlib.sha256(path.read_bytes()).hexdigest())
+    return "|".join(parts)
+
+
+def match_image(runtime, image_target, screenshot_png):
+    """Select a bundled local matcher; preserve ambiguity and input safeguards.
+
+    Production measurements include isolated-worker startup, so the native
+    matcher remains first for every frame. Airtest is a bounded fallback for a
+    genuinely absent target. Both only read supplied PNGs.
+    """
+    target = validate_image_target(image_target)
+    width, height = png_dimensions(screenshot_png)
+    runtime.check_active()
+    helper = Path(__file__).resolve().with_name(HELPER_NAME)
+    fingerprint = _backend_fingerprint(helper)
+    key = hashlib.sha256((json.dumps(target, sort_keys=True, separators=(",", ":"))+"\0"+screenshot_png
+                          +"\0"+fingerprint).encode("utf-8")).hexdigest()
+    cache = getattr(runtime, "_image_match_cache", {})
+    if isinstance(cache, dict) and key in cache:
+        runtime.check_active()
+        return {**copy.deepcopy(cache[key]), "search_reused": True}
+    started = time.monotonic()
+    deadline = started+22
+    import airtest_backend
+    present = airtest_backend.available()
+    order = ("native", "airtest")
+    fallback = None
+    validated = None
+
+    def active():
+        try:
+            runtime.check_active()
+        except Exception as error:
+            raise _BackendCheckAborted(error) from error
+
+    for backend in order:
+        runtime.check_active()
+        if time.monotonic() >= deadline:
+            raise OperationError("이미지 비교 시간이 초과됐습니다. 입력하지 않았습니다.", "image_match_timeout")
+        if backend == "airtest":
+            if not present:
+                continue
+            try:
+                answer = airtest_backend.match_isolated(runtime, target, screenshot_png, deadline=deadline, check_active=active)
+                candidate = validate_match(answer, target, screenshot_png)
+            except _BackendCheckAborted as error:
+                raise error.cause
+            except (airtest_backend.BackendUnavailable, OSError, ImportError, ValueError, TimeoutError) as error:
+                runtime.check_active()
+                if isinstance(error, OperationError) and error.code not in ("image_match_failed", "image_match_invalid"):
+                    raise
+                fallback = "image_backend_unavailable" if isinstance(error, airtest_backend.BackendUnavailable) else "image_backend_failed"
+                if validated is not None:
+                    break
+                continue
+        else:
+            answer = _native_match(runtime, target, screenshot_png, helper, deadline)
+            candidate = validate_match(answer, target, screenshot_png)
+        runtime.check_active()
+        validated = {**candidate, "backend": "airtest-template-rgb" if backend == "airtest" else "native-rgb"}
+        # Uniqueness and detail rejection are final, never a reason to try a
+        # more permissive engine. Only a genuinely absent target may fall back.
+        if candidate["status"] != "not_found" or candidate.get("low_detail"):
+            break
+    if validated is None:
+        raise OperationError("로컬 이미지 비교 도구를 시작하지 못했습니다.", "image_match_failed")
+    validated["search_ms"] = round((time.monotonic()-started)*1000, 2)
+    if fallback:
+        validated["backend_fallback"] = fallback
+    cache = dict(cache) if isinstance(cache, dict) else {}
+    while len(cache) >= 8:
+        cache.pop(next(iter(cache)))
+    cache[key] = copy.deepcopy(validated)
+    runtime._image_match_cache = cache
+    return {**validated, "search_reused": False}

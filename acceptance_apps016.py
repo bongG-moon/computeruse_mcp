@@ -24,15 +24,18 @@ def prepare(folder):
     folder.mkdir(parents=True, exist_ok=False)
     for name in ("commands", "responses", "images"):
         (folder/name).mkdir()
+    from builtin_programs import builtin_catalog
+    catalog = builtin_catalog()
     programs = [
         {"id":"mumu", "name":"MuMuPlayer", "exe":r"C:\Program Files\Netease\MuMuPlayerGlobal-12.0\nx_main\MuMuNxMain.exe",
          "launch":{"kind":"exe","arguments":["--from-shortcut"]},"enabled":True},
-        {"id":"chrome", "name":"Google Chrome", "exe":r"C:\Program Files\Google\Chrome\Application\chrome.exe", "enabled":True},
-        {"id":"notepad", "name":"메모장", "exe":r"C:\Windows\System32\notepad.exe", "enabled":True,
-         "control_exes":[r"C:\Program Files\WindowsApps\Microsoft.WindowsNotepad_11.2607.14.0_x64__8wekyb3d8bbwe\Notepad\Notepad.exe"]},
-        {"id":"calculator", "name":"계산기", "exe":r"C:\Windows\System32\calc.exe", "enabled":True,
-         "control_exes":[r"C:\Program Files\WindowsApps\Microsoft.WindowsCalculator_11.2607.0.0_x64__8wekyb3d8bbwe\CalculatorApp.exe"]},
     ]
+    for name in ("chrome", "notepad", "calculator"):
+        entry = catalog[name]
+        if entry["available"]:
+            programs.append({key: value for key, value in
+                {**entry, "id": name, "enabled": True}.items()
+                if key in {"id", "name", "exe", "control_exes", "launch", "enabled"}})
     save_config(folder/"config.json",{"version":1,"driver":str(DRIVER.resolve()),"state_dir":str(folder/"state"),
         "programs":programs,"mode":"uia","approval":"client","max_minutes":30,"max_actions":300,
         "log_detail":"metadata","observation_timeout_seconds":12})
@@ -52,7 +55,13 @@ def serve(folder, bundle=None, administrator=False):
         while not (folder/"stop-server.flag").exists():
             for path in sorted((folder/"commands").glob("*.json")):
                 if path.name in seen: continue
-                command=json.loads(path.read_text(encoding="utf-8-sig")); seen.add(path.name); began=time.monotonic()
+                # A developer may still be writing the queue file. Do not close
+                # the live MCP/recording session on an incomplete publication.
+                try:
+                    command=json.loads(path.read_text(encoding="utf-8-sig"))
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    continue
+                seen.add(path.name); began=time.monotonic()
                 try:
                     if command.get("method")=="tools/list":
                         response=client.request("tools/list",timeout=40)

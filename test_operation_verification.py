@@ -276,6 +276,183 @@ class ScopedObservationTests(unittest.TestCase):
         self.assertFalse(result["input_dispatched"])
         self.assertEqual(result["diagnostic"]["code"], "read_only_observation")
 
+    def test_provider_role_difference_falls_back_once_without_replaying_input(self):
+        cell = {"name": "Item row 0", "role": "DataItem"}
+        before = snapshot(element(), element(1, name=cell["name"], role="DataItem"))
+        after = snapshot(element(value="after"), element(1, name=cell["name"], role="DataItem", value="after"))
+        runtime = Runtime([before, after])
+        runtime.observe_controls = mock.Mock(return_value=self.scoped(elements=[
+            element(1, name=cell["name"], role="Custom", value="after")]))
+        step = write(verification_timeout_ms=0, expect=[{
+            "selector": cell, "property": "value", "equals": "after", "require_change": True}])
+        result = Operations(runtime).execute(step, TARGET)
+        self.assertTrue(result["task_verified"])
+        self.assertTrue(next(item for item in result["checks"] if item["selector"] == cell)["change_observed"])
+        self.assertEqual(result["metrics"]["scoped_fallbacks"], 1)
+        runtime.observe_controls.assert_called_once()
+        self.assertEqual([name for name, _ in runtime.calls], ["get_window_state", "set_value", "get_window_state"])
+
+    def test_fallback_stays_on_driver_for_bounded_later_value_polls(self):
+        runtime = Runtime([snapshot(element()), snapshot(element()), snapshot(element(value="after"))])
+        runtime.observe_controls = mock.Mock(return_value=self.scoped(elements=[]))
+        runtime.observe_completion_controls = mock.Mock()
+        clock = Clock()
+        with mock.patch("operations.time.monotonic", clock.monotonic), mock.patch.object(runtime.stop_event, "wait", clock.wait):
+            result = Operations(runtime).execute(write(), TARGET)
+        self.assertTrue(result["task_verified"])
+        self.assertEqual(result["metrics"]["scoped_fallbacks"], 1)
+        runtime.observe_controls.assert_called_once()
+        runtime.observe_completion_controls.assert_not_called()
+        self.assertEqual([name for name, _ in runtime.calls], ["get_window_state", "set_value", "get_window_state", "get_window_state"])
+
+    def test_missing_scoped_property_reads_driver_without_reentering_native_completion(self):
+        missing = element()
+        missing.pop("value")
+        for observed, verified in ((element(value="after"), True), (missing, False)):
+            with self.subTest(verified=verified):
+                runtime = Runtime([snapshot(element()), snapshot(observed)])
+                runtime.observe_controls = mock.Mock(return_value=self.scoped(elements=[missing]))
+                runtime.observe_completion_controls = mock.Mock(return_value=self.scoped())
+                result = Operations(runtime).execute(write(verification_timeout_ms=0), TARGET)
+                self.assertEqual(result["task_verified"], verified)
+                runtime.observe_controls.assert_called_once()
+                runtime.observe_completion_controls.assert_not_called()
+                self.assertEqual(len(runtime.calls), 3)
+
+    def test_conflicting_value_is_polled_natively_and_never_treated_as_missing(self):
+        runtime = Runtime([snapshot(element())])
+        runtime.observe_controls = mock.Mock(side_effect=[self.scoped("before"), self.scoped()])
+        clock = Clock()
+        with mock.patch("operations.time.monotonic", clock.monotonic), mock.patch.object(runtime.stop_event, "wait", clock.wait):
+            result = Operations(runtime).execute(write(), TARGET)
+        self.assertTrue(result["task_verified"])
+        self.assertNotIn("scoped_fallbacks", result["metrics"])
+        self.assertEqual(runtime.observe_controls.call_count, 2)
+        self.assertEqual(len(runtime.calls), 2)
+
+    def test_missing_plus_ambiguous_or_protected_assertion_never_falls_back(self):
+        other = {"name": "missing", "role": "Edit"}
+        assertions = [{"selector": other, "property": "value", "equals": "after"}, check()]
+        protected = element(protected=True)
+        protected.pop("value")
+        for rows in ([element(), element(1)], [protected]):
+            with self.subTest(rows=rows):
+                runtime = Runtime([snapshot(element())])
+                runtime.observe_controls = mock.Mock(return_value=self.scoped(elements=rows))
+                result = Operations(runtime).execute(write(expect=assertions, verification_timeout_ms=0), TARGET)
+                self.assertFalse(result["task_verified"])
+                self.assertNotIn("scoped_fallbacks", result["metrics"])
+                self.assertEqual(len(runtime.calls), 2)
+
+    def test_late_or_cancelled_missing_snapshot_never_starts_fallback_read(self):
+        for cancelled in (False, True):
+            with self.subTest(cancelled=cancelled):
+                runtime = Runtime([snapshot(element())])
+                clock = Clock()
+                def missing(*args, **kwargs):
+                    if cancelled:
+                        runtime.stop_event.set()
+                    else:
+                        clock.now += 1.1
+                    return self.scoped(elements=[])
+                runtime.observe_controls = mock.Mock(side_effect=missing)
+                with mock.patch("operations.time.monotonic", clock.monotonic):
+                    result = Operations(runtime).execute(write(), TARGET)
+                self.assertFalse(result["task_verified"])
+                self.assertEqual(len(runtime.calls), 2)
+                self.assertNotIn("scoped_fallbacks", result["metrics"])
+
+    def test_fallback_driver_scope_is_validated_and_no_more_read_follows_error(self):
+        runtime = Runtime([snapshot(element()), snapshot(element(value="after"), window_id=999)])
+        runtime.observe_controls = mock.Mock(return_value=self.scoped(elements=[]))
+        result = Operations(runtime).execute(write(), TARGET)
+        self.assertFalse(result["task_verified"])
+        self.assertEqual(result["diagnostic"]["code"], "target_mismatch")
+        self.assertEqual(len(runtime.calls), 3)
+        runtime.observe_controls.assert_called_once()
+
+
+class MissingValueCompletionTests(unittest.TestCase):
+    @staticmethod
+    def missing(**extra):
+        row = element(**extra)
+        row.pop("value")
+        return snapshot(row)
+
+    @staticmethod
+    def native(value="", **extra):
+        return {"structuredContent": {**snapshot(element(value=value)), "read_only": True,
+            "scoped_observation": True, "scope_complete": True, **extra}}
+
+    def runtime(self, observations, answer=None):
+        runtime = Runtime(observations)
+        runtime.observe_controls = mock.Mock(side_effect=NotImplementedError)
+        runtime.observe_completion_controls = mock.Mock(return_value=self.native() if answer is None else answer)
+        return runtime
+
+    def test_first_run_empty_clear_uses_explicit_native_value_without_replaying_input(self):
+        runtime = self.runtime([snapshot(element()), self.missing()])
+        result = Operations(runtime).execute(write(value="", verification_timeout_ms=0), TARGET)
+        self.assertTrue(result["task_verified"])
+        self.assertEqual(result["checks"][0]["observed"], "")
+        self.assertEqual([name for name, _ in runtime.calls], ["get_window_state", "set_value", "get_window_state"])
+        self.assertEqual(runtime.observe_completion_controls.call_args.args, (TARGET, [FIELD]))
+        self.assertEqual(result["metrics"]["scoped_observations"], 1)
+
+    def test_pending_clear_verifies_only_and_never_dispatches_input(self):
+        runtime = self.runtime([self.missing()])
+        result = Operations(runtime).execute(verification_step(write(value="", verification_timeout_ms=0)), TARGET)
+        self.assertTrue(result["task_verified"])
+        self.assertFalse(result["input_dispatched"])
+        self.assertEqual([name for name, _ in runtime.calls], ["get_window_state"])
+
+    def test_absence_or_native_nonempty_value_is_never_assumed_empty(self):
+        for native in (self.native(value="still text"), self.native(elements=self.missing()["elements"])):
+            with self.subTest(native=native):
+                runtime = self.runtime([self.missing()], native)
+                result = Operations(runtime).execute(verification_step(write(value="", verification_timeout_ms=0)), TARGET)
+                self.assertFalse(result["task_verified"])
+                self.assertFalse(result["input_dispatched"])
+                self.assertEqual(runtime.observe_completion_controls.call_count, 1)
+
+    def test_unavailable_completion_preserves_missing_property_without_second_driver_read(self):
+        runtime = self.runtime([self.missing()])
+        runtime.observe_completion_controls.side_effect = NotImplementedError
+        result = Operations(runtime).execute(verification_step(write(value="", verification_timeout_ms=0)), TARGET)
+        self.assertFalse(result["task_verified"])
+        self.assertEqual(result["checks"][0]["reason"], "property_unavailable")
+        self.assertEqual([name for name, _ in runtime.calls], ["get_window_state"])
+
+    def test_present_protected_missing_and_ambiguous_elements_do_not_trigger_fallback(self):
+        for observed in (snapshot(element(value="")), snapshot(element(value="wrong")),
+                         self.missing(protected=True), snapshot(), snapshot(element(), element())):
+            with self.subTest(observed=observed):
+                runtime = self.runtime([observed, observed])
+                Operations(runtime).execute(verification_step(write(value="", verification_timeout_ms=0)), TARGET)
+                runtime.observe_completion_controls.assert_not_called()
+
+    def test_failed_or_foreign_native_read_stops_without_repolling_or_input(self):
+        for answer in (self.native(window_id=999), self.native(scope_complete=False),
+                       {"isError": True, "structuredContent": {"error_code": "access_denied"}}):
+            with self.subTest(answer=answer):
+                runtime = self.runtime([self.missing()], answer)
+                result = Operations(runtime).execute(verification_step(write(value="")), TARGET)
+                self.assertFalse(result["task_verified"])
+                self.assertFalse(result["input_dispatched"])
+                self.assertEqual(runtime.observe_completion_controls.call_count, 1)
+                self.assertEqual([name for name, _ in runtime.calls], ["get_window_state"])
+
+    def test_native_completion_never_becomes_next_step_input_cache(self):
+        runtime = GuardedRuntime([snapshot(element()), self.missing(), snapshot(element()), self.missing()])
+        runtime.observe_controls = mock.Mock(side_effect=NotImplementedError)
+        runtime.observe_completion_controls = mock.Mock(return_value=self.native())
+        engine = Operations(runtime)
+        for _ in range(2):
+            result = engine.execute(write(value="", verification_timeout_ms=0), TARGET, reuse_verified=True)
+            self.assertTrue(result["task_verified"])
+            self.assertEqual(result["metrics"]["reused_observations"], 0)
+        self.assertEqual([name for name, _ in runtime.calls], ["get_window_state", "set_value", "get_window_state"] * 2)
+
 
 class EditableComboTests(unittest.TestCase):
     EDIT = {"name": "선택값 입력", "role": "Edit", "within": COMBO}

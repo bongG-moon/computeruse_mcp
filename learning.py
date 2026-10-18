@@ -95,6 +95,12 @@ def stable_selector(snapshot, element):
     safe_snapshot = {"elements": safe_elements}
     safe_element = safe_elements[original.index(element)]
     selector = control_selector(safe_snapshot, safe_element)
+    # An editable document may have no AutomationId and its name can contain
+    # document contents. Preserve the privacy projection; a unique Document
+    # role, optionally under an identified parent, does not retain its label.
+    if (selector is None and element.get("role") == "Document"
+            and "set_value" in suggested_operations(element) and isinstance(element.get("value"), str)):
+        selector = {"role": "Document"}
     if selector is None:
         raise LearningError("이 요소를 구분할 고유한 이름 또는 자동화 ID가 없습니다. 상위 영역을 확인하세요.", "ambiguous_control")
     selector["role"] = element["role"]

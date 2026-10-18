@@ -3,11 +3,19 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 
 from operations import OperationError, _descendant, _elements, _name, _payload, _unique, validate_selector
 
 
+def _protected(element):
+    return (element.get("role") == "Password" or any(element.get(key) is True
+            for key in ("protected", "is_protected", "is_password", "password")))
+
+
 def _selector_candidates(element):
+    if _protected(element):
+        return []
     candidates = []
     identity = {}
     if isinstance(element.get("automation_id"), str) and element["automation_id"].strip() and len(element["automation_id"]) <= 1000:
@@ -60,6 +68,8 @@ def control_selector(snapshot, element):
 
 
 def suggested_operations(element):
+    if _protected(element):
+        return []
     actions = element.get("actions", [])
     actions = set(a for a in actions if isinstance(a, str)) if isinstance(actions, list) else set()
     role = element.get("role")
@@ -75,6 +85,207 @@ def suggested_operations(element):
     if actions & {"invoke", "click", "toggle", "select", "expand"}:
         supported.append("click")
     return supported
+
+
+def _observed_rectangle(element):
+    # Same documented Driver contract as learning_picker._driver_rectangle:
+    # frame{x,y,w,h} and the legacy bounds{x,y,width,height} are desktop physical
+    # rectangles. They are NOT image coordinates; never infer a scale/offset.
+    if element.get("coordinate_space", "desktop_physical") != "desktop_physical":
+        return None
+    field = "frame" if "frame" in element else "bounds" if "bounds" in element else None
+    keys = ("x", "y", "w", "h") if field == "frame" else ("x", "y", "width", "height")
+    value = element.get(field)
+    if not isinstance(value, dict) or any(key not in value for key in keys):
+        return None
+    values = [value[key] for key in keys]
+    try:
+        valid = (all(type(number) in (int, float) and math.isfinite(number) for number in values)
+                 and values[2] > 0 and values[3] > 0
+                 and math.isfinite(values[0] + values[2]) and math.isfinite(values[1] + values[3]))
+    except (OverflowError, TypeError, ValueError):
+        valid = False
+    if not valid:
+        return None
+    return {"bounds": dict(zip(("x", "y", "width", "height"), values)),
+            "coordinate_space": "desktop_physical", "source": "driver." + field,
+            "image_mapping": "not_inferred", "read_only": True}
+
+
+def _context_name(element):
+    name = _name(element)
+    if (_protected(element) or not isinstance(name, str) or not name.strip() or len(name) > 200
+            or element.get("role") in {"Window", "Document", "Edit", "TextBox", "Password"}
+            or isinstance(element.get("value"), str) and element.get("value") and name == element["value"]):
+        return None
+    return name
+
+
+def _context_index(elements):
+    by_index, duplicates, labels = {}, set(), {}
+    for element in elements:
+        index = element.get("element_index")
+        if type(index) is int:
+            if index in by_index:
+                duplicates.add(index)
+            by_index[index] = element
+    for index in duplicates:
+        by_index.pop(index)
+    for element in elements:
+        parent = element.get("parent_index")
+        if (type(parent) is int and parent in by_index and not _protected(by_index[parent])
+                and element.get("role") in {"Text", "Label", "StaticText"} and _context_name(element)):
+            labels.setdefault(parent, []).append(element)
+    return by_index, labels
+
+
+def _read_only_context(element, by_index, labels, window_bounds=None):
+    if _protected(element):
+        return None
+    result = {"read_only": True, "authorizes_input": False}
+    geometry = _observed_rectangle(element)
+    window_geometry = _observed_rectangle({"bounds": window_bounds}) if isinstance(window_bounds, dict) else None
+    if geometry and window_geometry:
+        bounds, window = geometry["bounds"], window_geometry["bounds"]
+        if (min(bounds["x"] + bounds["width"], window["x"] + window["width"]) <= max(bounds["x"], window["x"])
+                or min(bounds["y"] + bounds["height"], window["y"] + window["height"]) <= max(bounds["y"], window["y"])):
+            # Some native providers return a child-local (3,3) frame despite
+            # the Driver's desktop-frame contract. Do not guess an offset.
+            geometry = None
+            result["geometry_unavailable_reason"] = "outside_observed_window"
+    if geometry:
+        result["geometry"] = geometry
+    ancestors, seen, parent = [], set(), element.get("parent_index")
+    for depth in range(1, 21):
+        if type(parent) is not int or parent in seen or parent not in by_index:
+            break
+        seen.add(parent)
+        ancestor = by_index[parent]
+        if _protected(ancestor):
+            break
+        name = _context_name(ancestor)
+        if name and len(ancestors) < 4:
+            ancestors.append({"name": name, "role": ancestor.get("role"), "depth": depth})
+        parent = ancestor.get("parent_index")
+    if ancestors:
+        result["named_ancestors"] = ancestors
+    if element.get("rendered_parent_gap") is True:
+        result["rendered_parent_path_incomplete"] = True
+    # Only explicit references to a label in THIS observation are reported as
+    # provider relationships. Text similarity or an arbitrary descriptor is not
+    # a LabeledBy relationship. Unknown provider formats remain unreported.
+    associated, associated_indices = [], set()
+    for key in ("labeled_by", "labelled_by"):
+        reference = element.get(key)
+        index = reference.get("element_index") if isinstance(reference, dict) else reference
+        label = by_index.get(index) if type(index) is int else None
+        if (label is not None and index not in associated_indices and label is not element and _context_name(label)
+                and label.get("role") in {"Text", "Label", "StaticText"}
+                and label.get("source") != "driver.tree_markdown"):
+            associated_indices.add(index)
+            associated.append({"name": _context_name(label), "role": label["role"],
+                               "source": "driver." + key, "inferred": False})
+    if associated:
+        result["label_associations"] = associated
+        result["label_association_ambiguous"] = len(associated) > 1
+    rendered = [label for label in labels.get(element.get("parent_index"), [])
+                if label.get("source") == "driver.tree_markdown"]
+    if rendered:
+        result.update(rendered_sibling_labels=[{"name": _context_name(label), "inferred": True,
+                          "evidence": "same_parent_in_rendered_tree_only"} for label in rendered[:8]],
+                      rendered_sibling_label_count=len(rendered), rendered_sibling_labels_ambiguous=len(rendered) > 1,
+                      rendered_sibling_labels_truncated=len(rendered) > 8)
+        preceding = [label for label in rendered if label.get("following_element_index") == element.get("element_index")]
+        if preceding:
+            result.update(preceding_text_candidates=[{"name": _context_name(label), "inferred": True,
+                              "evidence": "preceding_text_in_rendered_tree_only"} for label in preceding[:8]],
+                          preceding_text_candidate_count=len(preceding), preceding_text_ambiguous=len(preceding) > 1)
+    # Nearby siblings are hints for visual cross-checking, not new selectors.
+    # Keep multiple plausible labels rather than selecting a nearest winner.
+    nearby = []
+    parent = element.get("parent_index")
+    if geometry and type(parent) is int and parent in by_index:
+        target = geometry["bounds"]
+        for label in labels.get(parent, []):
+            rectangle = _observed_rectangle(label)
+            if rectangle is None:
+                continue
+            bounds = rectangle["bounds"]
+            vertical = min(bounds["y"] + bounds["height"], target["y"] + target["height"]) - max(bounds["y"], target["y"])
+            horizontal = min(bounds["x"] + bounds["width"], target["x"] + target["width"]) - max(bounds["x"], target["x"])
+            dx, dy = target["x"] - bounds["x"] - bounds["width"], target["y"] - bounds["y"] - bounds["height"]
+            position = ("left" if 0 <= dx <= max(target["width"], bounds["width"])
+                        and vertical >= min(target["height"], bounds["height"]) / 2 else
+                        "above" if 0 <= dy <= 2 * max(target["height"], bounds["height"])
+                        and horizontal >= min(target["width"], bounds["width"]) / 2 else None)
+            if position:
+                nearby.append({"name": _context_name(label), "role": label["role"], "bounds": bounds,
+                               "relative_position": position, "inferred": True,
+                               "evidence": "same_parent_desktop_geometry"})
+    if nearby:
+        result.update(nearby_labels=nearby[:8], nearby_label_candidate_count=len(nearby),
+                      nearby_labels_ambiguous=len(nearby) > 1, nearby_labels_truncated=len(nearby) > 8)
+    return result if len(result) > 2 else None
+
+
+def control_display_label(snapshot, element, default):
+    """Describe an unnamed/duplicate input without changing its identity.
+
+    This consumes only the existing observation. Inferred text is marked as
+    such and must never be copied into a selector or a completion condition.
+    """
+    if _protected(element) or element.get("role") not in {"Edit", "TextBox", "ComboBox"}:
+        return default
+    elements = _elements(snapshot)
+    if not any(item is element for item in elements):
+        return default
+    name = _name(element)
+    if name and sum(_name(item) == name for item in elements) == 1:
+        return default
+    rendered = snapshot.get("read_only_labels", [])
+    if (snapshot.get("accessibility_normalization", {}).get("status") not in {"augmented", "verified"}
+            or not isinstance(rendered, list)):
+        rendered = []
+    rendered = [row for row in rendered if isinstance(row, dict) and row.get("read_only") is True
+                and row.get("source") == "driver.tree_markdown"]
+    by_index, labels = _context_index(elements + rendered)
+    current, seen = element, set()
+    for _ in range(21):
+        if _protected(current):
+            return default
+        parent = current.get("parent_index")
+        if parent is None:
+            break
+        if type(parent) is not int or parent in seen or parent not in by_index:
+            return default
+        seen.add(parent)
+        current = by_index[parent]
+    else:
+        return default
+    context = _read_only_context(element, by_index, labels, snapshot.get("window_bounds")) or {}
+    channels = [("label_associations", "label_association_ambiguous"),
+                ("preceding_text_candidates", "preceding_text_ambiguous"),
+                ("nearby_labels", "nearby_labels_ambiguous")]
+    candidates = []
+    for key, ambiguous in channels:
+        rows = context.get(key, [])
+        if context.get(ambiguous) or len(rows) > 1:
+            return default
+        candidates.extend(rows)
+    names = {row["name"] for row in candidates if isinstance(row.get("name"), str)}
+    if len(names) != 1:
+        return default
+    label = names.pop()
+    if label == element.get("value"):
+        return default
+    ancestors = context.get("named_ancestors", [])
+    # Keep the field visible in narrow editor columns. Provider-inherited Pane
+    # or Window names often contain a whole screen description, not a group.
+    group = next((row["name"] for row in ancestors if row.get("role") == "Group"
+                  and isinstance(row.get("name"), str) and 0 < len(row["name"]) <= 40
+                  and not any(character in row["name"] for character in "\r\n\t")), None)
+    source = "주변 글자 기준" if any(row.get("inferred") is True for row in candidates) else "연결된 라벨"
+    return label + " (" + source + ")" + (" · " + group if group else "")
 
 
 def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elements=600,
@@ -153,6 +364,20 @@ def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elemen
         except OperationError:
             elements = []
         controls = []
+        targetability = {"scope": "returned_controls", "actionable_controls": 0,
+                         "unique_actionable_controls": 0, "ambiguous_actionable_controls": 0,
+                         "unidentified_actionable_controls": 0, "incomplete_scope_controls": 0,
+                         "protected_controls": 0}
+        # Normalization keeps rendered Text leaves outside the actionable
+        # projection. They may enrich prose context, never selectors/targets.
+        rendered_labels = snapshot.get("read_only_labels", [])
+        if (snapshot.get("accessibility_normalization", {}).get("status") not in {"augmented", "verified"}
+                or not isinstance(rendered_labels, list)):
+            rendered_labels = []
+        rendered_labels = [item for item in rendered_labels if isinstance(item, dict)
+                           and item.get("read_only") is True and item.get("source") == "driver.tree_markdown"]
+        context_index, sibling_labels = _context_index(elements + rendered_labels)
+        titlebars = [e for e in elements if e.get("role") == "TitleBar"]
         candidate_count = 0
         all_candidates = 0
         scope = _unique(snapshot, within) if within is not None else None
@@ -170,7 +395,9 @@ def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elemen
                 continue
             if actionable_only and not actions:
                 continue
-            searchable = " ".join(str(value) for value in (_name(element) or "", element.get("role", ""), element.get("automation_id", "")))
+            protected = _protected(element)
+            searchable = (str(element.get("role", "")) if protected else
+                          " ".join(str(value) for value in (_name(element) or "", element.get("role", ""), element.get("automation_id", ""))))
             if query and query not in searchable.casefold():
                 continue
             candidate_count += 1
@@ -178,10 +405,11 @@ def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elemen
                 continue
             if len(controls) >= max_controls:
                 continue
-            item = {k: copy.deepcopy(element[k]) for k in ("element_index", "parent_index", "role", "value", "selected", "enabled", "read_only", "automation_id") if k in element}
-            if _name(element) is not None:
+            fields = ("role", "enabled") if protected else ("element_index", "parent_index", "role", "value", "selected", "enabled", "read_only", "automation_id")
+            item = {k: copy.deepcopy(element[k]) for k in fields if k in element}
+            if not protected and _name(element) is not None:
                 item["name"] = _name(element)
-            item["actions"] = [a for a in actions if isinstance(a, str)]
+            item["actions"] = [] if protected else [a for a in actions if isinstance(a, str)]
             if scoped:
                 # Partial subtree uniqueness is not proof of an exact selector.
                 item["selector"] = None
@@ -199,6 +427,23 @@ def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elemen
                 item["selector"] = control_selector(snapshot, element)
             item["selector_unique"] = item["selector"] is not None
             item["suggested_operations"] = suggested_operations({**element, "actions": actions}) if item["selector_unique"] else []
+            item["targeting_state"] = ("protected" if protected else "scope_incomplete" if scoped and snapshot.get("truncated") else
+                                       "unique" if item["selector_unique"] else "unidentified" if not _base_selector(element) else "ambiguous")
+            if protected:
+                item["protected"] = True
+                targetability["protected_controls"] += 1
+            else:
+                context = _read_only_context(element, context_index, sibling_labels, snapshot.get("window_bounds"))
+                if context:
+                    item["context"] = context
+                if (set(suggested_operations({**element, "actions": actions})) - {"assert"}
+                        and element.get("enabled") is not False and element.get("offscreen") is not True
+                        and element.get("is_offscreen") is not True
+                        and not any(_descendant(element, bar, elements, context_index) for bar in titlebars)):
+                    targetability["actionable_controls"] += 1
+                    key = {"unique": "unique_actionable_controls", "ambiguous": "ambiguous_actionable_controls",
+                           "unidentified": "unidentified_actionable_controls", "scope_incomplete": "incomplete_scope_controls"}[item["targeting_state"]]
+                    targetability[key] += 1
             item["capability_evidence"] = "native_read_only_uia_properties_and_patterns" if scoped else "observed_uia_properties_and_patterns"
             item["execution_verified"] = False
             for key in ("name", "value", "automation_id"):
@@ -206,7 +451,14 @@ def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elemen
                     item[key + "_truncated"] = True
                     item[key] = item[key][:16000]
             controls.append(item)
+        unresolved = targetability["actionable_controls"] - targetability["unique_actionable_controls"]
+        targetability["state"] = ("needs_disambiguation" if unresolved and not targetability["unique_actionable_controls"] else
+                                  "partially_targetable" if unresolved else "uniquely_targetable" if targetability["unique_actionable_controls"] else "no_actionable_controls")
         inspection.update(status="uia_observation" if controls else "no_accessible_controls",
+                          targetability=targetability,
+                          context_contract={"read_only": True, "authorizes_input": False,
+                                            "nearby_labels_are_inferred": True, "rendered_label_order_is_inferred": True,
+                                            "image_coordinate_mapping": "not_inferred"},
                           observation_scope={"kind": "native_selected_subtree" if scoped else "driver_window_tree", "max_depth": max_depth,
                                              "max_elements": max_elements},
                           filter_scope="selected_subtree_before_property_read" if scoped else "returned_controls_after_window_observation",
@@ -222,8 +474,12 @@ def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elemen
                           traversal_may_be_limited=bool(len(elements) >= max_elements or snapshot.get("truncated") or snapshot.get("max_depth_reached") or snapshot.get("max_elements_reached")
                                                        or any(type(e.get("depth")) is int and e["depth"] >= max_depth for e in elements)
                                                        or type(snapshot.get("total_element_count")) is int and snapshot["total_element_count"] > len(elements)),
-                          next_step="저장한 요소는 computer_elements로 찾고 computer_use_element로 검증하며 사용하세요. 새 요소는 사용자가 직접 computer_teach_element로 가르칠 수 있습니다. 검색·within·offset으로 목록을 좁힐 수 있으며 번호는 현재 관찰에만 유효합니다. 일반 작업은 관찰된 selector와 완료 조건으로 computer_perform을 사용하세요." if controls else
-                                    "이 창에서 UIA 조작 대상을 확인하지 못했습니다. 함께 반환된 화면 이미지나 observation=visual로 현재 창을 읽고, UIA가 제공하지 않는 요소는 computer_process_editor에서 이미지로 선택해 저장할 수 있습니다. 입력 방식과 권한은 바뀌지 않습니다.")
+                          next_step="computer_observe의 고유 target_ref와 완료 조건으로 computer_act를 요청하세요. 같은 이름은 고유 within 영역으로 좁히고, 직접 선택·녹화·저장은 computer_process_editor에서 진행하세요. 주변 라벨과 좌표는 읽기 전용 문맥이며 선택자나 클릭 권한이 아닙니다." if controls else
+                                    "이 창에서 UIA 조작 대상을 확인하지 못했습니다. computer_observe로 현재 창의 이미지를 읽고, 직접 요소 선택·녹화·저장은 computer_process_editor에서 진행하세요. 입력 방식과 권한은 바뀌지 않습니다.")
+        if unresolved:
+            inspection["next_step"] = ("일부 조작 요소를 고유하게 구분하지 못했습니다. 같은 이름의 첫 항목을 임의로 선택하지 마세요. "
+                "computer_observe의 현재 이미지와 읽기 전용 라벨 문맥을 함께 확인하고, computer_act에는 고유 target_ref 또는 "
+                "관찰한 image_region과 구별할 라벨이 포함된 scope_region을 사용하세요. 직접 선택·녹화·저장은 computer_process_editor에서 진행하세요.")
     if scope_fallback:
         inspection["scope_fallback"] = scope_fallback
     images = [copy.deepcopy(c) for c in answer.get("content", [])
@@ -232,13 +488,15 @@ def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elemen
     if uia:
         chrome = [e for e in elements if e.get("role") == "TitleBar"]
         ancestry = {e.get("element_index"): e for e in elements if type(e.get("element_index")) is int}
-        actionable = [e for e in elements if _base_selector(e)
+        actionable = [e for e in elements if not _protected(e)
                       and not any(_descendant(e, bar, elements, ancestry) for bar in chrome)
                       and e.get("role") in {"Button", "Edit", "Document", "TextBox", "ComboBox", "CheckBox",
                                            "ToggleButton", "ListItem", "TabItem", "TreeItem", "RadioButton"}
                       and e.get("observed_patterns" if scoped else "actions")]
-        weak = not actionable
-        inspection["uia_evidence"] = ("actionable_controls_observed" if actionable else
+        unresolved_only = (targetability["state"] == "needs_disambiguation")
+        weak = not actionable or unresolved_only
+        inspection["uia_evidence"] = ("actionable_controls_need_disambiguation" if actionable and unresolved_only else
+                                      "actionable_controls_observed" if actionable else
                                       "structure_only" if elements else "empty_accessibility")
         inspection["input_requires_fresh_observation"] = scoped
     # A usable toolbar is not evidence that the requested row/icon is exposed.
@@ -296,8 +554,9 @@ def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elemen
         if images:
             inspection["status"] = "combined_observation" if uia else "visual_observation"
             inspection["next_step"] = ("같은 승인 창의 화면 이미지가 함께 제공됐습니다. 이미지 이해를 지원하는 연결 모델이 화면을 읽을 수 있습니다. "
-                                       "UIA selector는 새 관찰로 확인하고, UIA가 노출하지 않는 대상은 computer_process_editor에서 이미지로 선택해 저장하세요. "
-                                       "이미지 자체는 작업 성공이나 좌표 입력 권한을 의미하지 않습니다.")
+                                       "computer_act에는 고유 target_ref 또는 현재 이미지의 image_region과 구별할 라벨을 포함한 scope_region을 사용하세요. "
+                                       "직접 선택·녹화·저장은 computer_process_editor에서 진행하세요. 요소의 desktop_physical 좌표를 이미지 좌표로 간주하지 마세요. "
+                                       "추정 라벨 문맥은 선택자나 클릭 권한이 아니며, 이미지 자체는 작업 성공을 뜻하지 않습니다.")
         elif not uia:
             inspection["status"] = "missing_image"
         if capture_failed:

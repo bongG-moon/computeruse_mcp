@@ -47,6 +47,7 @@ VISUAL_TOOLS_NAME = "Computer Use MCP 이미지 도구.exe"
 SCOPED_CONTROLS_NAME = "Computer Use MCP 빠른 확인.exe"
 CHECKPOINT_REVIEW_NAME = "Computer Use MCP 화면 확인.exe"
 APP_FILES = (
+    "airtest_backend.py", "AIRTEST-NOTICES.md", "CHANGES_0.18.0.html", "APPREF_GUIDE.md",
     "easy_api.py", "interaction.py", "image_pixels.py", "task_inputs.py", "task_revision.py", "visual_review.py", "visual_targets.py", "builtin_programs.py", "hosted_windows.py",
     "server.py", "settings.py", "setup.py", "consent.py", "register.py", "README.html", "VALIDATION.html",
     "maintenance.py", "diagnostics.py", "install.py", "programs.py", "INSTALL.md", "vendor/__init__.py", "vendor/guard.py", "vendor/windows.py",
@@ -61,6 +62,14 @@ APP_FILES = (
 )
 OPTIONAL_APP_FILES = ()
 SOURCE_SUPPORT_FILES = (
+    "fixtures/ComplexBusiness018.cs", "fixtures/ComplexWeb018.html", "fixtures/RecordingCanvas018.cs",
+    "tools/build_complex_business018.ps1", "tools/build_recording_canvas018.ps1", "tools/serve_complex_web018.py",
+    "tools/test_prepare_image_backend.py", "test_data/README.md",
+    "test_appref_launch.py", "tools/ClickOnceFixture.cs", "tools/build_clickonce_fixture.ps1", "tools/VerifyClickOnceFixture.cs",
+    "test_airtest_backend.py", "test_image_backend_routing.py", "test_recording_finalize.py", "test_recording_pointer_scope.py", "test_recording_hover.py",
+    "tools/prepare_image_backend.py", "tools/benchmark_image_backends.py",
+    "FlaUIProbe.cs", "tools/prepare_flaui.py", "tools/benchmark_flaui.py", "tools/FlaUINativePointBaseline.cs",
+    "tools/test_flaui_comparison.py", "tools/FLAUI_COMPARISON.md",
     "test_task_capacity.py", "test_workflow_capacity.py",
     "acceptance_phase1_recording.py", "fixtures/Phase1RecordingFixture.cs", "fixtures/PHASE1_ACCEPTANCE.md",
     "test_hosted_windows.py", "test_hosted_guard.py", "test_visual_targets.py", "test_workflow_target_review.py",
@@ -83,7 +92,7 @@ SOURCE_SUPPORT_FILES = (
     "test_setup.py", "test_task_store.py", "test_install.py", "test_install_review.py", "test_install_live.py", "test_acceptance_workflows.py", "acceptance_workflows.py", "live_validation.py",
     "test_browser_defaults.py", "test_consent_ui.py", "test_programs.py", "test_setup_programs.py", "fixtures/blank.xlsx",
     "test_guard_performance.py", "test_configuration_state.py", "test_register_upgrades.py", "test_operations.py", "test_workflows.py", "performance_validation.py",
-    "test_inspection.py", "test_named_windows.py", "test_accessibility_tree.py", "native_fixture.py", "generic_validation.py", "desktop_apps_validation.py", "closure_validation.py", "test_closing.py", "test_close_actions.py", "test_close_tools.py",
+    "test_inspection.py", "test_control_display_labels.py", "test_named_windows.py", "test_accessibility_tree.py", "native_fixture.py", "generic_validation.py", "desktop_apps_validation.py", "closure_validation.py", "test_closing.py", "test_close_actions.py", "test_close_tools.py",
 )
 
 
@@ -112,6 +121,53 @@ APPLICATION_IMPORT_CHECK = (
     "checkpoint_review,image_delivery,replay_preflight,vendor.guard,vendor.windows; "
     "print('Application imports passed')"
 )
+IMAGE_BACKEND_CHECK = r'''
+import base64, json, random, struct, zlib, sys, tempfile, threading
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from types import SimpleNamespace
+import airtest_backend
+from image_targets import validate_match
+
+def png(width, height, pixels):
+    def chunk(kind, data):
+        return struct.pack('>I', len(data))+kind+data+struct.pack('>I', zlib.crc32(kind+data)&0xffffffff)
+    raw = b''.join(b'\0'+bytes(pixels[y*width*3:(y+1)*width*3]) for y in range(height))
+    encoded = b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR', struct.pack('>IIBBBBB', width,height,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(raw))+chunk(b'IEND',b'')
+    return base64.b64encode(encoded).decode('ascii')
+
+generator = random.Random(180)
+pattern = bytearray(generator.randrange(256) for _ in range(32*24*3))
+screen = bytearray([25])*(96*72*3)
+def place(x,y):
+    for row in range(24):
+        offset = ((row+y)*96+x)*3
+        screen[offset:offset+32*3] = pattern[row*32*3:(row+1)*32*3]
+target = {'format':'computer-image-target/v1','template_png':png(32,24,pattern),
+          'width':32,'height':24,'anchor':{'x':.75,'y':.25},
+          'capture_window':{'width':96,'height':72},'min_score':.99,'ambiguity_margin':.03}
+place(17,19)
+shot = png(96,72,screen)
+with tempfile.TemporaryDirectory(prefix='.image-backend-check-', dir='.') as folder:
+    runtime = SimpleNamespace(run_dir=Path(folder).resolve(), check_active=lambda: None,
+                              stop_event=threading.Event())
+    # Production calls the isolated matcher from the MCP background thread.
+    # Checking only main-thread imports misses native-extension import hangs.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        def match(frame):
+            return pool.submit(airtest_backend.match_isolated,runtime,target,frame).result(timeout=25)
+        result = validate_match(match(shot),target,shot)
+        assert result['status']=='matched' and result['rect']=={'x':17,'y':19,'width':32,'height':24}, result
+        assert (result['x'],result['y'])==(41,25), result
+        place(55,41)
+        duplicate = match(png(96,72,screen))
+        assert duplicate['status']=='ambiguous' and 'rect' not in duplicate, duplicate
+        missing = match(png(96,72,bytearray([25])*(96*72*3)))
+        assert missing['status']=='not_found' and 'rect' not in missing, missing
+    assert 'numpy' not in sys.modules and 'cv2' not in sys.modules, 'Image libraries loaded in MCP parent'
+print(json.dumps({'ok':True,'backend':'airtest-template-rgb','unique':'matched',
+                  'duplicate':'ambiguous','missing':'not_found','anchor':[41,25]}))
+'''
 
 
 def own_release_path(path: Path) -> Path:
@@ -146,6 +202,25 @@ def run_hidden(command: list[str], *, cwd: Path, env=None, timeout=60) -> subpro
         text=True, encoding="utf-8", errors="replace", timeout=timeout,
         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
+
+
+def check_image_backend(python_root: Path, application_root: Path) -> dict:
+    """Exercise compiled vision dependencies under the actual package Python.
+
+    Import-only checks miss ABI errors because the image backend loads lazily.
+    Use synthetic pixels, never the user's desktop, and reject stray stdout.
+    """
+    completed = run_hidden([str(python_root / "python.exe"), "-B", "-s", "-c", IMAGE_BACKEND_CHECK],
+                           cwd=application_root, env=runtime_environment(python_root), timeout=45)
+    try:
+        proof = json.loads(completed.stdout)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("Image backend self-test emitted invalid protocol output.") from error
+    expected = {"ok": True, "backend": "airtest-template-rgb", "unique": "matched",
+                "duplicate": "ambiguous", "missing": "not_found", "anchor": [41, 25]}
+    if proof != expected:
+        raise RuntimeError("Image backend self-test did not verify recognition and rejection.")
+    return proof
 
 
 def validate_sources(python_root: Path) -> None:
@@ -282,10 +357,12 @@ def write_source_archive(staging: Path, bundle: Path, snapshot: dict[str, bytes]
         "format": 1, "product": BUNDLE_NAME, "version": VERSION,
         "source_snapshot_sha256": hashlib.sha256(json.dumps(source_hashes, sort_keys=True).encode()).hexdigest(),
         "source_files": source_hashes, "runtime_files": runtime_hashes,
+        "image_backend": json.loads((bundle / "image_backend_runtime/BACKEND-MANIFEST.json").read_text(encoding="utf-8")) if (bundle / "image_backend_runtime/BACKEND-MANIFEST.json").is_file() else None,
+        "image_backend_smoke": python_proof.get("image_backend_smoke"),
         "toolchain": {"python_version": python_proof["python"], "tcl_version": python_proof["tcl"],
                       "csharp_compiler_sha256": sha256(COMPILER), "compiler": "Windows .NET Framework csc.exe"},
         "rebuild": {"command": "python build_portable.py --python-root C:\\Python313",
-                    "requires": "Windows, an existing CPython 3.13 with Tcl/Tk, and the Windows .NET Framework compiler. No package downloads.",
+                    "requires": "Windows, CPython 3.13 with Tcl/Tk, .NET Framework compiler, and image_backend_runtime prepared by tools/prepare_image_backend.py from its hash-pinned archives. The build does not download dependencies.",
                     "source_authority": "This source archive and the file hashes, not the containing repository HEAD.",
                     "byte_identical_binary_expected": False,
                     "reason": "ZIP metadata and .NET executable timestamps may differ; source and runtime hashes identify the tested contents."},
@@ -341,6 +418,8 @@ def main() -> int:
         application_check = run_hidden([str(python_root / "python.exe"), "-B", "-s", "-c", APPLICATION_IMPORT_CHECK],
                                        cwd=SOURCE, env=runtime_environment(python_root))
         print(application_check.stdout.strip())
+        image_proof = check_image_backend(python_root, SOURCE)
+        print("Source image backend recognition, ambiguity and absence checks passed.")
         print(f"Source check passed. Compiler output retained at: {staging}")
         return 0
 
@@ -358,6 +437,10 @@ def main() -> int:
     print("Copying the existing CPython runtime...", flush=True)
     runtime = bundle / "runtime"
     copy_runtime(python_root, runtime)
+    # Prepared, pinned image-only dependencies are bundled once. End users do
+    # not install packages or choose recognition engines; no runtime downloads.
+    from tools.prepare_image_backend import copy_runtime as copy_image_runtime
+    copy_image_runtime(SOURCE / "image_backend_runtime", bundle / "image_backend_runtime")
     compile_launcher(bundle / LAUNCHER_NAME)
     compile_launcher(bundle / ADMINISTRATOR_LAUNCHER_NAME, "AdministratorBridge.cs")
     compile_element_picker(bundle / ELEMENT_PICKER_NAME)
@@ -377,7 +460,8 @@ def main() -> int:
         raise RuntimeError("Launcher self-test did not return a successful result.")
     run_hidden([str(runtime / "python.exe"), "-B", "-s", "-c", APPLICATION_IMPORT_CHECK],
         cwd=bundle, env=runtime_environment(runtime))
-    print("Bundled Python, application imports, and launcher checks passed.", flush=True)
+    proof["image_backend_smoke"] = check_image_backend(runtime, bundle)
+    print("Bundled Python, application imports, launcher and actual image matching checks passed.", flush=True)
     source_zip = write_source_archive(staging, bundle, snapshot, proof)
     write_bundle_manifest(bundle)
     staged_zip = staging / ZIP_NAME

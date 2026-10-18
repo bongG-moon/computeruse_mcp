@@ -7,8 +7,10 @@ This module never retries, terminates an application, or changes its token.
 from __future__ import annotations
 
 import os
+import hashlib
 from pathlib import Path
 import re
+import stat
 import subprocess
 import time
 from urllib.parse import unquote, urlsplit
@@ -31,10 +33,89 @@ def launch_environment(source=None):
     return {key: value for key, value in source.items() if key.upper() not in RUNTIME_ENVIRONMENT}
 
 
+def _appref_path(value):
+    if (not isinstance(value, str) or not value or len(value) > 32767 or
+            not Path(value).is_absolute() or value.startswith(("\\\\", "//")) or
+            Path(value).suffix.lower() != ".appref-ms" or
+            any(ord(ch) < 32 or ch in '\"<>|*?' for ch in value) or ':' in value[2:]):
+        raise ValueError("응용 프로그램 참조(.appref-ms)는 이 PC에 있는 파일의 전체 경로로 지정하세요.")
+    return Path(value)
+
+
+def inspect_appref(value):
+    """Read a bounded ClickOnce reference as data. Never follow its address.
+
+    The reference chooses how Windows launches; it never grants UI control to
+    its deployment URL, association handler, or an inferred executable name.
+    """
+    from consent import _plain_chain
+    path = _appref_path(value)
+    if not _plain_chain(path):
+        raise ValueError("응용 프로그램 참조 경로에 연결 파일이 있습니다. 원본 파일을 지정하세요.")
+    before = path.stat()
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or not 1 <= before.st_size <= 65536:
+        raise ValueError("응용 프로그램 참조 파일의 종류 또는 크기를 확인하세요.")
+    with path.open("rb") as source:
+        data = source.read(65537)
+    after = path.stat()
+    if (not _plain_chain(path) or len(data) > 65536 or
+            (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) !=
+            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
+        raise ValueError("응용 프로그램 참조가 읽는 중 바뀌었습니다. 다시 등록하세요.")
+    try:
+        encoding = "utf-16" if data.startswith((b"\xff\xfe", b"\xfe\xff")) else ("utf-16-le" if b"\0" in data else "utf-8-sig")
+        reference = data.decode(encoding).strip()
+    except UnicodeError as error:
+        raise ValueError("ClickOnce 응용 프로그램 참조의 텍스트 형식을 확인하세요.") from error
+    if any(ord(ch) < 32 for ch in reference) or reference.count("#") != 1:
+        raise ValueError("ClickOnce 실행 주소와 응용 프로그램 식별자가 포함된 .appref-ms 파일이 필요합니다.")
+    address, identity = reference.split("#", 1)
+    parsed = urlsplit(address)
+    decoded = unquote(address)
+    if (parsed.scheme.lower() not in {"http", "https", "file"} or
+            not unquote(parsed.path).lower().endswith(".application") or
+            any(ord(ch) < 32 or ch in '\"\\' for ch in decoded) or
+            parsed.username is not None or parsed.password is not None):
+        raise ValueError("참조 파일에는 ClickOnce .application 배포 주소가 필요합니다.")
+    if parsed.scheme.lower() == "file":
+        local = unquote(parsed.path).lstrip("/")
+        if parsed.netloc not in {"", "localhost"} or parsed.query or not re.match(r"^[A-Za-z]:/", local):
+            raise ValueError("로컬 ClickOnce 배포는 이 PC의 파일 주소만 지원합니다.")
+    elif not parsed.hostname:
+        raise ValueError("ClickOnce 배포 주소의 서버 이름을 확인하세요.")
+    parsed.port
+    parts = [item.strip() for item in identity.split(",")]
+    fields = {}
+    for item in parts[1:]:
+        key, separator, field = item.partition("=")
+        if not separator or not key or key.casefold() in fields or not field:
+            raise ValueError("ClickOnce 응용 프로그램 식별자가 올바르지 않습니다.")
+        fields[key.casefold()] = field
+    if (not parts[0] or len(parts[0]) > 260 or any(ch in parts[0] for ch in '/\\\"<>|=:') or
+            not re.fullmatch(r"[0-9a-fA-F]{16}", fields.get("publickeytoken", "")) or
+            fields.get("processorarchitecture", "").lower() not in {"msil", "x86", "amd64", "arm", "arm64"}):
+        raise ValueError("ClickOnce 응용 프로그램 이름·서명 식별자·아키텍처를 확인하세요.")
+    friendly_name = re.sub(r"\.(application|app)$", "", parts[0], flags=re.IGNORECASE)
+    return {"path": str(path.resolve()), "name": friendly_name,
+            "deployment_address": address, "assembly_identity": identity,
+            "sha256": hashlib.sha256(data).hexdigest(), "network_accessed": False,
+            "application_launched": False, "handler_is_control_target": False}
+
+
+def appref_launch_profile(value):
+    info = inspect_appref(value)
+    return {"kind": "appref", "target": info["path"], "sha256": info["sha256"]}
+
+
 def validate_launch_profile(value):
     """Validate a saved exact target, never a command or per-call interpolation."""
-    if not isinstance(value, dict) or value.get("kind") not in {"exe", "uri", "builtin"}:
-        raise ValueError("실행 방식은 exe, uri 또는 등록된 기본 앱으로 지정하세요.")
+    if not isinstance(value, dict) or value.get("kind") not in {"exe", "uri", "builtin", "appref"}:
+        raise ValueError("실행 방식은 exe, uri, appref 또는 등록된 기본 앱으로 지정하세요.")
+    if value["kind"] == "appref":
+        if set(value) != {"kind", "target", "sha256"} or not re.fullmatch(r"[0-9a-f]{64}", str(value.get("sha256", ""))):
+            raise ValueError("응용 프로그램 참조는 등록한 target 경로와 sha256으로 지정하세요.")
+        _appref_path(value["target"])
+        return dict(value)
     if value["kind"] == "builtin":
         from builtin_programs import BUILTIN_PROTOCOLS
         if set(value) != {"kind", "id"} or value.get("id") not in BUILTIN_PROTOCOLS:
@@ -105,6 +186,10 @@ def create_program(program, process_factory=subprocess.Popen, *, uri_launcher=No
     if profile["kind"] == "exe":
         return create_application(program["exe"], process_factory,
                                   arguments=profile.get("arguments", []), cwd=profile.get("cwd"))
+    if profile["kind"] == "appref":
+        current = appref_launch_profile(profile["target"])
+        if current["sha256"] != profile["sha256"]:
+            raise ValueError("등록한 응용 프로그램 참조 파일이 변경되었습니다. 변경된 파일과 실제 업무 창을 다시 등록하세요. 실행하지 않았습니다.")
     if uri_launcher is None:
         if os.name != "nt":
             raise OSError("주소 실행은 Windows에서만 지원합니다.")
@@ -114,7 +199,9 @@ def create_program(program, process_factory=subprocess.Popen, *, uri_launcher=No
         uri_launcher(BUILTIN_PROTOCOLS[profile["id"]], "open")
     else:
         uri_launcher(profile["target"], "open")
-    return UriLaunchRequest()
+    result = UriLaunchRequest()
+    result.launch_kind = profile["kind"]
+    return result
 
 
 class LaunchObservation:

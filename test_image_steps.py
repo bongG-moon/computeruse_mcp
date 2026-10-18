@@ -14,7 +14,8 @@ import zlib
 from image_targets import png_dimensions, validate_image_target, validate_match
 from image_steps import validate_image_step, execute_image_step
 from operations import OperationError
-from vendor.guard import Guard, ProtectedImageInput, native_edit_password, action_guidance, result_summary, metadata_event
+from vendor.guard import (Guard, ProtectedImageInput, native_edit_password, action_guidance, result_summary, metadata_event,
+                          native_keyboard_control_kind, native_focus_control_chain, image_focus_target_evidence)
 from workflows import WorkflowRunner, validate_recipe, WorkflowError
 
 
@@ -35,6 +36,52 @@ TARGET={'pid':100,'window_id':200}
 
 
 class ImageTargetTests(unittest.TestCase):
+    def test_native_focus_classification_does_not_infer_custom_editors(self):
+        for name, kind in [('Edit','edit'), ('WindowsForms10.EDIT.app.0','edit'),
+                           ('ComboBox','combo'), ('WindowsForms10.COMBOBOX.app.0','combo'),
+                           ('RichEditD2DPT','rich_edit')]:
+            self.assertEqual(native_keyboard_control_kind(name),kind)
+        for name in ['Chrome_RenderWidgetHostHWND','HwndWrapper[Editor]','CustomEdit','Button','Canvas']:
+            self.assertIsNone(native_keyboard_control_kind(name))
+
+    def test_native_combo_edit_and_focus_child_use_actual_parent_input_bounds(self):
+        rows={11:{'pid':100,'root':200,'parent':12,'class_name':'Edit','bounds':[20,20,40,40]},
+              12:{'pid':100,'root':200,'parent':200,'class_name':'ComboBox','bounds':[20,20,60,40]},
+              13:{'pid':100,'root':200,'parent':11,'class_name':'NativeCaretHost','bounds':[25,22,27,38]}}
+        for focus in [11,13]:
+            result=native_focus_control_chain(TARGET,focus,rows.get)
+            self.assertEqual(result['kind'],'combo')
+            self.assertEqual(result['bounds'],[20,20,60,40])
+        rows[11]['parent']=200
+        self.assertEqual(native_focus_control_chain(TARGET,13,rows.get)['kind'],'edit')
+
+    def test_native_focus_chain_never_accepts_foreign_or_unknown_controls(self):
+        row={'pid':100,'root':200,'parent':200,'class_name':'Edit','bounds':[20,20,40,40]}
+        for patch in [{'pid':101},{'root':201},{'parent':11},{'class_name':'CustomCanvas'}]:
+            self.assertIsNone(native_focus_control_chain(TARGET,11,lambda _:dict(row,**patch)))
+        self.assertIsNone(native_focus_control_chain(TARGET,200,lambda _:self.fail('top window is not an input')))
+
+    def test_focus_comparison_preserves_border_origin_uncertainty_and_negative_monitors(self):
+        geometry=(-400,100,-280,220,2)
+        point={'x':30,'y':40}
+        control={'kind':'edit','class_name':'Edit','bounds':[-351,150,-300,180]}
+        evidence=image_focus_target_evidence(control,geometry,point,(100,100))
+        self.assertEqual(evidence['status'],'compatible')
+        self.assertEqual(evidence['possible_target_point_bounds'],[-370,140,-350,160])
+        self.assertFalse(evidence['capture_origin_assumed'])
+        self.assertFalse(evidence['authorizes_input'])
+        self.assertEqual(image_focus_target_evidence(dict(control,bounds=[-330,180,-300,200]),
+            geometry,point,(100,100))['status'],'mismatch')
+
+    def test_focus_comparison_does_not_assume_unknown_scale_or_invalid_geometry(self):
+        geometry=(0,0,100,100,2)
+        control={'kind':'edit','class_name':'Edit','bounds':[60,60,90,90]}
+        for changed,size in [(None,(100,100)),(dict(control,kind='canvas'),(100,100)),
+                             (dict(control,bounds=[0,0,0,0]),(100,100)),
+                             (dict(control,bounds=[0,0,float('inf'),10]),(100,100)),
+                             (control,(200,200)),(control,None)]:
+            self.assertEqual(image_focus_target_evidence(changed,geometry,{'x':30,'y':40},size)['status'],'unavailable')
+
     def test_password_style_is_limited_to_known_native_edit_classes(self):
         self.assertTrue(native_edit_password('Edit',0x500100A0))
         self.assertTrue(native_edit_password('WindowsForms10.EDIT.app.0.2bf8098_r6_ad1',0x500100A0))
@@ -206,6 +253,42 @@ class ImageGuardTests(unittest.TestCase):
         answer=self.run_step({'operation':'image_type_text','image_target':image_target(),'value':'never sent','replace_all':True})
         self.assertFalse(answer['verification_deferred']);self.assertTrue(answer['input_dispatched'])
         self.assertEqual(answer['diagnostic']['code'],'image_focus_changed')
+        self.assertEqual([m['name'] for m in self.mutations()],['click','hotkey'])
+
+    def test_wrong_native_field_after_focus_click_blocks_all_keys_without_reclick(self):
+        self.guard.image_focus_bounds_resolver = lambda target, focus: {
+            'kind': 'combo', 'class_name': 'ComboBox', 'bounds': [60, 60, 90, 90]}
+        for extra in ({'operation':'image_type_text','value':'never sent','replace_all':True},
+                      {'operation':'image_press_key','key':'C'}, {'operation':'image_hotkey','keys':['CTRL','A']}):
+            with self.subTest(operation=extra['operation']):
+                self.transport.calls.clear(); self.guard.action_count=0
+                answer=self.run_step({**extra,'image_target':image_target()})
+                self.assertFalse(answer['task_verified']); self.assertFalse(answer['verification_deferred'])
+                self.assertEqual(answer['diagnostic']['code'],'image_focus_target_mismatch')
+                self.assertEqual(answer['diagnostic']['focus_target']['status'],'mismatch')
+                self.assertEqual([m['name'] for m in self.mutations()],['click'])
+                self.assertEqual([row['name'] for row in self.transport.calls],['get_window_state','click'])
+
+    def test_same_native_field_accepts_text_and_unknown_canvas_stays_supported(self):
+        for control in ({'kind':'edit','class_name':'Edit','bounds':[20,20,60,60]}, None):
+            with self.subTest(control=control):
+                self.transport.calls.clear(); self.guard.action_count=0
+                self.guard.image_focus_bounds_resolver=lambda target,focus:control
+                answer=self.run_step({'operation':'image_type_text','image_target':image_target(),
+                                      'value':'hello','replace_all':True})
+                self.assertTrue(answer['verification_deferred'])
+                self.assertEqual([m['name'] for m in self.mutations()],['click','hotkey','type_text'])
+                self.assertEqual(answer['diagnostic']['focus_target']['status'], 'compatible' if control else 'unavailable')
+
+    def test_native_field_moving_away_after_select_all_stops_before_text(self):
+        def current_bounds(target, focus):
+            moved=any(m['name']=='hotkey' for m in self.mutations())
+            return {'kind':'edit','class_name':'Edit','bounds':[60,60,90,90] if moved else [20,20,60,60]}
+        self.guard.image_focus_bounds_resolver=current_bounds
+        answer=self.run_step({'operation':'image_type_text','image_target':image_target(),
+                              'value':'never sent','replace_all':True})
+        self.assertFalse(answer['verification_deferred'])
+        self.assertEqual(answer['diagnostic']['code'],'image_focus_target_mismatch')
         self.assertEqual([m['name'] for m in self.mutations()],['click','hotkey'])
 
     def test_known_password_focus_blocks_every_keyboard_action_after_first_click(self):

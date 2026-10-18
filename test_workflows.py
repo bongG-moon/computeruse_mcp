@@ -333,7 +333,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(all(name == "get_window_state" for name, _ in runtime.calls))
         self.assertEqual(runtime.capture_checkpoint.call_count, 1)
 
-    def test_completed_change_wait_cannot_recreate_baseline_when_resuming_checkpoint(self):
+    def test_verified_change_wait_rechecks_equality_when_resuming_checkpoint(self):
         runtime = GuardedUIRuntime(self.tmp.name)
         runtime.values[(100, 200)] = {"첫 입력칸": "대기"}
         runtime.capture_checkpoint = mock.Mock(return_value={"structuredContent": {"pid": 100, "window_id": 200},
@@ -351,12 +351,100 @@ class WorkflowTests(unittest.TestCase):
         calls = len(runtime.calls)
         resumed = self.runner.run(runtime, task, {}, self.target, resume_run_id=first["run_id"],
                                   acknowledge_checkpoint=first["checkpoint"]["id"])
+        self.assertTrue(resumed["task_verified"])
+        self.assertEqual(resumed["status"], "verified")
+        self.assertTrue(first["step_receipts"][0]["target_hash"])
+        self.assertFalse(resumed["last_result"]["input_dispatched"])
+        self.assertEqual([name for name, _ in runtime.calls[calls:]], ["get_window_state"])
+        self.assertEqual(runtime.capture_checkpoint.call_count, 1)
+
+    def verified_change_fixture(self, *, checkpoint=True, repeated=False):
+        runtime = GuardedUIRuntime(self.tmp.name)
+        runtime.values[(100, 200)] = {"첫 입력칸": "대기"}
+        runtime.capture_checkpoint = mock.Mock(return_value={"structuredContent": {"pid": 100, "window_id": 200},
+            "content": [{"type": "image", "data": "synthetic", "mimeType": "image/png"}]})
+        task = copy.deepcopy(self.task)
+        step = {"step_id": "changed", "program_id": "editor", "operation": "set_value",
+            "selector": {"name": "첫 입력칸", "role": "Edit"}, "value": "준비", "verification_timeout_ms": 0,
+            "expect": [{"selector": {"name": "첫 입력칸", "role": "Edit"}, "property": "value",
+                "equals": "준비", "require_change": True}]}
+        task["steps"] = [step]
+        if repeated:
+            task["variables"] = {"values": {"type": "list", "items": {"type": "text"}, "default": ["A", "B", "C"]}}
+            step["value"] = step["expect"][0]["equals"] = {"input_ref": "item"}
+            task["steps"] = [{"step_id": "loop", "operation": "foreach", "input": "values", "item": "item", "steps": [step]}]
+        if checkpoint:
+            task["steps"].append({"step_id": "review", "program_id": "editor", "operation": "checkpoint", "message": "상태 확인"})
+        first = self.runner.run(runtime, task, {}, self.target)
+        return runtime, task, first
+
+    def test_verified_foreach_change_before_checkpoint_rechecks_final_iteration_without_input(self):
+        runtime, task, first = self.verified_change_fixture(repeated=True)
+        self.assertEqual(first["completed_steps"], 3)
+        self.assertEqual(first["step_receipts"][-1]["iteration_id"], "loop:3")
+        self.assertTrue(all(row["status"] == "verified" and row.get("target_hash") for row in first["step_receipts"]))
+        calls = len(runtime.calls)
+        resumed = self.runner.run(runtime, task, {}, self.target, resume_run_id=first["run_id"],
+            acknowledge_checkpoint=first["checkpoint"]["id"])
+        self.assertTrue(resumed["task_verified"])
+        self.assertEqual(runtime.values[(100, 200)]["첫 입력칸"], "C")
+        self.assertEqual([name for name, _ in runtime.calls[calls:]], ["get_window_state"])
+        self.assertTrue(task["steps"][0]["steps"][0]["expect"][0]["require_change"])
+
+    def test_verified_change_current_equality_mismatch_blocks_resume_without_replaying(self):
+        runtime, task, first = self.verified_change_fixture()
+        runtime.values[(100, 200)]["첫 입력칸"] = "changed afterwards"
+        calls = len(runtime.calls)
+        resumed = self.runner.run(runtime, task, {}, self.target, resume_run_id=first["run_id"],
+            acknowledge_checkpoint=first["checkpoint"]["id"])
         self.assertFalse(resumed["task_verified"])
-        self.assertEqual(resumed["status"], "needs_review")
+        self.assertFalse(resumed["last_result"]["input_dispatched"])
+        self.assertFalse(any(name == "set_value" for name, _ in runtime.calls[calls:]))
+
+    def test_missing_mismatched_or_unverified_change_receipt_stays_strict_across_two_resumes(self):
+        for defect in ("missing_receipts", "missing_target", "status", "step_id", "iteration", "snapshot"):
+            with self.subTest(defect=defect):
+                runtime, task, first = self.verified_change_fixture(repeated=True)
+                path = self.runner._path(first["run_id"])
+                stored = self.checkpoint(first["run_id"])
+                if defect == "missing_receipts": stored.pop("step_receipts")
+                elif defect == "missing_target": stored["step_receipts"][-1].pop("target_hash")
+                elif defect == "status": stored["step_receipts"][-1]["status"] = "awaiting_verification"
+                elif defect == "step_id": stored["step_receipts"][-1]["step_id"] = "other-step"
+                elif defect == "iteration": stored["step_receipts"][-1]["iteration_id"] = "loop:2"
+                else: stored.pop("snapshot_hash")
+                path.write_text(json.dumps(stored), encoding="utf-8")
+                calls = len(runtime.calls)
+                for _ in range(2):
+                    resumed = self.runner.run(runtime, task, {}, self.target, resume_run_id=first["run_id"],
+                        acknowledge_checkpoint=first["checkpoint"]["id"])
+                    self.assertFalse(resumed["task_verified"])
+                    self.assertEqual(resumed["last_result"]["diagnostic"]["code"], "change_baseline_required")
+                    self.assertNotIn("target_hash", resumed["step_receipts"][-1])
+                self.assertEqual(len(runtime.calls), calls)
+
+    def test_verified_change_receipt_does_not_authorize_another_window_with_same_value(self):
+        runtime, task, first = self.verified_change_fixture(checkpoint=False)
+        runtime.values[(100, 201)] = {"첫 입력칸": "준비"}
+        calls = len(runtime.calls)
+        resumed = self.runner.run(runtime, task, {}, [{"program_id": "editor", "pid": 100, "window_id": 201}],
+            resume_run_id=first["run_id"])
+        self.assertFalse(resumed["task_verified"])
+        self.assertEqual(resumed["last_result"]["diagnostic"]["code"], "change_baseline_required")
+        self.assertEqual(len(runtime.calls), calls)
+
+    def test_pending_change_action_keeps_baseline_requirement_even_if_equality_now_matches(self):
+        task = copy.deepcopy(self.task)
+        task["steps"] = [{"step_id": "query", "program_id": "editor", "operation": "click", "selector": {"name": "Query"},
+            "expect": [{"selector": {"name": "첫 입력칸", "role": "Edit"}, "property": "value", "equals": "준비", "require_change": True}]}]
+        first = self.run_recipe(ScriptedOperations([{"task_verified": False, "input_dispatched": True}]), task=task)
+        runtime = GuardedUIRuntime(self.tmp.name)
+        runtime.values[(100, 200)] = {"첫 입력칸": "준비"}
+        resumed = self.runner.run(runtime, task, {}, self.target, resume_run_id=first["run_id"])
+        self.assertFalse(resumed["task_verified"])
         self.assertEqual(resumed["last_result"]["diagnostic"]["code"], "change_baseline_required")
         self.assertFalse(resumed["last_result"]["input_dispatched"])
-        self.assertEqual(len(runtime.calls), calls)
-        self.assertEqual(runtime.capture_checkpoint.call_count, 1)
+        self.assertEqual(runtime.calls, [])
 
     def test_pending_property_wait_can_resume_without_replaying_input(self):
         runtime = GuardedUIRuntime(self.tmp.name)

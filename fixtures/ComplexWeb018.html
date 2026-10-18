@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="ko">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Complex Web 018 — local canvas fixture</title>
+<style>
+html,body{margin:0;background:#edf2f8;overflow-x:hidden}canvas{display:block;outline:none;touch-action:pan-y;cursor:default}
+</style>
+<!-- Business controls deliberately exist only as canvas pixels. No DOM labels,
+     inputs, ARIA controls, accessible fallback text, or hidden business fields. -->
+<canvas tabindex="0"></canvas>
+<script>
+"use strict";
+(() => {
+  const canvas = document.querySelector("canvas"), ctx = canvas.getContext("2d");
+  const fields = [
+    {id:"family",label:"Family",options:["전체","W","N","P","C"],value:"전체"},
+    {id:"device",label:"Device",options:["전체","D100","D200","D300"],value:"전체"},
+    {id:"search",label:"검색어",value:""},
+    {id:"generation",label:"Generation",options:["전체","G1","G2","G3"],value:"전체"},
+    {id:"organization",label:"Organization",options:["전체","Fab A","Fab B","Lab"],value:"전체"},
+    {id:"model",label:"Model",value:""},
+    {id:"owner",label:"담당자",value:""},
+    {id:"status",label:"상태",options:["전체","대기","진행","완료"],value:"전체"},
+    {id:"region",label:"Region",options:["전체","North","South","East"],value:"전체"},
+    {id:"product",label:"Product Type",options:["전체","Standard","Premium","Sample"],value:"전체"},
+    {id:"version",label:"Version",value:""},
+    {id:"lot",label:"Lot ID",value:""},
+    {id:"date",label:"기준일",value:""},
+    {id:"memo",label:"메모",value:""}
+  ];
+  const original = fields.map(f => f.value), session = crypto.randomUUID();
+  let width=0,height=0,hits=[],focus=-1,selectAll=false,popup=null,layout=0,sequence=0;
+  let mainCount=0,detailCount=0,mainRows=[],detailRows=[],mainSummary="아직 조회하지 않았습니다",detailSummary="아직 조회하지 않았습니다";
+  let auditQueue=Promise.resolve(),auditFailed=false;
+  const snapshot=()=>Object.fromEntries(fields.map(f=>[f.id,f.value]));
+  function receipt(event,effect,extra={}) {
+    const data={session,sequence:++sequence,event,effect,...extra,field_values:snapshot(),
+      query_count:{main:mainCount,detail:detailCount},layout,viewport:{width:innerWidth,height:innerHeight,dpr:devicePixelRatio},at:new Date().toISOString()};
+    auditQueue=auditQueue.then(async()=>{
+      const response=await fetch("/audit",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data),keepalive:true});
+      if(!response.ok) throw new Error("audit unavailable");
+    }).catch(()=>{auditFailed=true;draw();});
+  }
+  function rounded(x,y,w,h,r=10) {ctx.beginPath();ctx.roundRect(x,y,w,h,r);}
+  function box(x,y,w,h,fill,stroke=null,r=10) {rounded(x,y,w,h,r);ctx.fillStyle=fill;ctx.fill();if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=1;ctx.stroke();}}
+  function text(value,x,y,size=15,color="#243954",bold=false) {ctx.fillStyle=color;ctx.font=`${bold?600:400} ${size}px 'Segoe UI','Malgun Gothic',sans-serif`;ctx.textBaseline="middle";ctx.fillText(value,x,y);}
+  function clipped(value,x,y,w,size=15,color="#243954",bold=false) {ctx.save();ctx.beginPath();ctx.rect(x,y-15,w,30);ctx.clip();text(value,x,y,size,color,bold);ctx.restore();}
+  function hit(kind,x,y,w,h,extra={}) {hits.push({kind,x,y,w,h,...extra});}
+  function button(label,x,y,w,kind,extra={},primary=false) {
+    box(x,y,w,36,primary?"#255fcd":"#f5f8fd",primary?null:"#cbd7e8",8);
+    text(label,x+14,y+18,14,primary?"white":"#263e61",true);hit(kind,x,y,w,36,extra);
+  }
+  function field(index,x,y,w) {
+    const f=fields[index],active=focus===index;
+    text(f.label,x,y+10,14,"#516783",true);
+    box(x,y+25,w,35,"white",active?"#2763d9":"#bdccdf",6);
+    if(active&&selectAll&&f.value) box(x+8,y+31,Math.min(w-32,ctx.measureText(f.value).width+8),23,"#cfe0ff",null,2);
+    clipped(f.value || (f.options?"선택":"입력하세요"),x+10,y+43,w-36,15,f.value?"#172d48":"#91a0b4");
+    if(f.options) text("▾",x+w-24,y+43,17,"#526f98");
+    else if(active&&!selectAll){const tail=Math.min(w-18,10+ctx.measureText(f.value).width);ctx.fillStyle="#2763d9";ctx.fillRect(x+tail,y+32,1,21);}
+    hit("field",x,y+25,w,35,{index});
+  }
+  function makeRows(section) {
+    const chosen=snapshot();return Array.from({length:5},(_,i)=>({number:i+1,family:chosen.family,device:chosen.device,
+      name:(chosen.search||"항목")+" "+String(i+1).padStart(2,"0"),status:section==="main"?"조회 완료":chosen.status}));
+  }
+  function results(rows,summary,x,y,w) {
+    clipped(summary,x,y+11,w,13,"#315b91",true);
+    if(!rows.length) {text("조회하면 이 영역에 결과 5행이 표시됩니다.",x,y+45,13,"#8190a5");return 68;}
+    const cols=[.08,.17,.2,.35,.2],labels=["No.","Family","Device","검색 결과","상태"];
+    box(x,y+29,w,27,"#e7eef9",null,4);
+    let at=x;labels.forEach((label,i)=>{clipped(label,at+7,y+43,w*cols[i]-12,12,"#365175",true);at+=w*cols[i];});
+    rows.forEach((row,n)=>{const ry=y+57+n*28;box(x,ry,w,27,n%2?"#f2f5fa":"white",null,0);let cx=x;
+      [row.number,row.family,row.device,row.name,row.status].forEach((value,i)=>{clipped(String(value),cx+7,ry+14,w*cols[i]-12,12);cx+=w*cols[i];});});
+    return 205;
+  }
+  function panel(title,subtitle,indexes,section,y) {
+    const margin=18,x=margin,w=width-margin*2,inside=x+18,usable=w-36;
+    const columns=layout===1?2:layout===2?1:width>=850?3:width>=540?2:1;
+    const rowCount=Math.ceil(indexes.length/columns),fieldWidth=(usable-16*(columns-1))/columns;
+    const resultsHeight=(section==="main"?mainRows:detailRows).length?205:68;
+    const bodyHeight=58+rowCount*74+48+resultsHeight+18;
+    box(x,y,w,bodyHeight,"#ffffff","#d5deec",12);
+    text(title,inside,y+26,19,"#183a68",true);clipped(subtitle,inside+175,y+27,usable-175,12,"#6a7d96");
+    indexes.forEach((index,n)=>field(index,inside+(n%columns)*(fieldWidth+16),y+52+Math.floor(n/columns)*74,fieldWidth));
+    const by=y+54+rowCount*74;
+    button("조회",inside,by,92,"query",{section},true);button("초기화",inside+104,by,92,"reset",{section});
+    clipped(section==="main"?`조회 횟수 ${mainCount}`:`조회 횟수 ${detailCount}`,inside+210,by+18,usable-210,13,"#637792");
+    results(section==="main"?mainRows:detailRows,section==="main"?mainSummary:detailSummary,inside,by+48,usable);
+    return y+bodyHeight+18;
+  }
+  function drawPopup() {
+    if(!popup)return;
+    const f=fields[popup.index],anchor=hits.find(h=>h.kind==="field"&&h.index===popup.index);
+    if(!anchor){popup=null;return;}
+    const ph=f.options.length*34+8,py=anchor.y+anchor.h+3,pw=anchor.w;
+    ctx.save();ctx.shadowColor="#1b315144";ctx.shadowBlur=18;box(anchor.x,py,pw,ph,"white","#7899cd",6);ctx.restore();
+    f.options.forEach((value,i)=>{const oy=py+4+i*34;if(i===popup.active)box(anchor.x+4,oy,pw-8,32,"#e2edff",null,4);
+      clipped(value,anchor.x+12,oy+16,pw-24,14);hit("option",anchor.x,oy,pw,34,{index:popup.index,option:i});});
+  }
+  function draw() {
+    width=Math.max(320,innerWidth);
+    const cols=layout===1?2:layout===2?1:width>=850?3:width>=540?2:1;
+    height=Math.max(innerHeight,146+2*(58+Math.ceil(7/cols)*74+48+18+18)+(mainRows.length?205:68)+(detailRows.length?205:68));
+    const scale=Math.min(devicePixelRatio||1,3);
+    canvas.style.width=width+"px";canvas.style.height=height+"px";
+    if(canvas.width!==Math.round(width*scale)||canvas.height!==Math.round(height*scale)) {canvas.width=Math.round(width*scale);canvas.height=Math.round(height*scale);}
+    ctx.setTransform(scale,0,0,scale,0,0);ctx.clearRect(0,0,width,height);ctx.fillStyle="#edf2f8";ctx.fillRect(0,0,width,height);hits=[];
+    text("조건 조회 업무",20,26,22,"#183a68",true);
+    text("로컬 Canvas 시험 · 상단은 메인 조회, 아래는 상세 조회",20,54,12,"#647c98");
+    button("전체 초기화",20,74,125,"reset_all");
+    button("배치: "+["자동","2열","1열"][layout],157,74,130,"layout");
+    if(auditFailed)text("검증 기록 연결 실패",305,92,12,"#b42732");
+    let y=panel("메인 조회", "Family · Device · 검색어",[0,1,2,3,4,5,6],"main",128);
+    y=panel("상세 조회", "추가 조건 · 별도 조회 결과",[7,8,9,10,11,12,13],"detail",y);
+    drawPopup();
+  }
+  function updateValue(index,value,source) {
+    const f=fields[index],before=f.value;f.value=String(value).slice(0,160);selectAll=false;
+    if(before!==f.value)receipt("field_change",true,{field:f.id,before,value:f.value,input_source:source});
+    draw();
+  }
+  function reset(section) {
+    const indexes=section==="main"?[0,1,2,3,4,5,6]:[7,8,9,10,11,12,13];
+    indexes.forEach(i=>fields[i].value=original[i]);
+    if(section==="main"){mainRows=[];mainSummary="메인 조건을 초기화했습니다";}else{detailRows=[];detailSummary="상세 조건을 초기화했습니다";}
+    popup=null;focus=-1;receipt("reset",true,{section});draw();
+  }
+  canvas.addEventListener("pointerdown",event=>{
+    if(event.button!==0)return;canvas.focus({preventScroll:true});
+    const rect=canvas.getBoundingClientRect(),x=event.clientX-rect.left,y=event.clientY-rect.top;
+    const target=[...hits].reverse().find(h=>x>=h.x&&x<h.x+h.w&&y>=h.y&&y<h.y+h.h);
+    if(!target){popup=null;focus=-1;selectAll=false;draw();return;}
+    if(target.kind==="option") {updateValue(target.index,fields[target.index].options[target.option],"dropdown_pointer");popup=null;receipt("dropdown_commit",true,{field:fields[target.index].id});draw();return;}
+    if(popup){popup=null;draw();}
+    if(target.kind==="field") {focus=target.index;selectAll=false;const f=fields[focus];if(f.options)popup={index:focus,active:Math.max(0,f.options.indexOf(f.value))};receipt("field_focus",false,{field:f.id,dropdown_open:!!f.options});draw();return;}
+    focus=-1;selectAll=false;
+    if(target.kind==="query") {const section=target.section,rows=makeRows(section),s=snapshot();
+      const summary=`Family ${s.family} · Device ${s.device} · 검색어 ${s.search||"(없음)"} · 결과 5행`;
+      if(section==="main"){mainCount++;mainRows=rows;mainSummary=summary;}else{detailCount++;detailRows=rows;detailSummary=summary;}
+      receipt("query",true,{section,rows});draw();
+    } else if(target.kind==="reset")reset(target.section);
+    else if(target.kind==="reset_all") {fields.forEach((f,i)=>f.value=original[i]);mainRows=[];detailRows=[];mainSummary="전체 초기화 완료";detailSummary="전체 초기화 완료";receipt("reset_all",true);draw();}
+    else if(target.kind==="layout") {layout=(layout+1)%3;receipt("layout_change",true);draw();}
+  });
+  canvas.addEventListener("keydown",event=>{
+    if(event.key==="Escape"){popup=null;selectAll=false;draw();event.preventDefault();return;}
+    if(focus<0)return;
+    const f=fields[focus];
+    if(event.key==="Tab") {event.preventDefault();popup=null;focus=(focus+(event.shiftKey?-1:1)+fields.length)%fields.length;selectAll=false;draw();return;}
+    if(f.options) {
+      if(["ArrowDown","ArrowUp","Enter"," "].includes(event.key)) {event.preventDefault();
+        if(!popup){popup={index:focus,active:Math.max(0,f.options.indexOf(f.value))};}
+        else if(event.key==="Enter"||event.key===" "){const value=f.options[popup.active];popup=null;updateValue(focus,value,"dropdown_keyboard");}
+        else popup.active=(popup.active+(event.key==="ArrowDown"?1:-1)+f.options.length)%f.options.length;
+        draw();
+      }return;
+    }
+    if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="a"){event.preventDefault();selectAll=true;draw();return;}
+    if(event.ctrlKey||event.metaKey||event.altKey)return;
+    if(event.key==="Backspace"||event.key==="Delete") {event.preventDefault();updateValue(focus,selectAll?"":f.value.slice(0,-1),"keyboard");}
+    else if(event.key==="Enter") {event.preventDefault();selectAll=false;receipt("text_commit",true,{field:f.id});draw();}
+    else if(event.key.length===1&&!event.isComposing) {event.preventDefault();updateValue(focus,(selectAll?"":f.value)+event.key,"keyboard");}
+  });
+  canvas.addEventListener("beforeinput",event=>{
+    if(focus<0||fields[focus].options||!event.data)return;
+    event.preventDefault();updateValue(focus,(selectAll?"":fields[focus].value)+event.data,"beforeinput");
+  });
+  canvas.addEventListener("compositionend",event=>{
+    if(focus>=0&&!fields[focus].options&&event.data)updateValue(focus,(selectAll?"":fields[focus].value)+event.data,"composition");
+  });
+  canvas.addEventListener("paste",event=>{
+    if(focus<0||fields[focus].options)return;event.preventDefault();
+    updateValue(focus,(selectAll?"":fields[focus].value)+(event.clipboardData?.getData("text/plain")||""),"paste");
+  });
+  addEventListener("resize",()=>{popup=null;draw();receipt("viewport_change",false);});
+  draw();receipt("page_ready",false);
+})();
+</script>
+</html>

@@ -223,6 +223,25 @@ class HiddenProgramIntegrationTests(unittest.TestCase):
         self.assertEqual(dialog.result["launch"], {"kind": "exe", "arguments": ["--from-shortcut", "value with spaces"],
                                                   "cwd": str(self.root)})
 
+    def test_saved_appref_hash_survives_name_edit_without_silent_repin(self):
+        original = copy.deepcopy(self.config["programs"][0])
+        original["launch"] = {"kind": "appref", "target": str(self.root / "Business.appref-ms"), "sha256": "a" * 64}
+        dialog = setup.ProgramEditor(self.app, original)
+        dialog.name.set("내 업무 화면")
+        self.button(dialog, "저장").invoke()
+        self.assertEqual(dialog.result, {**original, "name": "내 업무 화면"})
+
+    def test_new_appref_path_is_pinned_without_launching(self):
+        from program_launch import appref_launch_profile
+        reference = self.root / "Business.appref-ms"
+        reference.write_text("https://example.test/Business.application#Business.app, Culture=neutral, "
+                             "PublicKeyToken=0123456789abcdef, processorArchitecture=msil", encoding="utf-16")
+        original = copy.deepcopy(self.config["programs"][0])
+        dialog = setup.ProgramEditor(self.app, original)
+        dialog.launch_uri.set(str(reference))
+        self.button(dialog, "저장").invoke()
+        self.assertEqual(dialog.result, {**original, "launch": appref_launch_profile(str(reference))})
+
     def test_uri_and_exe_arguments_conflict_stays_editable(self):
         dialog = setup.ProgramEditor(self.app, copy.deepcopy(self.config["programs"][0]))
         dialog.launch_uri.set("example-desk://workspace/menu")

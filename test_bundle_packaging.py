@@ -6,6 +6,7 @@ from html.parser import HTMLParser
 import json
 from pathlib import Path
 import re
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -14,6 +15,38 @@ import zipfile
 import build_portable
 import bundle_driver
 from settings import VERSION
+
+
+class ImageRuntimeBuildCheckTests(unittest.TestCase):
+    proof = {"ok": True, "backend": "airtest-template-rgb", "unique": "matched",
+             "duplicate": "ambiguous", "missing": "not_found", "anchor": [41, 25]}
+
+    def test_success_uses_requested_package_interpreter_and_application_directory(self):
+        runtime, application = Path("prepared-runtime"), Path("prepared-app")
+        with mock.patch.object(build_portable, "run_hidden", return_value=mock.Mock(stdout=json.dumps(self.proof))) as run:
+            self.assertEqual(build_portable.check_image_backend(runtime, application), self.proof)
+        command = run.call_args.args[0]
+        self.assertEqual(command[0], str(runtime / "python.exe"))
+        self.assertEqual(run.call_args.kwargs["cwd"], application)
+        self.assertEqual(run.call_args.kwargs["env"]["PYTHONHOME"], str(runtime))
+        self.assertEqual(run.call_args.kwargs["timeout"], 45)
+
+    def test_dependency_install_advice_on_stdout_fails_build(self):
+        contaminated = 'OpenCV bindings requires "numpy" package.\n' + json.dumps(self.proof)
+        with mock.patch.object(build_portable, "run_hidden", return_value=mock.Mock(stdout=contaminated)):
+            with self.assertRaisesRegex(RuntimeError, "invalid protocol output"):
+                build_portable.check_image_backend(Path("runtime"), Path("app"))
+
+    def test_incomplete_or_wrong_recognition_proof_fails_build(self):
+        for proof in ({"ok": True}, {**self.proof, "duplicate": "matched"}, {**self.proof, "anchor": [0, 0]}):
+            with self.subTest(proof=proof), mock.patch.object(build_portable, "run_hidden", return_value=mock.Mock(stdout=json.dumps(proof))):
+                with self.assertRaisesRegex(RuntimeError, "did not verify"):
+                    build_portable.check_image_backend(Path("runtime"), Path("app"))
+
+    def test_compiled_dependency_or_matching_crash_fails_build(self):
+        with mock.patch.object(build_portable, "run_hidden", side_effect=subprocess.CalledProcessError(1, "python")):
+            with self.assertRaises(subprocess.CalledProcessError):
+                build_portable.check_image_backend(Path("runtime"), Path("app"))
 
 
 class PackageSourceTests(unittest.TestCase):

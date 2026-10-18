@@ -10,10 +10,10 @@ import threading
 import time
 import uuid
 
-from inspection import suggested_operations
+from inspection import suggested_operations, control_display_label
 from learning import ElementLibrary, stable_selector, _text
 from learning_picker import _run_helper, _helper_visible, _end_helper, match_picked_element
-from operations import OperationError, _name, _unique
+from operations import OperationError, _elements, _name, _unique
 from teaching_sessions import _Cancellation
 from workflows import validate_recipe, validate_draft_recipe, validate_draft_metadata, WINDOW_REF
 from recording_windows import validate_window_wait
@@ -26,6 +26,17 @@ IMAGE_ACTIONS = {"click": "image_click", "double_click": "image_double_click", "
                  "set_value": "image_type_text", "press_key": "image_press_key", "hotkey": "image_hotkey",
                  "scroll": "image_scroll", "wait_for_element": "wait_for_image"}
 IMAGE_FALLBACK_ERRORS = {"picker_not_found", "picker_controls_not_exposed"}
+INPUT_CANDIDATE_LABEL = "입력 위치 후보 · 값 확인 필요"
+INPUT_CANDIDATE_PROOF = {"source": "preceding_recorded_click", "verified": False,
+                         "requires_user_confirmation": True, "typed_text_recorded": False}
+
+
+def _recorded_input_candidate(event, step):
+    proof = event.get("input_target_candidate")
+    return (step.get("operation") == "manual_entry" and step.get("manual_reason") == "unknown_input"
+            and "image_target" in step and isinstance(proof, dict) and set(proof) == set(INPUT_CANDIDATE_PROOF)
+            and proof.get("source") == "preceding_recorded_click" and proof.get("verified") is False
+            and proof.get("requires_user_confirmation") is True and proof.get("typed_text_recorded") is False)
 
 
 def _recognition_fallback(error):
@@ -94,7 +105,7 @@ MANUAL_REASONS = {"unknown_input": "입력할 내용을 직접 지정하세요."
     "drag_requires_manual_setup": "드래그는 자동 기록하지 않습니다. 이 단계를 삭제하고 지원하는 동작으로 다시 구성하세요.",
     "image_capture_required": "대상 이미지를 확보하지 못했습니다. 이 단계를 삭제하고 이미지 선택으로 동작을 직접 추가하세요.",
     "focus_target_requires_selection": "입력 위치가 바뀌어 대상을 확인하지 못했습니다. 이 단계를 삭제하고 입력 대상을 직접 선택하세요.",
-    "image_occluded_requires_selection": "대상이 다른 창에 가려져 기록하지 못했습니다. 이 단계를 삭제하고 가림을 해제한 뒤 직접 추가하세요.",
+    "image_occluded_requires_selection": "화면 겹침이 감지되어 대상 이미지를 확정하지 못했습니다. 이 단계를 삭제하고 대상을 직접 지정하세요.",
     "template_low_detail": "구분할 수 있는 이미지가 부족합니다. 이 단계를 삭제하고 주변 문구를 포함해 이미지를 직접 선택하세요."}
 MANUAL_REASONS["semantic_target_unverified"] = "기록한 요소나 최종값을 재확인하지 못했습니다. 이 단계를 삭제하고 요소와 동작을 직접 추가하세요."
 MANUAL_REASONS["recording_method_unverified"] = "콤보 입력과 확정 방법을 확인하지 못했습니다. 이 단계를 삭제하고 검증한 입력·확정 동작을 직접 추가하세요."
@@ -304,7 +315,8 @@ class ProcessDraft:
         step = {"operation": action, "program_id": target["program_id"], "window_ref": target.get("window_ref", "main"),
                 "selector": selector, "expect": [{"selector": copy.deepcopy(selector), "property": prop, "equals": expected}]}
         step["checked" if action == "set_checked" else "value"] = expected
-        return step, _name(element) or selector.get("automation_id", "녹화한 요소")
+        label = "문서 입력" if element.get("role") == "Document" else _name(element) or selector.get("automation_id", "녹화한 요소")
+        return step, control_display_label(snapshot, element, label)
 
     @staticmethod
     def _event_evidence(event):
@@ -455,8 +467,9 @@ class ProcessDraft:
                         target_warning_steps.add(step["step_id"])
                     else:
                         persistent_semantic_warning = True
-            label = "녹화한 이미지" if image is not None else "대상 확인 필요"
-            if isinstance(event.get("observed_selection"), str) and len(event["observed_selection"]) <= 2000:
+            candidate = _recorded_input_candidate(event, step)
+            label = INPUT_CANDIDATE_LABEL if candidate else "녹화한 이미지" if image is not None else "대상 확인 필요"
+            if not candidate and isinstance(event.get("observed_selection"), str) and len(event["observed_selection"]) <= 2000:
                 label += " · 관찰한 선택값: " + event["observed_selection"]
             proposed.append(step); labels.append(label)
             if kind != "manual_entry" and binding_key in closed and event_index == last_event[binding_key]:
@@ -519,6 +532,8 @@ class ProcessDraft:
         proposed[index].pop("manual_reason", None)
         self.validate(proposed, allow_pending=True)
         self.steps = proposed
+        if self.labels[index] == INPUT_CANDIDATE_LABEL:
+            self.labels[index] = "이미지 입력 · 사용자 지정 값"
         self._resolve_target_warnings()
 
     def retarget(self, index, native):
@@ -795,15 +810,22 @@ class ProcessDraft:
                       str(step.get("message", step.get("value", step.get("key", "+".join(step.get("keys", [])))))))
             if step.get("expect"):
                 check = step["expect"][0]
-                detail += " → 확인: " + str(check["selector"].get("name", check["selector"].get("automation_id", "요소"))) + " = " + str(check["equals"])
+                check_label = (label if isinstance(step.get("selector"), dict) and check["selector"] == step["selector"]
+                               else check["selector"].get("name", check["selector"].get("automation_id", "요소")))
+                detail += " → 확인: " + str(check_label) + " = " + str(check["equals"])
             action_label = ACTION_LABELS.get(action, action)
             editable_input = action in {"set_value", "set_checked", "select_option", "image_type_text", "checkpoint", "delay", "wait_for_element", "wait_for_image", "wait_for_state", "wait_for_window", "press_key", "image_press_key", "hotkey", "image_hotkey"} or len(step.get("expect", [])) == 1 or action == "manual_entry" and "image_target" in step and step.get("manual_reason") in {"unknown_input", "existing_text_requires_review"}
             if action == "manual_entry": detail = MANUAL_REASONS.get(step.get("manual_reason"), "이 단계의 대상과 동작을 지정하세요.") + " 초안으로 저장할 수 있으며, 보완 전에는 실행되지 않습니다."
+            candidate = (action == "manual_entry" and step.get("manual_reason") == "unknown_input"
+                         and "image_target" in step and label == INPUT_CANDIDATE_LABEL)
+            if candidate:
+                detail = "두 번 클릭해 입력 위치 후보 이미지를 확인하고 입력할 값을 한 번 지정하세요. 입력한 글자는 기록하지 않았습니다. 위치가 다르면 그 단계만 다시 선택할 수 있습니다."
             rows.append({"index": index, "program": target["label"], "label": label, "action": action,
-                         "action_label": action_label, "recognition": "image" if "image_target" in step else "unresolved" if action == "manual_entry" else "uia",
+                         "action_label": action_label, "recognition": "image_candidate" if candidate else "image" if "image_target" in step else "unresolved" if action == "manual_entry" else "uia",
                          "requires_input": action == "manual_entry", "editable_input": editable_input, "detail": detail,
                          "repairable": (action == "manual_entry" or "image_target" in step or "selector" in step) and step.get("manual_reason") != "protected_input",
                          "repair_action": step.get("repair_action", ""),
+                         **({"input_target_candidate": copy.deepcopy(INPUT_CANDIDATE_PROOF)} if candidate else {}),
                          "summary": f"{index+1}. {action_label} · {label} · {detail}"})
         # Native IPC transports the whole list. Keep 1,000 Korean/Unicode rows
         # within its 2 MiB envelope; opening one row still reads the full value.
@@ -914,7 +936,9 @@ class ProcessEditors:
                 raise OperationError("대상을 확인할 단계를 선택하세요.")
             step = draft.steps[index]
             preview = draft.summaries()[index]
-            if "image_target" in step: preview["thumbnail_png"] = step["image_target"]["template_png"]
+            if "image_target" in step:
+                preview["thumbnail_png"] = step["image_target"]["template_png"]
+                preview["preview_anchor"] = copy.deepcopy(step["image_target"]["anchor"])
             preview["editable"] = {key: copy.deepcopy(step[key]) for key in ("value", "message", "key", "keys", "duration_ms", "timeout_ms", "checked") if key in step}
             if len(step.get("expect", [])) == 1:
                 preview["editable"]["expected"] = copy.deepcopy(step["expect"][0]["equals"])
@@ -1046,6 +1070,24 @@ class ProcessEditors:
             recording_targets = []
             for target in roots:
                 check = image_replay_preflight(runtime, {k: target[k] for k in ("pid", "window_id")}, capture=False)
+                if (check.get("ready_for_input") is not True and check.get("ready_for_capture") is True
+                        and check.get("diagnostic", {}).get("code") == "image_dpi_unsupported"
+                        and check.get("diagnostic", {}).get("driver_refused") is not True):
+                    # DPI-unaware applications can still expose exact actionable
+                    # UIA controls. Confirm the guarded Driver path before opening
+                    # a recorder with image actions explicitly disabled.
+                    with runtime.execution_lock:
+                        self._check(job)
+                        snapshot, _ = self.library._observe(runtime, {k: target[k] for k in ("pid", "window_id")}, target["program_id"])
+                    actionable = sum(len(suggested_operations(element)) > 1 for element in _elements(snapshot)
+                                     if element.get("is_password") is not True)
+                    if actionable:
+                        check = {**check, "status": "ready_uia_only", "ready_for_recording": True,
+                                 "recording_mode": "uia_only", "actionable_controls": actionable,
+                                 "image_diagnostic": copy.deepcopy(check.get("diagnostic", {})),
+                                 "diagnostic": {"code": "recording_uia_only", "message":
+                                     "이 프로그램은 요소 방식으로 자동 기록합니다. 배율을 바꿀 필요가 없습니다. "
+                                     "이미지 동작은 만들지 않으며, 읽을 수 없는 대상만 보완 필요로 남깁니다."}}
                 if check["ready_for_input"]:
                     with runtime.execution_lock:
                         self._check(job)
@@ -1060,7 +1102,7 @@ class ProcessEditors:
                                           "preflight_message": check.get("diagnostic", {}).get("message", "")})
             with self.lock:
                 job["result"]["recording_preflight"] = copy.deepcopy(preflight)
-            blocked = [row for row in preflight if row.get("ready_for_input") is not True]
+            blocked = [row for row in preflight if row.get("ready_for_input") is not True and row.get("ready_for_recording") is not True]
             if blocked:
                 reason = blocked[0].get("diagnostic", {})
                 raise OperationError("아직 녹화를 시작하지 않았습니다. " + reason.get("message", "대상 창의 화면 읽기와 재생 준비를 확인하지 못했습니다.")
@@ -1168,6 +1210,13 @@ class ProcessEditors:
                 recorded_import.setdefault("unresolved_at_import", recorded_import.get("unresolved_steps", 0))
                 recorded_import["unresolved_steps"] = sum(step["operation"] == "manual_entry" for step in _leaf_steps(draft.steps))
                 recorded_import["diagnostics_phase"] = "original_import"
+        if action in {"record", "reimport_recording"}:
+            missing_captures = sum(step.get("operation") == "manual_entry" and "image_target" not in step
+                and step.get("manual_reason") in {"image_capture_required", "image_occluded_requires_selection"}
+                for step in _leaf_steps(draft.steps))
+            if missing_captures:
+                message = ("캡처 누락 " + str(missing_captures) + "개 · 녹화 원본은 보존했습니다. "
+                           "아직 재생할 수 없습니다. 초안으로 저장해 이어서 보완할 수 있습니다.")
         return {"status": "ok", "message": message, "steps": draft.summaries(), "recording_review": draft.recording_review(), "readiness": draft.readiness(),
                 "recording_receipt_available": bool(job.get("last_recording")), **extra}
 
@@ -1308,6 +1357,15 @@ class ProcessEditors:
                 if identity is not None and self._hosted_identity(job["runtime"], {"pid": pid, "window_id": hwnd}) != identity:
                     raise OperationError("선택하거나 녹화하는 동안 대상 창의 앱이 바뀌었습니다. 현재 앱으로 다시 연결하세요.", "editor_target_changed")
         check_hosted()
+        # Only the guard's original, revalidated binding crosses into the native
+        # helper. A request cannot add an arbitrary cross-process UIA identity.
+        arguments = copy.deepcopy(arguments)
+        target_arguments = arguments.get("targets", []) if mode == "record" else [arguments]
+        for target in target_arguments:
+            target.pop("hosted_target", None)
+            identity = job.get("hosted_targets", {}).get((target.get("pid"), target.get("window_id")))
+            if identity is not None:
+                target["hosted_target"] = copy.deepcopy(identity)
         helper = Path(__file__).resolve().with_name(VISUAL_HELPER_NAME)
         self._check_path(helper)
         if not helper.is_file():
@@ -1399,6 +1457,91 @@ class ProcessEditors:
         if not isinstance(probe, dict) or set(probe) != {"hooks", "uia"} or any(not isinstance(v, str) or v not in {"checking", "available", "unavailable", "timeout"} for v in probe.values()):
             raise OperationError("녹화 시작 점검 결과를 확인하지 못했습니다.", "recording_invalid_progress")
         result = {key: copy.deepcopy(value[key]) for key in ("state", "event_count", "manual_count", "max_events", "warning_codes", "probe")}
+        diagnostic = value.get("start_diagnostic")
+        if diagnostic is not None:
+            integer_fields = {"target_window_id", "target_pid", "foreground_window_id", "foreground_pid", "foreground_root_id"}
+            boolean_fields = {"target_valid", "target_visible", "target_minimized", "foreground_matches_target",
+                              "activation_requested", "activation_returned", "toolbar_minimized"}
+            required = integer_fields | boolean_fields | {"code"}
+            occlusion_fields = {"occlusion_details", "occlusion_count_reported", "layered_occlusion_count_reported", "occlusion_limit_reached"}
+            capture_fields = {"capture_backend_stage", "capture_backend_hresult", "capture_backend_pending"}
+            frame_counts = {"capture_frame_count", "capture_empty_polls", "capture_refresh_count"}
+            frame_fields = frame_counts | {"capture_latest_content_age_ms"}
+            previous_fields = {"capture_previous_failure", "capture_previous_future_lead_ms"}
+            allowed = required | occlusion_fields | capture_fields | frame_fields | previous_fields | {"occlusion_details_unavailable"}
+            if (not isinstance(diagnostic, dict) or not required <= set(diagnostic) or set(diagnostic) - allowed
+                    or any(type(diagnostic[k]) is not int or not 0 <= diagnostic[k] <= 2**63 - 1 for k in integer_fields)
+                    or any(type(diagnostic[k]) is not bool for k in boolean_fields)
+                    or not isinstance(diagnostic["code"], str) or not 1 <= len(diagnostic["code"]) <= 80
+                    or any(c not in "abcdefghijklmnopqrstuvwxyz_" for c in diagnostic["code"])):
+                raise OperationError("녹화 시작 진단을 확인하지 못했습니다.", "recording_invalid_progress")
+            # Diagnostics carry bounded window scope only, never window titles,
+            # UIA text, arbitrary errors, or executable instruction data.
+            present_occlusion = set(diagnostic) & occlusion_fields
+            if (present_occlusion and present_occlusion != occlusion_fields
+                    or "occlusion_details_unavailable" in diagnostic and
+                    (diagnostic["occlusion_details_unavailable"] is not True or present_occlusion)):
+                raise OperationError("녹화 겹침 진단을 확인하지 못했습니다.", "recording_invalid_progress")
+            if present_occlusion:
+                details = diagnostic["occlusion_details"]
+                if (not isinstance(details, list) or len(details) > 12
+                        or type(diagnostic["occlusion_count_reported"]) is not int
+                        or diagnostic["occlusion_count_reported"] != len(details)
+                        or type(diagnostic["layered_occlusion_count_reported"]) is not int
+                        or type(diagnostic["occlusion_limit_reached"]) is not bool
+                        or diagnostic["occlusion_limit_reached"] != (len(details) == 12)):
+                    raise OperationError("녹화 겹침 진단을 확인하지 못했습니다.", "recording_invalid_progress")
+                seen = set()
+                for window in details:
+                    if (not isinstance(window, dict) or set(window) != {"window_id", "pid", "class_name", "kind", "bounds", "layered"}
+                            or type(window["window_id"]) is not int or not 1 <= window["window_id"] <= 2**63 - 1
+                            or window["window_id"] in seen
+                            or type(window["pid"]) is not int or not 1 <= window["pid"] <= 2**32 - 1
+                            or not isinstance(window["class_name"], str) or len(window["class_name"]) > 256
+                            or any(ord(c) < 32 or ord(c) == 127 for c in window["class_name"])
+                            or window["kind"] not in ("recorder_helper", "related_popup", "same_process_other_window", "external_window")
+                            or type(window["layered"]) is not bool):
+                        raise OperationError("녹화 겹침 창 진단을 확인하지 못했습니다.", "recording_invalid_progress")
+                    bounds = window["bounds"]
+                    if (not isinstance(bounds, dict) or set(bounds) != {"x", "y", "width", "height"}
+                            or any(type(bounds[k]) is not int or not -2**31 <= bounds[k] <= 2**31 - 1 for k in ("x", "y"))
+                            or any(type(bounds[k]) is not int or not 1 <= bounds[k] <= 2**31 - 1 for k in ("width", "height"))):
+                        raise OperationError("녹화 겹침 창 범위를 확인하지 못했습니다.", "recording_invalid_progress")
+                    seen.add(window["window_id"])
+                if diagnostic["layered_occlusion_count_reported"] != sum(window["layered"] for window in details):
+                    raise OperationError("녹화 겹침 창 수를 확인하지 못했습니다.", "recording_invalid_progress")
+            present_capture = set(diagnostic) & capture_fields
+            if present_capture:
+                stages = {"initialize", "create_item", "create_device", "create_pool", "configure_session",
+                          "start_capture", "wait_frame", "frame_geometry", "surface_access", "copy_texture",
+                          "map_texture", "read_pixels", "complete"}
+                if (present_capture != capture_fields or not isinstance(diagnostic["capture_backend_stage"], str)
+                        or diagnostic["capture_backend_stage"] not in stages
+                        or not isinstance(diagnostic["capture_backend_hresult"], str)
+                        or len(diagnostic["capture_backend_hresult"]) != 8
+                        or any(c not in "0123456789ABCDEF" for c in diagnostic["capture_backend_hresult"])
+                        or type(diagnostic["capture_backend_pending"]) is not bool):
+                    raise OperationError("녹화 캡처 진단을 확인하지 못했습니다.", "recording_invalid_progress")
+            present_frames = set(diagnostic) & frame_fields
+            if present_frames:
+                if (present_frames != frame_fields or present_capture != capture_fields
+                        or any(type(diagnostic[k]) is not int or not 0 <= diagnostic[k] <= 2**31 - 1 for k in frame_counts)
+                        or type(diagnostic["capture_latest_content_age_ms"]) not in (int, float)
+                        or not -1 <= diagnostic["capture_latest_content_age_ms"] <= 60000):
+                    raise OperationError("녹화 프레임 진단을 확인하지 못했습니다.", "recording_invalid_progress")
+            present_previous = set(diagnostic) & previous_fields
+            if present_previous:
+                previous_codes = {"none", "target_changed", "target_requires_foreground", "target_unavailable", "target_minimized",
+                    "target_hidden", "target_cloaked", "target_offscreen", "target_capture_size_invalid", "recording_start_failed",
+                    "capture_time_invalid", "capture_time_future", "capture_time_stale", "capture_content_size_changed",
+                    "capture_raw_bounds_changed", "capture_visible_bounds_changed"}
+                if (present_previous != previous_fields or present_capture != capture_fields or present_frames != frame_fields
+                        or not isinstance(diagnostic["capture_previous_failure"], str)
+                        or diagnostic["capture_previous_failure"] not in previous_codes
+                        or type(diagnostic["capture_previous_future_lead_ms"]) not in (int, float)
+                        or not 0 <= diagnostic["capture_previous_future_lead_ms"] <= 60000):
+                    raise OperationError("이전 녹화 프레임 진단을 확인하지 못했습니다.", "recording_invalid_progress")
+            result["start_diagnostic"] = copy.deepcopy(diagnostic)
         last = value.get("last_event")
         if isinstance(last, dict) and last.get("operation") in {*IMAGE_ACTIONS, "manual_entry", "select_option", "set_checked"}:
             result["last_event"] = {"operation": last["operation"], "recognition": "uia_candidate" if last.get("recognition") == "uia_candidate" else "image_or_manual"}

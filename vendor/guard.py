@@ -364,9 +364,15 @@ def windows_window_pid(window_id):
     return owner.value
 
 
-def windows_checkpoint_ready(window_id):
-    """Fail closed unless the exact target is visible, restored and foreground."""
+def windows_checkpoint_ready(window_id, *, hosted_window_id=None):
+    """Require visible foreground; an optional child must be independently pinned.
+
+    Guard supplies this child only after validating the full hosted-app binding.
+    A matching root or PID alone does not authorize any other child/window.
+    """
     if os.name != "nt" or type(window_id) is not int or window_id <= 0:
+        return False
+    if hosted_window_id is not None and (type(hosted_window_id) is not int or hosted_window_id <= 0):
         return False
     user = ctypes.WinDLL("user32", use_last_error=True)
     for name in ("IsWindow", "IsWindowVisible", "IsIconic"):
@@ -378,9 +384,20 @@ def windows_checkpoint_ready(window_id):
     user.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
     user.MonitorFromWindow.restype = wintypes.HANDLE
     hwnd = wintypes.HWND(window_id)
+    if hosted_window_id is not None:
+        user.GetAncestor.argtypes, user.GetAncestor.restype = [wintypes.HWND, wintypes.UINT], wintypes.HWND
+        user.IsChild.argtypes, user.IsChild.restype = [wintypes.HWND, wintypes.HWND], wintypes.BOOL
+    def foreground_matches():
+        foreground = int(user.GetForegroundWindow() or 0)
+        if foreground == window_id:
+            return True
+        return (hosted_window_id is not None and foreground == hosted_window_id
+                and bool(user.IsWindowVisible(wintypes.HWND(hosted_window_id)))
+                and bool(user.IsChild(hwnd, wintypes.HWND(hosted_window_id)))
+                and int(user.GetAncestor(wintypes.HWND(hosted_window_id), 2) or 0) == window_id)
     rect = wintypes.RECT()
     if (not user.IsWindow(hwnd) or not user.IsWindowVisible(hwnd) or user.IsIconic(hwnd)
-            or int(user.GetForegroundWindow() or 0) != window_id
+            or not foreground_matches()
             or not user.GetWindowRect(hwnd, ctypes.byref(rect))
             or rect.right <= rect.left or rect.bottom <= rect.top
             or not user.MonitorFromWindow(hwnd, 0)):
@@ -392,7 +409,7 @@ def windows_checkpoint_ready(window_id):
     cloaked = wintypes.DWORD()
     if dwm.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked)) != 0 or cloaked.value:
         return False
-    return int(user.GetForegroundWindow() or 0) == window_id and bool(user.IsWindowVisible(hwnd)) and not bool(user.IsIconic(hwnd))
+    return foreground_matches() and bool(user.IsWindowVisible(hwnd)) and not bool(user.IsIconic(hwnd))
 
 
 def windows_image_geometry(window_id):
@@ -466,6 +483,102 @@ def native_edit_password(class_name, style):
     """Recognize only known native Edit classes; custom fields stay unknown."""
     name = class_name.lower()
     return (name == "edit" or name.startswith("windowsforms10.edit.")) and bool(style & 0x0020)  # ES_PASSWORD
+
+
+def native_keyboard_control_kind(class_name):
+    name = class_name.lower()
+    if name == "edit" or name.startswith("windowsforms10.edit."):
+        return "edit"
+    if name in {"combobox", "comboboxex32"} or name.startswith("windowsforms10.combobox."):
+        return "combo"
+    if name in {"richedit", "richedit20a", "richedit20w", "richedit50w", "richedit60w", "richeditd2dpt"}:
+        return "rich_edit"
+    return None
+
+
+def native_focus_control_chain(target, focus, read_window):
+    """Bounded native ancestry only; unknown canvases never become inputs.
+
+    A ComboBox's editable child and a native edit's focus child belong to the
+    same input. Only exact native parents within the approved HWND count.
+    """
+    selected, seen, current = None, set(), focus
+    for _ in range(5):
+        if current == target["window_id"] or not current:
+            break
+        if current in seen:
+            return None
+        seen.add(current)
+        row = read_window(current)
+        if (not isinstance(row, dict) or row.get("pid") != target["pid"]
+                or row.get("root") != target["window_id"]):
+            return None
+        kind = native_keyboard_control_kind(row.get("class_name", ""))
+        if kind and (selected is None or kind == "combo" and selected["kind"] == "edit"):
+            selected = {"kind": kind, "class_name": row["class_name"], "bounds": row.get("bounds")}
+        parent = row.get("parent")
+        if type(parent) is not int:
+            return None
+        current = parent
+    return selected
+
+
+def windows_image_focus_bounds(target, focus):
+    """Read native input bounds only; never read text, focus, or click an app."""
+    if os.name != "nt":
+        return None
+    user = ctypes.WinDLL("user32", use_last_error=True)
+    user.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user.GetClassNameW.restype = ctypes.c_int
+    user.GetAncestor.argtypes, user.GetAncestor.restype = [wintypes.HWND, wintypes.UINT], wintypes.HWND
+    user.GetWindowRect.argtypes, user.GetWindowRect.restype = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)], wintypes.BOOL
+    user.SetThreadDpiAwarenessContext.argtypes, user.SetThreadDpiAwarenessContext.restype = [ctypes.c_void_p], ctypes.c_void_p
+    previous = user.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
+    if not previous:
+        return None
+    def read_window(hwnd):
+        owner, name, bounds = wintypes.DWORD(), ctypes.create_unicode_buffer(256), wintypes.RECT()
+        if (not user.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+                or not user.GetClassNameW(hwnd, name, len(name)) or not user.GetWindowRect(hwnd, ctypes.byref(bounds))):
+            return None
+        return {"pid": owner.value, "root": int(user.GetAncestor(hwnd, 2) or 0),
+                "parent": int(user.GetAncestor(hwnd, 1) or 0), "class_name": name.value,
+                "bounds": [bounds.left, bounds.top, bounds.right, bounds.bottom]}
+    try:
+        return native_focus_control_chain(target, focus, read_window)
+    finally:
+        user.SetThreadDpiAwarenessContext(previous)
+
+
+def image_focus_target_evidence(control, geometry, point, screenshot_size):
+    """Reject only a demonstrably different native field, not unknown UIA.
+
+    The PNG can omit invisible window borders. Every possible origin inside
+    the outer physical rectangle is considered; this is an uncertainty bound,
+    not a guessed image-to-desktop coordinate conversion or input permission.
+    """
+    evidence = {"status": "unavailable", "read_only": True, "authorizes_input": False}
+    if not isinstance(control, dict) or control.get("kind") not in {"edit", "combo", "rich_edit"}:
+        return evidence
+    bounds = control.get("bounds")
+    if (not isinstance(bounds, (list, tuple)) or len(bounds) != 4 or any(type(v) is not int for v in bounds)
+            or bounds[2] <= bounds[0] or bounds[3] <= bounds[1]):
+        return evidence
+    if (not isinstance(screenshot_size, tuple) or len(screenshot_size) != 2
+            or any(type(v) is not int or v < 1 for v in screenshot_size)):
+        return evidence
+    width, height = screenshot_size
+    if width > geometry[2] - geometry[0] or height > geometry[3] - geometry[1]:
+        return evidence  # Unknown scaling is not proof of wrong focus.
+    x1, y1 = geometry[0] + point["x"], geometry[1] + point["y"]
+    x2, y2 = geometry[2] - width + point["x"], geometry[3] - height + point["y"]
+    overlaps = x2 >= bounds[0] and x1 < bounds[2] and y2 >= bounds[1] and y1 < bounds[3]
+    return {**evidence, "status": "compatible" if overlaps else "mismatch", "control_kind": control["kind"],
+            "class_name": str(control.get("class_name", ""))[:256], "focused_control_bounds": list(bounds),
+            "possible_target_point_bounds": [x1, y1, x2, y2], "coordinate_space": "desktop_physical",
+            "capture_origin_assumed": False}
 
 
 def windows_image_focus(target):
@@ -1241,7 +1354,8 @@ class DriverTransport:
 class Guard:
     def __init__(self, policy, transport=None, process_resolver=windows_process_exe,
                  window_resolver=windows_window_pid, discovery_provider=None, checkpoint_ready_resolver=None,
-                 image_geometry_resolver=None, image_focus_resolver=None, image_coordinate_resolver=None):
+                 image_geometry_resolver=None, image_focus_resolver=None, image_coordinate_resolver=None,
+                 image_focus_bounds_resolver=None):
         self.policy = validate_policy(policy)
         self.run_dir = Path(policy["run_dir"])
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -1249,10 +1363,14 @@ class Guard:
         self.process_resolver = process_resolver
         self.window_resolver = window_resolver
         self.discovery_provider = discovery_provider or discover_allowed_windows
-        self.checkpoint_ready_resolver = checkpoint_ready_resolver or windows_checkpoint_ready
+        self.checkpoint_ready_resolver = checkpoint_ready_resolver or self._checkpoint_ready
         self.image_geometry_resolver = image_geometry_resolver or windows_image_geometry
         self.image_coordinate_resolver = image_coordinate_resolver or windows_image_coordinate_contract
         self.image_focus_resolver = image_focus_resolver or self._image_focus
+        # Injected focus providers also own their coordinate evidence. Test or
+        # embedded providers must not accidentally query the real desktop.
+        self.image_focus_bounds_resolver = image_focus_bounds_resolver or (
+            (lambda target, focus: None) if image_focus_resolver is not None else self._image_focus_bounds)
         self.action_count = 0
         self.observed_targets = set()
 
@@ -1270,6 +1388,24 @@ class Guard:
         self.target_executable(target)
         return _hosted_target(target['pid'], target['window_id'], self.policy, self.process_resolver)
 
+    def _checkpoint_ready(self, window_id):
+        # Shared hosts may report their exact CoreWindow as foreground after a
+        # Driver screenshot. Revalidate the original package/lifetimes on both
+        # sides of the native check; never grant the host process or siblings.
+        bindings = [row for row in self.policy.get('hosted_windows', []) if row.get('window_id') == window_id]
+        if not bindings:
+            return windows_checkpoint_ready(window_id)
+        if len(bindings) != 1:
+            return False
+        target = {'pid': bindings[0]['pid'], 'window_id': window_id}
+        try:
+            frame = self.hosted_target(target)
+            return (frame is not None
+                    and windows_checkpoint_ready(window_id, hosted_window_id=frame['app_window_id']) is True
+                    and self.hosted_target(target) == frame)
+        except (GuardError, OSError, ValueError, AttributeError):
+            return False
+
     def _image_focus(self, target):
         frame = self.hosted_target(target)
         if frame is None: return windows_image_focus(target)
@@ -1280,6 +1416,13 @@ class Guard:
             raise
         except (OSError, RuntimeError, ValueError) as error:
             raise GuardError(str(error)) from error
+
+    def _image_focus_bounds(self, target, focus):
+        # The independently validated hosted focus still applies. Its cross-PID
+        # native geometry is not guessed by this ordinary-window supplement.
+        if self.hosted_target(target) is not None:
+            return None
+        return windows_image_focus_bounds(target, focus)
 
     def check_stop(self):
         if (self.run_dir / "stop.flag").exists():
@@ -1456,6 +1599,9 @@ class Guard:
         match_diagnostic = None
         driver_failure = None
         coordinate_contract = None
+        focus_diagnostic = None
+        capture_size = None
+        point = None
         self.observed_targets.clear()
         def result(code, message, *, verified=False, deferred=False):
             return {"operation": step["operation"], "status": "verified" if verified else "needs_review",
@@ -1464,6 +1610,7 @@ class Guard:
                     "diagnostic": {"code": code, "message": message, "automatic_replay": False,
                         **({"image_match": copy.deepcopy(match_diagnostic)} if match_diagnostic else {}),
                         **({"driver_failure": copy.deepcopy(driver_failure)} if driver_failure else {}),
+                        **({"focus_target": copy.deepcopy(focus_diagnostic)} if focus_diagnostic else {}),
                         **({"coordinate_contract": copy.deepcopy(coordinate_contract)} if coordinate_contract else {})}}
         try:
             check_active()
@@ -1486,6 +1633,7 @@ class Guard:
             if is_input:
                 coordinate_contract = input_coordinate_contract(geometry, coordinate_proof)
             def ready():
+                nonlocal focus_diagnostic
                 check_active()
                 self.check_stop()
                 if self.checkpoint_ready_resolver(target["window_id"]) is not True:
@@ -1498,12 +1646,19 @@ class Guard:
                     raise OperationError("이미지를 읽은 뒤 화면 배율이나 좌표 대응이 달라졌습니다.", "image_target_changed")
                 if expected_focus is not None and self.image_focus_resolver(target) != expected_focus:
                     raise OperationError("입력 대상의 포커스가 달라졌습니다. 후속 키와 글자는 보내지 않았습니다.", "image_focus_changed")
+                if expected_focus is not None and point is not None:
+                    control = self.image_focus_bounds_resolver(target, expected_focus)
+                    focus_diagnostic = image_focus_target_evidence(control, geometry, point, capture_size)
+                    if focus_diagnostic["status"] == "mismatch":
+                        raise OperationError("클릭한 위치와 다른 입력칸에 포커스가 남아 있어 글자와 키를 보내지 않았습니다. "
+                            "현재 화면에서 대상 입력칸을 다시 확인하세요. 클릭을 자동 반복하지 않았습니다.", "image_focus_target_mismatch")
             ready()
             visual = Guard(policy, transport=self.transport, process_resolver=self.process_resolver,
                            window_resolver=self.window_resolver, discovery_provider=self.discovery_provider,
                            checkpoint_ready_resolver=self.checkpoint_ready_resolver,
                            image_geometry_resolver=self.image_geometry_resolver, image_focus_resolver=self.image_focus_resolver,
-                           image_coordinate_resolver=self.image_coordinate_resolver)
+                           image_coordinate_resolver=self.image_coordinate_resolver,
+                           image_focus_bounds_resolver=self.image_focus_bounds_resolver)
             visual.action_count = self.action_count
             def approve(name, args, call_id, *, request_deadline=None):
                 self.approve(name, args, call_id,
@@ -1511,7 +1666,7 @@ class Guard:
                 ready()  # Human approval may have changed the foreground/geometry.
             visual.approve = approve
             def observe_image():
-                nonlocal coordinate_contract
+                nonlocal coordinate_contract, capture_size
                 ready()
                 answer = visual.call("get_window_state", target)
                 ready()
@@ -1520,6 +1675,7 @@ class Guard:
                     raise OperationError("현재 창의 PNG 화면을 읽지 못했습니다.", "image_capture_failed")
                 png = images[0].get("data")
                 width, height = png_dimensions(png)
+                capture_size = (width, height)
                 metadata = answer.get("structuredContent", {})
                 if (any(metadata.get(k) != v for k, v in target.items())
                         or metadata.get("screenshot_width") != width or metadata.get("screenshot_height") != height):
@@ -1533,13 +1689,16 @@ class Guard:
                 matched = matcher(step["image_target"], png)
                 match_diagnostic = {key: copy.deepcopy(matched[key]) for key in
                     ("status", "code", "score", "second_score", "candidate_count", "scale", "screenshot",
-                     "capture_window", "threshold", "ambiguity_margin", "low_detail", "search_reused") if key in matched}
+                     "capture_window", "threshold", "ambiguity_margin", "low_detail", "search_reused", "backend", "search_ms",
+                     "search_diagnostic", "search_complete", "candidate_evaluations", "candidate_budget") if key in matched}
                 ready()
                 if matched.get("status") != "matched":
                     code = "image_ambiguous" if matched.get("status") == "ambiguous" else "image_template_low_detail" if matched.get("low_detail") else "image_not_found"
                     messages = {"image_ambiguous": "같은 이미지가 여러 곳에 있습니다. 주변의 구별되는 내용까지 다시 선택하세요.",
                         "image_template_low_detail": "선택한 이미지에 구별할 내용이 부족합니다. 버튼의 글자나 아이콘을 함께 선택하세요.",
                         "image_not_found": "현재 화면에서 저장한 이미지를 찾지 못했습니다. 해당 업무 화면이 열려 있는지 먼저 확인하세요."}
+                    if matched.get("search_diagnostic") == "candidate_budget_exceeded":
+                        messages[code] = "이미지 후보 탐색 한도에 도달해 대상을 하나로 확인하지 못했습니다. 동일한 요소가 여러 개라고 확인된 것은 아닙니다. 저장한 대상과 현재 화면을 비교해 주세요."
                     raise OperationError(messages[code], code)
                 if (matched.get("screenshot") != {"width": width, "height": height}
                         or any(type(matched.get(k)) is not int for k in ("x", "y"))

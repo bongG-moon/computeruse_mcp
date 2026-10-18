@@ -5,6 +5,7 @@ import gc
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import threading
 import time
@@ -438,6 +439,157 @@ class RecordingSemanticTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(OperationError):
                 ProcessEditors._recording_progress({**progress, field: MAX_RECORDING_EVENTS + 1}, 888)
 
+    def test_failed_start_preserves_capture_cause_and_bounded_scope_without_content(self):
+        diagnostic = {"code": "target_capture_too_large", "target_window_id": 123, "target_pid": 456,
+            "target_valid": True, "target_visible": True, "target_minimized": False,
+            "foreground_window_id": 123, "foreground_pid": 456, "foreground_root_id": 123,
+            "foreground_matches_target": True, "activation_requested": True, "activation_returned": True,
+            "toolbar_minimized": True}
+        progress = {"helper_pid": 888, "state": "paused", "event_count": 0, "manual_count": 0,
+            "max_events": 15, "warning_codes": [], "probe": {"hooks": "available", "uia": "available"},
+            "start_diagnostic": diagnostic}
+        clean = ProcessEditors._recording_progress(progress, 888)
+        self.assertEqual(clean["start_diagnostic"], diagnostic)
+        diagnostic["target_pid"] = 999
+        self.assertEqual(clean["start_diagnostic"]["target_pid"], 456)
+        for invalid in ({"target_pid": True}, {"target_window_id": -1}, {"foreground_root_id": 2**63},
+                        {"target_visible": 1}, {"code": "private title: SECRET"}, {"code": "x" * 81},
+                        {"code": ""}, {"window_title": "SECRET"}):
+            with self.subTest(invalid=invalid), self.assertRaises(OperationError) as caught:
+                ProcessEditors._recording_progress({**progress, "start_diagnostic": {**diagnostic, **invalid}}, 888)
+            self.assertEqual(caught.exception.code, "recording_invalid_progress")
+
+    @staticmethod
+    def start_progress_with(**extra):
+        diagnostic = {"code": "target_render_unavailable", "target_window_id": 123, "target_pid": 456,
+            "target_valid": True, "target_visible": True, "target_minimized": False,
+            "foreground_window_id": 123, "foreground_pid": 456, "foreground_root_id": 123,
+            "foreground_matches_target": True, "activation_requested": True, "activation_returned": True,
+            "toolbar_minimized": False, **extra}
+        return {"helper_pid": 888, "state": "paused", "event_count": 0, "manual_count": 0,
+            "max_events": 15, "warning_codes": [], "probe": {"hooks": "available", "uia": "available"},
+            "start_diagnostic": diagnostic}
+
+    @staticmethod
+    def occlusion_window(**extra):
+        return {"window_id": 987, "pid": 654, "class_name": "NativeOverlayWindow", "kind": "external_window",
+                "bounds": {"x": -1920, "y": 0, "width": 3840, "height": 2160}, "layered": True, **extra}
+
+    def test_failed_start_accepts_bounded_occlusion_and_capture_diagnostics(self):
+        window = self.occlusion_window()
+        cases = [{}, {"occlusion_details_unavailable": True},
+            {"occlusion_details": [], "occlusion_count_reported": 0, "layered_occlusion_count_reported": 0,
+             "occlusion_limit_reached": False},
+            {"occlusion_details": [window], "occlusion_count_reported": 1, "layered_occlusion_count_reported": 1,
+             "occlusion_limit_reached": False},
+            {"occlusion_details": [{**window, "window_id": 987 + i} for i in range(12)],
+             "occlusion_count_reported": 12, "layered_occlusion_count_reported": 12, "occlusion_limit_reached": True}]
+        for extra in cases:
+            for capture in ({}, {"capture_backend_stage": "wait_frame", "capture_backend_hresult": "80004005",
+                                 "capture_backend_pending": True}):
+                progress = self.start_progress_with(**extra, **capture)
+                clean = ProcessEditors._recording_progress(progress, 888)
+                with self.subTest(extra=extra, capture=capture):
+                    self.assertEqual(clean["start_diagnostic"], progress["start_diagnostic"])
+                    self.assertFalse(clean["task_verified"])
+                    if extra.get("occlusion_details"):
+                        progress["start_diagnostic"]["occlusion_details"][0]["bounds"]["x"] = 0
+                        self.assertEqual(clean["start_diagnostic"]["occlusion_details"][0]["bounds"]["x"], -1920)
+                        progress["start_diagnostic"]["occlusion_details"][0]["bounds"]["x"] = -1920
+
+    def test_failed_start_rejects_unbounded_or_inconsistent_occlusion_metadata(self):
+        original = {"occlusion_details": [self.occlusion_window()], "occlusion_count_reported": 1,
+                    "layered_occlusion_count_reported": 1, "occlusion_limit_reached": False}
+        bad = [{"occlusion_count_reported": True}, {"occlusion_count_reported": 2},
+               {"layered_occlusion_count_reported": False}, {"layered_occlusion_count_reported": 0},
+               {"occlusion_limit_reached": True}, {"occlusion_limit_reached": 0},
+               {"occlusion_details": {}}, {"occlusion_details": [self.occlusion_window()] * 2, "occlusion_count_reported": 2},
+               {"occlusion_details": [self.occlusion_window(window_id=i+1) for i in range(13)], "occlusion_count_reported": 13,
+                "layered_occlusion_count_reported": 13, "occlusion_limit_reached": True},
+               {"occlusion_details_unavailable": True}, {"arbitrary_diagnostic": "SECRET"}]
+        for change in ({"window_id": True}, {"window_id": 0}, {"window_id": 2**63}, {"pid": -1}, {"pid": 2**32},
+                       {"class_name": "x" * 257}, {"class_name": "bad\nclass"}, {"kind": "untrusted"}, {"kind": []},
+                       {"layered": 1}, {"title": "SECRET"}, {"text": "SECRET"}, {"bounds": {}},
+                       {"bounds": {"x": False, "y": 0, "width": 1, "height": 1}},
+                       {"bounds": {"x": 0, "y": -2**31-1, "width": 1, "height": 1}},
+                       {"bounds": {"x": 0, "y": 0, "width": 0, "height": 1}},
+                       {"bounds": {"x": 0, "y": 0, "width": 1, "height": 1, "title": "SECRET"}}):
+            bad.append({"occlusion_details": [self.occlusion_window(**change)]})
+        for change in bad:
+            with self.subTest(change=change), self.assertRaises(OperationError) as caught:
+                ProcessEditors._recording_progress(self.start_progress_with(**{**original, **change}), 888)
+            self.assertEqual(caught.exception.code, "recording_invalid_progress")
+        for extra in ({"occlusion_details_unavailable": False}, {"occlusion_details_unavailable": 1},
+                      {"occlusion_details": []}, {"occlusion_count_reported": 0}):
+            with self.subTest(extra=extra), self.assertRaises(OperationError):
+                ProcessEditors._recording_progress(self.start_progress_with(**extra), 888)
+
+    def test_failed_start_rejects_unknown_or_partial_capture_diagnostics(self):
+        capture = {"capture_backend_stage": "create_item", "capture_backend_hresult": "00000000", "capture_backend_pending": False}
+        for key in capture:
+            incomplete = {name: value for name, value in capture.items() if name != key}
+            with self.subTest(missing=key), self.assertRaises(OperationError):
+                ProcessEditors._recording_progress(self.start_progress_with(**incomplete), 888)
+        for change in ({"capture_backend_stage": "private title SECRET"}, {"capture_backend_stage": []},
+                       {"capture_backend_hresult": "0x80004005"}, {"capture_backend_hresult": "8000abcd"},
+                       {"capture_backend_hresult": 0}, {"capture_backend_pending": 1}, {"capture_message": "SECRET"}):
+            with self.subTest(change=change), self.assertRaises(OperationError) as caught:
+                ProcessEditors._recording_progress(self.start_progress_with(**{**capture, **change}), 888)
+            self.assertEqual(caught.exception.code, "recording_invalid_progress")
+
+    def test_failed_start_accepts_bounded_frame_diagnostics_without_verifying_task(self):
+        backend = {"capture_backend_stage": "wait_frame", "capture_backend_hresult": "00000000", "capture_backend_pending": True}
+        for count, age in ((0, -1), (3, 15.25), (2**31-1, 60000)):
+            fields = {"capture_frame_count": count, "capture_empty_polls": count, "capture_refresh_count": count,
+                      "capture_latest_content_age_ms": age}
+            progress = self.start_progress_with(**backend, **fields)
+            result = ProcessEditors._recording_progress(progress, 888)
+            self.assertEqual(result["start_diagnostic"], progress["start_diagnostic"])
+            self.assertFalse(result["task_verified"])
+            progress["start_diagnostic"]["capture_frame_count"] = 99
+            self.assertEqual(result["start_diagnostic"]["capture_frame_count"], count)
+
+    def test_failed_start_rejects_partial_unbounded_or_unbound_frame_diagnostics(self):
+        backend = {"capture_backend_stage": "complete", "capture_backend_hresult": "00000000", "capture_backend_pending": False}
+        fields = {"capture_frame_count": 1, "capture_empty_polls": 0, "capture_refresh_count": 0,
+                  "capture_latest_content_age_ms": 0.0}
+        bad = [{**backend, **{k: v for k, v in fields.items() if k != missing}} for missing in fields]
+        bad.append(fields)
+        for key in ("capture_frame_count", "capture_empty_polls", "capture_refresh_count"):
+            bad.extend({**backend, **fields, key: value} for value in (True, -1, 2**31, 1.0, "1"))
+        bad.extend({**backend, **fields, "capture_latest_content_age_ms": value}
+                   for value in (False, -1.1, 60000.1, float("nan"), float("inf"), float("-inf"), "0", None))
+        for diagnostic in bad:
+            with self.subTest(diagnostic=diagnostic), self.assertRaises(OperationError) as caught:
+                ProcessEditors._recording_progress(self.start_progress_with(**diagnostic), 888)
+            self.assertEqual(caught.exception.code, "recording_invalid_progress")
+
+
+    def test_previous_capture_failure_requires_complete_bounded_diagnostic_groups(self):
+        backend = {"capture_backend_stage": "wait_frame", "capture_backend_hresult": "00000000", "capture_backend_pending": True}
+        frames = {"capture_frame_count": 1, "capture_empty_polls": 2, "capture_refresh_count": 3, "capture_latest_content_age_ms": -1}
+        previous = {"capture_previous_failure": "capture_time_future", "capture_previous_future_lead_ms": 0.25}
+        codes = ("none", "target_changed", "target_requires_foreground", "target_unavailable", "target_minimized",
+                 "target_hidden", "target_cloaked", "target_offscreen", "target_capture_size_invalid", "recording_start_failed",
+                 "capture_time_invalid", "capture_time_future", "capture_time_stale", "capture_content_size_changed",
+                 "capture_raw_bounds_changed", "capture_visible_bounds_changed")
+        for code in codes:
+            for age in (0, 0.25, 60000):
+                progress = self.start_progress_with(**backend, **frames, capture_previous_failure=code, capture_previous_future_lead_ms=age)
+                result = ProcessEditors._recording_progress(progress, 888)
+                self.assertEqual(result["start_diagnostic"], progress["start_diagnostic"])
+                self.assertFalse(result["task_verified"])
+        bad = [previous, {**backend, **previous}, {**frames, **previous}]
+        full = {**backend, **frames, **previous}
+        bad.extend({k: v for k, v in full.items() if k != missing} for missing in (*backend, *frames, *previous))
+        bad.extend({**full, "capture_previous_failure": value} for value in (None, [], "private_title", "Capture_Time_Future", "x" * 81))
+        bad.extend({**full, "capture_previous_future_lead_ms": value}
+                   for value in (True, -0.01, 60000.01, float("nan"), float("inf"), float("-inf"), "0", None))
+        for diagnostic in bad:
+            with self.subTest(diagnostic=diagnostic), self.assertRaises(OperationError) as caught:
+                ProcessEditors._recording_progress(self.start_progress_with(**diagnostic), 888)
+            self.assertEqual(caught.exception.code, "recording_invalid_progress")
+
 
 class ImageDraftTests(unittest.TestCase):
     def setUp(self):
@@ -495,6 +647,76 @@ class ImageDraftTests(unittest.TestCase):
         self.draft.validate()
         self.assertEqual(self.draft.steps[0]["operation"], "image_type_text")
         self.assertEqual(self.draft.steps[0]["value"], "user typed intended value")
+
+    def canvas_candidate(self, **extra):
+        return {**image_choice(), "operation": "manual_entry", "program_id": "editor", "reason": "unknown_input",
+                "input_target_candidate": {"source": "preceding_recorded_click", "verified": False,
+                    "requires_user_confirmation": True, "typed_text_recorded": False},
+                "recorded_preparation": "CTRL+A", **extra}
+
+    def test_canvas_candidate_import_is_manual_and_does_not_retain_raw_text_or_proof(self):
+        event = self.canvas_candidate(value="PRIVATE", keys=["SECRET"], observed_selection="PRIVATE_SELECTION")
+        self.draft.recorded([event])
+        self.assertEqual([s["operation"] for s in self.draft.steps], ["manual_entry", "checkpoint"])
+        self.assertEqual(self.draft.steps[0]["manual_reason"], "unknown_input")
+        row = self.draft.summaries()[0]
+        self.assertEqual(row["label"], "입력 위치 후보 · 값 확인 필요")
+        self.assertEqual(row["recognition"], "image_candidate")
+        self.assertTrue(row["requires_input"]); self.assertTrue(row["editable_input"])
+        self.assertEqual(row["input_target_candidate"], event["input_target_candidate"])
+        self.assertIn("두 번 클릭", row["detail"])
+        serialized = json.dumps({"steps": self.draft.steps, "draft": self.draft.draft_metadata()})
+        for forbidden in ("PRIVATE", "SECRET", "PRIVATE_SELECTION", "input_target_candidate", "recorded_preparation", "CTRL+A"):
+            self.assertNotIn(forbidden, serialized)
+        with self.assertRaises(OperationError): self.draft.validate()
+
+    def test_canvas_candidate_reopen_and_explicit_value_resolution_preserve_image_and_checkpoint(self):
+        self.draft.recorded([self.canvas_candidate()])
+        image = copy.deepcopy(self.draft.steps[0]["image_target"])
+        checkpoint = copy.deepcopy(self.draft.steps[1])
+        task = {"steps": copy.deepcopy(self.draft.steps), "draft": self.draft.draft_metadata(), "variables": {}}
+        reopened = ProcessDraft([self.program], task)
+        self.assertEqual(reopened.summaries()[0]["recognition"], "image_candidate")
+        reopened.resolve_input({"index": 0, "value": "user reviewed value"})
+        reopened.validate()
+        self.assertEqual(reopened.steps[0]["operation"], "image_type_text")
+        self.assertTrue(reopened.steps[0]["replace_all"])
+        self.assertEqual(reopened.steps[0]["value"], "user reviewed value")
+        self.assertEqual(reopened.steps[0]["image_target"], image)
+        self.assertEqual(reopened.steps[1], checkpoint)
+        self.assertNotIn("input_target_candidate", reopened.summaries()[0])
+        self.assertNotIn("manual_reason", reopened.steps[0])
+
+    def test_canvas_candidate_can_retarget_once_with_user_value_without_changing_other_steps(self):
+        self.draft.recorded([self.canvas_candidate()])
+        checkpoint = copy.deepcopy(self.draft.steps[1])
+        replacement = self.draft.remember_image(self.program, image_choice(anchor={"x": .8, "y": .3}))
+        self.draft.repair(0, replacement, action="set_value", value="chosen value")
+        self.draft.validate()
+        self.assertEqual(self.draft.steps[0]["image_target"]["anchor"], {"x": .8, "y": .3})
+        self.assertEqual(self.draft.steps[0]["value"], "chosen value")
+        self.assertTrue(self.draft.steps[0]["replace_all"])
+        self.assertEqual(self.draft.steps[1], checkpoint)
+        self.assertNotIn("input_target_candidate", self.draft.summaries()[0])
+
+    def test_unverified_candidate_metadata_cannot_promote_protected_or_other_unknown_actions(self):
+        for change in ({"verified": True}, {"verified": 0}, {"typed_text_recorded": True},
+                       {"requires_user_confirmation": False}, {"source": "hover"}, {"extra": "untrusted"}):
+            event = self.canvas_candidate()
+            event["input_target_candidate"].update(change)
+            draft = ProcessDraft([self.program]); draft.recorded([event])
+            with self.subTest(change=change):
+                self.assertNotIn("input_target_candidate", draft.summaries()[0])
+                self.assertEqual(draft.steps[0]["operation"], "manual_entry")
+        for reason in ("protected_input", "shortcut_requires_manual_setup", "recording_method_unverified"):
+            draft = ProcessDraft([self.program]); draft.recorded([self.canvas_candidate(reason=reason)])
+            with self.subTest(reason=reason):
+                self.assertNotIn("input_target_candidate", draft.summaries()[0])
+                with self.assertRaises(OperationError): draft.resolve_input({"index": 0, "value": "not accepted"})
+        event = self.canvas_candidate(); event.pop("template_png")
+        draft = ProcessDraft([self.program]); draft.recorded([event])
+        self.assertNotIn("input_target_candidate", draft.summaries()[0])
+        self.assertFalse(draft.summaries()[0]["editable_input"])
 
     def test_recording_scope_and_invalid_event_are_atomic(self):
         before = copy.deepcopy(self.draft.steps)
@@ -1186,6 +1408,30 @@ class EditorIPCTests(unittest.TestCase):
                     self.assertEqual(len(draft.steps), count)
         self.status(job, cancel=True); self.terminal(job)
 
+    def test_missing_recorded_captures_report_incomplete_but_preserve_receipt_and_draft_save(self):
+        self.context(); job = self.start()
+        events = [{"operation": "manual_entry", "program_id": "editor", "reason": reason}
+                  for reason in ("image_capture_required", "image_occluded_requires_selection")]
+        with mock.patch("replay_preflight.image_replay_preflight", return_value={"ready_for_input": True}), \
+                mock.patch.object(self.editors, "_visual", return_value={"events": events}):
+            recorded = self.command("record", {})
+            reanalyzed = self.command("reimport_recording", {})
+        for result in (recorded, reanalyzed):
+            self.assertEqual(result["status"], "ok", result)
+            self.assertIn("캡처 누락 2개", result["message"])
+            self.assertIn("녹화 원본은 보존", result["message"])
+            self.assertIn("아직 재생할 수 없습니다", result["message"])
+            self.assertNotIn("다른 창", result["message"])
+            self.assertFalse(result["readiness"]["runnable"])
+            self.assertTrue(result["recording_receipt_available"])
+        saved = self.command("save", {"name": "incomplete capture", "description": ""})
+        self.assertEqual(saved["status"], "ok", saved)
+        self.assertFalse(saved["saved_task"]["runnable"])
+        self.assertEqual(saved["saved_task"]["unresolved_steps"], 2)
+        self.assertEqual(self.runtime.mutations, [])
+        atomic_json(self.paths["response"], {"nonce": self.nonce, "status": "saved"})
+        self.terminal(job)
+
     def test_recording_pending_input_saves_reopens_and_repairs_same_task(self):
         self.context(); job = self.start()
         event = {**image_choice(), "operation": "manual_entry", "program_id": "editor"}
@@ -1244,6 +1490,62 @@ class EditorIPCTests(unittest.TestCase):
         visual.assert_not_called()
         self.assertEqual(draft.steps, previous)
         self.assertEqual(self.status(job)["recording_preflight"][0]["diagnostic"], blocked["diagnostic"])
+
+    def test_dpi_unaware_app_records_verified_uia_without_image_or_scale_change(self):
+        self.context(); job = self.start()
+        event, snapshots = RecordingSemanticTests().event(value="final")
+        event = {key: event[key] for key in ("program_id", "operation", "native_target", "after", "value")}
+        snapshot = snapshots[("editor", "main")]
+        blocked = {"status": "blocked", "ready_for_input": False, "ready_for_capture": True,
+                   "capture_verified": False, "diagnostic": {"code": "image_dpi_unsupported", "message": "scale mismatch"}}
+        with mock.patch("replay_preflight.image_replay_preflight", return_value=blocked), \
+                mock.patch.object(self.editors.library, "_observe", return_value=(snapshot, "binding")), \
+                mock.patch.object(self.editors, "_visual", return_value={"events": [event], "warnings": []}) as visual:
+            answer = self.command("record", {})
+        self.assertEqual(answer["status"], "ok", answer)
+        self.assertFalse(visual.call_args.args[2]["targets"][0]["image_allowed"])
+        preflight = self.status(job)["recording_preflight"][0]
+        self.assertEqual(preflight["recording_mode"], "uia_only")
+        self.assertFalse(preflight["ready_for_input"])
+        self.assertFalse(preflight["capture_verified"])
+        draft = self.editors.jobs[job["editor_id"]]["draft"]
+        self.assertEqual([step["operation"] for step in draft.steps], ["set_value"])
+        self.assertEqual(draft.steps[0]["expect"][0]["equals"], "final")
+        self.assertNotIn("template_png", json.dumps(draft.steps))
+        self.assertEqual(self.runtime.mutations, [])
+        self.status(job, cancel=True); self.terminal(job)
+
+    def test_semantic_only_preflight_requires_fresh_actionable_nonpassword_uia(self):
+        self.context(); job = self.start()
+        blocked = {"ready_for_input": False, "ready_for_capture": True,
+                   "diagnostic": {"code": "image_dpi_unsupported", "message": "scale mismatch"}}
+        snapshots = [{**TARGET, "elements": []}, {**TARGET, "elements": [
+            {"role": "Edit", "actions": ["set_value"], "is_password": True}]}]
+        for snapshot in snapshots:
+            with self.subTest(snapshot=snapshot), mock.patch("replay_preflight.image_replay_preflight", return_value=blocked), \
+                    mock.patch.object(self.editors.library, "_observe", return_value=(snapshot, "binding")), \
+                    mock.patch.object(self.editors, "_visual") as visual:
+                answer = self.command("record", {})
+                self.assertEqual(answer["code"], "image_dpi_unsupported")
+                visual.assert_not_called()
+        with mock.patch("replay_preflight.image_replay_preflight", return_value=blocked), \
+                mock.patch.object(self.editors.library, "_observe", side_effect=OperationError("Driver refused", "observation_failed")), \
+                mock.patch.object(self.editors, "_visual") as visual:
+            answer = self.command("record", {})
+        self.assertEqual(answer["code"], "observation_failed")
+        visual.assert_not_called()
+        self.status(job, cancel=True); self.terminal(job)
+
+    def test_semantic_only_fallback_never_bypasses_other_capture_or_identity_failures(self):
+        self.context(); job = self.start()
+        for code in ("image_target_changed", "image_coordinate_mismatch", "image_geometry_unavailable", "image_capture_refused"):
+            blocked = {"ready_for_input": False, "ready_for_capture": True, "diagnostic": {"code": code, "message": code}}
+            with self.subTest(code=code), mock.patch("replay_preflight.image_replay_preflight", return_value=blocked), \
+                    mock.patch.object(self.editors.library, "_observe") as observe, mock.patch.object(self.editors, "_visual") as visual:
+                answer = self.command("record", {})
+                self.assertEqual(answer["code"], code)
+                observe.assert_not_called(); visual.assert_not_called()
+        self.status(job, cancel=True); self.terminal(job)
 
     def test_capture_backlog_partial_recording_saves_and_reopens_reviewable_draft(self):
         self.context(); job = self.start()
@@ -1368,13 +1670,18 @@ class EditorIPCTests(unittest.TestCase):
 
     def test_step_thumbnail_is_only_returned_to_native_preview_not_mcp_status(self):
         self.context(); job = self.start()
-        with mock.patch.object(self.editors, "_visual", return_value=image_choice()):
+        anchor = {"x": .125, "y": .875}
+        with mock.patch.object(self.editors, "_visual", return_value=image_choice(anchor=anchor)):
             picked = self.command("pick_image", {"program_id": "editor", **TARGET, "purpose": "action"})
         self.command("add_step", {"program_id": "editor", **TARGET, "action": "click", "selection_id": picked["selection"]["selection_id"]})
         preview = self.command("preview_step", {"index": 0})
         self.assertEqual(preview["preview"]["thumbnail_png"], image_choice()["template_png"])
+        self.assertEqual(preview["preview"]["preview_anchor"], anchor)
+        preview["preview"]["preview_anchor"]["x"] = .9
+        self.assertEqual(self.editors.jobs[job["editor_id"]]["draft"].steps[0]["image_target"]["anchor"], anchor)
         self.assertNotIn("steps", preview)
         self.assertNotIn(image_choice()["template_png"], json.dumps(self.status(job)))
+        self.assertNotIn("preview_anchor", json.dumps(self.status(job)))
         self.assertEqual(self.runtime.mutations, [])
         self.status(job, cancel=True); self.terminal(job)
 
@@ -1424,6 +1731,42 @@ class EditorIPCTests(unittest.TestCase):
             result = self.editors._visual(job, "pick", TARGET, 30)
         self.assertGreaterEqual(len(checks), 2)
         self.assertTrue(result["human_confirmed"]); self.assertTrue(child.terminated)
+        self.status(answer, cancel=True); self.terminal(answer)
+
+    def test_visual_receives_only_guard_pinned_hosted_identity_and_rejects_midflight_replacement(self):
+        identity = {"app_pid": 12, "app_started": 50, "app_window_id": 23}
+        self.runtime.guard.hosted_target = mock.Mock(side_effect=lambda target: copy.deepcopy(identity))
+        self.context(); answer = self.start(); job = self.editors.jobs[answer["editor_id"]]
+        child = Child(); child.pid = 888
+        expected = copy.deepcopy(identity)
+        def spawn(args, **kwargs):
+            request = json.loads(Path(args[2]).read_text(encoding="utf-8"))
+            self.assertEqual(request["hosted_target"], expected)
+            identity["app_started"] = 60
+            return child
+        supplied = {**TARGET, "hosted_target": {"app_pid": 999, "app_window_id": 999}}
+        with mock.patch("process_editor.subprocess.Popen", side_effect=spawn), self.assertRaises(OperationError) as caught:
+            self.editors._visual(job, "pick", supplied, 30)
+        self.assertEqual(caught.exception.code, "editor_target_changed")
+        self.assertEqual(supplied["hosted_target"]["app_pid"], 999)
+        self.assertTrue(child.terminated)
+        self.status(answer, cancel=True); self.terminal(answer)
+
+    def test_recording_payload_does_not_grant_injected_or_other_target_hosted_identity(self):
+        self.context(); answer = self.start(); job = self.editors.jobs[answer["editor_id"]]
+        child = Child(); child.pid = 888
+        def spawn(args, **kwargs):
+            request = json.loads(Path(args[2]).read_text(encoding="utf-8"))
+            self.assertNotIn("hosted_target", request["targets"][0])
+            atomic_json(Path(args[3]+".ready.json"), {"nonce": request["nonce"], "status": "ready", "helper_pid": 888, "helper_window_id": 9998})
+            atomic_json(Path(args[3]+".progress.json"), {"nonce": request["nonce"], "helper_pid": 888,
+                "state": "review", "event_count": 0, "manual_count": 0, "max_events": 15,
+                "warning_codes": [], "probe": {"hooks": "available", "uia": "available"}})
+            atomic_json(Path(args[3]), {"nonce": request["nonce"], "status": "recorded", "human_confirmed": True, "events": [], "warnings": []})
+            return child
+        with mock.patch("process_editor.subprocess.Popen", side_effect=spawn):
+            result = self.editors._visual(job, "record", {"targets": [{**TARGET, "hosted_target": {"app_pid": 999}}]}, 30)
+        self.assertEqual(result["status"], "recorded")
         self.status(answer, cancel=True); self.terminal(answer)
 
     def test_recording_progress_is_reported_and_owned_files_are_cleaned(self):
@@ -1520,6 +1863,82 @@ class EditorIPCTests(unittest.TestCase):
         self.assertEqual(done["status"], "saved")
         self.assertEqual(self.manager.tasks.get(original["id"])["name"], "copy")
         self.assertEqual(len(self.manager.tasks.all()), 1)
+
+
+@unittest.skipUnless(os.name == "nt" and Path(r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe").is_file(), "Windows .NET compiler required")
+class NativePreviewAnchorTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory(prefix="cua-preview-anchor-")
+        folder = Path(cls.directory.name)
+        source = folder / "probe.cs"
+        source.write_text(r'''
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Web.Script.Serialization;
+internal static class PreviewAnchorProbe {
+ static Dictionary<string,object> Anchor(object x, object y) { return new Dictionary<string,object>{{"x",x},{"y",y}}; }
+ static int Main(string[] args) {
+  var json=new JavaScriptSerializer(); PointF p;
+  if(args[0]=="invalid") {
+   bool accepted=false;
+   foreach(object bad in new object[]{true,"0.5",Double.NaN,Double.PositiveInfinity,-.01,1.01,null})
+    accepted |= ProcessEditor.PreviewAnchorPoint(Anchor(bad,.5),new Size(100,100),new Size(492,150),out p);
+   accepted |= ProcessEditor.PreviewAnchorPoint(null,new Size(100,100),new Size(492,150),out p);
+   accepted |= ProcessEditor.PreviewAnchorPoint(Anchor(.5,.5),Size.Empty,new Size(492,150),out p);
+   accepted |= ProcessEditor.PreviewAnchorPoint(Anchor(.5,.5),new Size(100,100),Size.Empty,out p);
+   Console.WriteLine(json.Serialize(new {accepted=accepted}));return 0;
+  }
+  if(args[0]=="paint") {
+   using(var image=new Bitmap(300,100)) using(var preview=new Bitmap(492,150)) {
+    using(var g=Graphics.FromImage(image))g.Clear(Color.Black);
+    using(var g=Graphics.FromImage(preview)) {
+     g.Clear(Color.White);g.DrawImage(image,new Rectangle(21,0,450,150));
+     ProcessEditor.PreviewAnchorPoint(Anchor(.25,.75),image.Size,preview.Size,out p);
+     ProcessEditor.PaintPreviewAnchor(g,p,1);
+    }
+    Color marker=preview.GetPixel(134,113);
+    Console.WriteLine(json.Serialize(new {blue=marker.B>180&&marker.R<40,source_unchanged=image.GetPixel(75,75).ToArgb()==Color.Black.ToArgb()}));return 0;
+   }
+  }
+  var results=new List<object>();
+  foreach(var sample in new[]{new[]{300,100,492,150},new[]{100,300,492,150},new[]{300,100,984,300},new[]{4,4,8,8}}) {
+   bool edge=sample[0]==4;
+   bool valid=ProcessEditor.PreviewAnchorPoint(Anchor(edge?1:.25,edge?1:.75),new Size(sample[0],sample[1]),new Size(sample[2],sample[3]),out p);
+   results.Add(new {valid=valid,x=p.X,y=p.Y});
+  }
+  Console.WriteLine(json.Serialize(results));return 0;
+ }
+}''', encoding="utf-8")
+        cls.helper = folder / "preview-anchor.exe"
+        result = subprocess.run([r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe", "/nologo", "/target:exe",
+            "/main:PreviewAnchorProbe", "/codepage:65001", "/reference:System.Drawing.dll", "/reference:System.Windows.Forms.dll",
+            "/reference:System.Web.Extensions.dll", "/out:" + str(cls.helper), str(Path(__file__).with_name("ProcessEditor.cs")), str(source)],
+            capture_output=True, text=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
+        if result.returncode: raise RuntimeError(result.stdout + result.stderr)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.directory.cleanup()
+
+    def call(self, mode):
+        result = subprocess.run([str(self.helper), mode], capture_output=True, text=True, check=True,
+            timeout=5, creationflags=subprocess.CREATE_NO_WINDOW)
+        return json.loads(result.stdout)
+
+    def test_zoom_letterboxing_dpi_and_last_pixel_anchor_are_preserved(self):
+        expected = [(134.25, 113.25), (233.75, 112.75), (268.5, 226.5), (7, 7)]
+        for actual, (x, y) in zip(self.call("points"), expected):
+            self.assertTrue(actual["valid"])
+            self.assertAlmostEqual(actual["x"], x)
+            self.assertAlmostEqual(actual["y"], y)
+
+    def test_invalid_or_missing_anchor_is_not_guessed(self):
+        self.assertFalse(self.call("invalid")["accepted"])
+
+    def test_marker_is_visible_on_preview_without_changing_source_pixels(self):
+        self.assertEqual(self.call("paint"), {"blue": True, "source_unchanged": True})
 
 
 if __name__ == "__main__":

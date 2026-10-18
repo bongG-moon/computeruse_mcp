@@ -340,5 +340,231 @@ class NativeScopedInspectionTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "scoped_response_invalid")
 
 
+class ReadOnlyControlContextTests(unittest.TestCase):
+    @staticmethod
+    def frame(x=120, y=50, width=150, height=24):
+        return {"x": x, "y": y, "w": width, "h": height}
+
+    def inspect(self, elements, **kwargs):
+        runtime = Runtime(copy.deepcopy(elements))
+        info = inspect_window(runtime, {"pid": 11, "window_id": 22}, observation="uia", **kwargs)["structuredContent"]["inspection"]
+        self.assertTrue(all(name == "get_window_state" for name, _ in runtime.calls))
+        self.assertFalse(info["input_dispatched"])
+        return info
+
+    def form(self):
+        return [{"element_index": 0, "name": "Conditions", "role": "Group"},
+                {"element_index": 1, "parent_index": 0, "name": "Family", "role": "Text", "frame": self.frame(10, 50, 90)},
+                {"element_index": 2, "parent_index": 0, "name": "[Editor] Edit Area", "role": "Edit",
+                 "actions": ["set_value"], "value": "", "frame": self.frame()},
+                {"element_index": 3, "parent_index": 0, "name": "[Editor] Edit Area", "role": "Edit",
+                 "actions": ["set_value"], "value": "", "frame": self.frame(120, 150)}]
+
+    def test_anonymous_duplicate_fields_are_unresolved_even_with_native_actions(self):
+        elements = [{"element_index": 0, "role": "Pane"}, *[
+            {"element_index": index + 1, "parent_index": 0, "name": "[Editor] Edit Area", "role": "Edit",
+             "actions": ["set_value"], "value": ""} for index in range(14)]]
+        info = self.inspect(elements)
+        self.assertEqual(info["uia_evidence"], "actionable_controls_need_disambiguation")
+        self.assertEqual(info["targetability"]["state"], "needs_disambiguation")
+        self.assertEqual(info["targetability"]["ambiguous_actionable_controls"], 14)
+        self.assertEqual(info["targetability"]["unique_actionable_controls"], 0)
+        for field in info["controls"]:
+            self.assertIsNone(field["selector"])
+            self.assertEqual(field["suggested_operations"], [])
+            self.assertEqual(field["value"], "")
+        self.assertIn("computer_process_editor", info["next_step"])
+        self.assertNotIn("computer_teach_element", info["next_step"])
+
+    def test_counts_are_for_returned_controls_and_do_not_guess_anonymous_identity(self):
+        elements = [{"role": "Edit", "actions": ["set_value"]},
+                    {"name": "Search", "role": "Edit", "actions": ["set_value"]}]
+        info = self.inspect(elements)
+        self.assertEqual(info["targetability"]["state"], "partially_targetable")
+        self.assertEqual(info["targetability"]["unidentified_actionable_controls"], 1)
+        self.assertEqual(info["targetability"]["unique_actionable_controls"], 1)
+        paged = self.inspect(elements, max_controls=1)
+        self.assertEqual(paged["targetability"]["scope"], "returned_controls")
+        self.assertEqual(paged["targetability"]["actionable_controls"], 1)
+        self.assertEqual(paged["controls_omitted"], 1)
+
+    def test_auto_adds_current_image_for_ambiguous_controls_without_guessing_target(self):
+        runtime = Runtime(self.form())
+        captures = []
+        def capture(target):
+            captures.append(target)
+            return {"structuredContent": dict(target), "content": [{"type": "image", "mimeType": "image/png", "data": "synthetic"}]}
+        runtime.capture_checkpoint = capture
+        result = inspect_window(runtime, {"pid": 11, "window_id": 22})
+        info = result["structuredContent"]["inspection"]
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(info["status"], "combined_observation")
+        self.assertEqual(info["targetability"]["state"], "needs_disambiguation")
+        fields = [item for item in info["controls"] if item.get("role") == "Edit"]
+        self.assertTrue(all(item["selector"] is None for item in fields))
+        self.assertTrue(all("target_ref" not in item and "element_index" not in item for item in fields))
+        self.assertIn("scope_region", info["next_step"])
+        self.assertFalse(info["context_contract"]["authorizes_input"])
+        self.assertEqual([name for name, _ in runtime.calls], ["get_window_state"])
+
+    def test_same_parent_label_and_ancestor_are_readonly_not_promoted_to_selector(self):
+        info = self.inspect(self.form())
+        field = next(e for e in info["controls"] if e.get("element_index") == 2)
+        context = field["context"]
+        self.assertFalse(context["authorizes_input"])
+        self.assertEqual(context["named_ancestors"], [{"name": "Conditions", "role": "Group", "depth": 1}])
+        self.assertEqual(context["geometry"]["bounds"], {"x": 120, "y": 50, "width": 150, "height": 24})
+        self.assertEqual(context["geometry"]["coordinate_space"], "desktop_physical")
+        self.assertEqual(context["geometry"]["image_mapping"], "not_inferred")
+        self.assertEqual(context["nearby_labels"][0]["name"], "Family")
+        self.assertTrue(context["nearby_labels"][0]["inferred"])
+        self.assertNotIn("label_associations", context)
+        self.assertIsNone(field["selector"])
+        self.assertEqual(field["suggested_operations"], [])
+
+    def test_duplicate_nearby_labels_are_kept_as_ambiguous_candidates(self):
+        elements = self.form()
+        elements.insert(2, {"element_index": 4, "parent_index": 0, "name": "Family", "role": "Text", "frame": self.frame(15, 51, 90)})
+        field = next(e for e in self.inspect(elements)["controls"] if e.get("element_index") == 2)
+        self.assertEqual(field["context"]["nearby_label_candidate_count"], 2)
+        self.assertTrue(field["context"]["nearby_labels_ambiguous"])
+        self.assertEqual([e["name"] for e in field["context"]["nearby_labels"]], ["Family", "Family"])
+        self.assertIsNone(field["selector"])
+
+    def test_other_parent_and_missing_or_duplicate_parent_never_imply_label_relation(self):
+        for parent in (99, None, "0"):
+            elements = self.form()
+            elements[1]["parent_index"] = parent
+            field = next(e for e in self.inspect(elements)["controls"] if e.get("element_index") == 2)
+            self.assertNotIn("nearby_labels", field["context"])
+        elements = self.form()
+        elements.append({"element_index": 0, "name": "Other parent", "role": "Pane"})
+        field = next(e for e in self.inspect(elements)["controls"] if e.get("element_index") == 2)
+        self.assertNotIn("nearby_labels", field["context"])
+        self.assertNotIn("named_ancestors", field["context"])
+
+    def test_explicit_label_relation_requires_current_unique_label_reference(self):
+        for reference in (1, {"element_index": 1}):
+            elements = self.form(); elements[2]["labeled_by"] = reference
+            field = next(e for e in self.inspect(elements)["controls"] if e.get("element_index") == 2)
+            association = field["context"]["label_associations"]
+            self.assertEqual(association, [{"name": "Family", "role": "Text", "source": "driver.labeled_by", "inferred": False}])
+            self.assertIsNone(field["selector"])
+        for reference in (999, True, {"name": "Family"}, "Family"):
+            elements = self.form(); elements[2]["labeled_by"] = reference
+            field = next(e for e in self.inspect(elements)["controls"] if e.get("element_index") == 2)
+            self.assertNotIn("label_associations", field["context"])
+
+    def test_conflicting_explicit_labels_with_same_text_remain_ambiguous(self):
+        elements = self.form()
+        elements.append({"element_index": 4, "parent_index": 0, "name": "Family", "role": "Text"})
+        elements[2].update(labeled_by=1, labelled_by=4)
+        field = next(e for e in self.inspect(elements)["controls"] if e.get("element_index") == 2)
+        self.assertEqual(len(field["context"]["label_associations"]), 2)
+        self.assertTrue(field["context"]["label_association_ambiguous"])
+
+    def test_invalid_or_unknown_space_rectangles_are_never_published_or_used(self):
+        for change in ({"w": 0}, {"h": -1}, {"x": True}, {"x": float("nan")}, {"h": float("inf")}, {"y": "50"}, {"x": 10 ** 1000}):
+            elements = self.form(); elements[2]["frame"].update(change)
+            # An invalid preferred frame must not borrow a different rectangle.
+            elements[2]["bounds"] = {"x": 120, "y": 50, "width": 150, "height": 24}
+            field = next(e for e in self.inspect(elements)["controls"] if e.get("element_index") == 2)
+            self.assertNotIn("geometry", field["context"])
+            self.assertNotIn("nearby_labels", field["context"])
+        elements = self.form(); elements[2]["coordinate_space"] = "image_pixels"
+        field = next(e for e in self.inspect(elements)["controls"] if e.get("element_index") == 2)
+        self.assertNotIn("geometry", field["context"])
+
+    def test_legacy_bounds_and_negative_desktop_origin_preserve_observed_coordinates(self):
+        elements = self.form(); elements[2].pop("frame")
+        elements[2]["bounds"] = {"x": -900, "y": -40, "width": 150, "height": 24}
+        field = next(e for e in self.inspect(elements)["controls"] if e.get("element_index") == 2)
+        self.assertEqual(field["context"]["geometry"]["source"], "driver.bounds")
+        self.assertEqual(field["context"]["geometry"]["bounds"], elements[2]["bounds"])
+        self.assertNotIn("nearby_labels", field["context"])
+
+    def test_protected_fields_labels_and_ancestors_do_not_leak_new_context_or_values(self):
+        elements = self.form()
+        elements[2].update(protected=True, name="SECRET_FIELD", value="SECRET_VALUE", automation_id="SECRET_ID")
+        protected = next(e for e in self.inspect(elements)["controls"] if e.get("protected"))
+        self.assertEqual(protected["targeting_state"], "protected")
+        for key in ("context", "name", "value", "automation_id"):
+            self.assertNotIn(key, protected)
+        self.assertIsNone(protected["selector"])
+        self.assertEqual(protected["actions"], [])
+        self.assertNotIn("SECRET", str(self.inspect(elements)))
+        elements = self.form()
+        elements[0].update(name="SECRET_PARENT", protected=True)
+        elements[1].update(name="SECRET_LABEL", protected=True)
+        elements[2]["labeled_by"] = 1
+        field = next(e for e in self.inspect(elements)["controls"] if e.get("element_index") == 2)
+        self.assertNotIn("named_ancestors", field["context"])
+        self.assertNotIn("nearby_labels", field["context"])
+        self.assertNotIn("label_associations", field["context"])
+
+    def test_input_text_is_not_reclassified_as_a_label_or_parent_name(self):
+        elements = self.form()
+        elements[0].update(name="PRIVATE_CONTENT", value="PRIVATE_CONTENT")
+        elements[1].update(name="PRIVATE_CONTENT", value="PRIVATE_CONTENT")
+        elements[2]["labeled_by"] = 1
+        field = next(e for e in self.inspect(elements)["controls"] if e.get("element_index") == 2)
+        self.assertNotIn("PRIVATE_CONTENT", str(field.get("context", {})))
+
+    def projected(self, source=None):
+        from test_accessibility_tree import AccessibilityTreeTests
+        source = source or AccessibilityTreeTests.projected_business()
+        source.update(pid=11, window_id=22)
+        runtime = Runtime(answer={"structuredContent": source})
+        return inspect_window(runtime, {"pid": 11, "window_id": 22}, observation="uia")["structuredContent"]["inspection"]
+
+    def test_rendered_leaf_labels_are_context_only_with_explicit_inference(self):
+        info = self.projected()
+        edits = [c for c in info["controls"] if c["role"] == "Edit"]
+        self.assertEqual(len(edits), 2)
+        for field, group, aid in zip(edits, ("조회 조건", "보관 조건"), ("100", "200")):
+            context = field["context"]
+            self.assertIn(group, [a["name"] for a in context["named_ancestors"]])
+            self.assertEqual(context["preceding_text_candidates"], [{"name": "Device", "inferred": True,
+                              "evidence": "preceding_text_in_rendered_tree_only"}])
+            self.assertEqual(context["rendered_sibling_label_count"], 1)
+            self.assertNotIn("nearby_labels", context)
+            self.assertNotIn("label_associations", context)
+            self.assertFalse(context["authorizes_input"])
+            self.assertEqual(field["selector"], {"automation_id": aid})
+        self.assertTrue(edits[1]["context"]["rendered_parent_path_incomplete"])
+        self.assertFalse(any(c.get("name") == "Device" for c in info["controls"]))
+
+    def test_multiple_preceding_labels_remain_ambiguous_and_never_become_selectors(self):
+        from test_accessibility_tree import AccessibilityTreeTests
+        source = AccessibilityTreeTests.projected_business()
+        source["tree_markdown"] = source["tree_markdown"].replace('      - Text "Device"', '      - Text "Device"\n      - Text "Family"', 1)
+        source["tree_markdown"] = source["tree_markdown"].replace('id=100 ', '').replace('id=200 ', '')
+        source["tree_markdown"] = source["tree_markdown"].replace('Group "보관 조건"', 'Group "조회 조건"')
+        edits = [c for c in self.projected(source)["controls"] if c["role"] == "Edit"]
+        self.assertTrue(edits[0]["context"]["preceding_text_ambiguous"])
+        self.assertEqual([x["name"] for x in edits[0]["context"]["preceding_text_candidates"]], ["Device", "Family"])
+        self.assertTrue(all(c["selector"] is None for c in edits))
+
+    def test_malformed_tree_does_not_leak_unvalidated_label_context(self):
+        from test_accessibility_tree import AccessibilityTreeTests
+        source = AccessibilityTreeTests.projected_business()
+        source["tree_markdown"] = source["tree_markdown"].replace('id=100', 'id=bad id=duplicate')
+        source["read_only_labels"] = [{"element_index": -1, "parent_index": 0, "role": "Text", "label": "FORGED",
+            "source": "driver.tree_markdown", "read_only": True, "following_element_index": 0}]
+        self.assertNotIn("FORGED", str(self.projected(source)))
+
+    def test_child_local_frames_outside_observed_window_are_not_desktop_hints(self):
+        elements = self.form()
+        elements[2]["frame"] = self.frame(3, 3, 111, 22)
+        runtime = Runtime(answer={"structuredContent": {"pid": 11, "window_id": 22, "elements": elements,
+            "window_bounds": {"x": 800, "y": 400, "width": 1000, "height": 700}}})
+        info = inspect_window(runtime, {"pid": 11, "window_id": 22}, observation="uia")["structuredContent"]["inspection"]
+        field = next(e for e in info["controls"] if e.get("element_index") == 2)
+        self.assertNotIn("geometry", field["context"])
+        self.assertNotIn("nearby_labels", field["context"])
+        self.assertEqual(field["context"]["geometry_unavailable_reason"], "outside_observed_window")
+        self.assertIsNone(field["selector"])
+
+
 if __name__ == "__main__":
     unittest.main()

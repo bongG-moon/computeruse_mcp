@@ -232,10 +232,40 @@ class NativeCaptureReadinessTests(unittest.TestCase):
             return 0
         self.dwm = SimpleNamespace(DwmGetWindowAttribute=mock.Mock(side_effect=cloak))
 
-    def ready(self):
+    def ready(self, **options):
         with mock.patch("vendor.guard.os.name", "nt"), mock.patch("vendor.guard.ctypes.WinDLL", create=True,
                 side_effect=lambda name, **kwargs: self.user if name == "user32" else self.dwm):
-            return windows_checkpoint_ready(200)
+            return windows_checkpoint_ready(200, **options)
+
+    def test_pinned_hosted_foreground_requires_exact_child_and_native_ancestry(self):
+        self.user.GetAncestor = mock.Mock(return_value=200)
+        self.user.IsChild = mock.Mock(return_value=True)
+        self.user.GetForegroundWindow.return_value = 201
+        self.assertFalse(self.ready())
+        self.assertTrue(self.ready(hosted_window_id=201))
+        self.assertFalse(self.ready(hosted_window_id=202))
+        self.user.GetAncestor.return_value = 999
+        self.assertFalse(self.ready(hosted_window_id=201))
+        self.user.GetAncestor.return_value = 200
+        self.user.IsChild.return_value = False
+        self.assertFalse(self.ready(hosted_window_id=201))
+        self.user.IsChild.return_value = True
+        self.user.GetForegroundWindow.side_effect = [201, 202]
+        self.assertFalse(self.ready(hosted_window_id=201))
+
+    def test_pinned_child_does_not_relax_cloaking_minimization_or_window_geometry(self):
+        self.user.GetAncestor = mock.Mock(return_value=200)
+        self.user.IsChild = mock.Mock(return_value=True)
+        self.user.GetForegroundWindow.return_value = 201
+        self.cloaked = 1
+        self.assertFalse(self.ready(hosted_window_id=201))
+        self.cloaked = 0
+        self.user.IsIconic.return_value = True
+        self.assertFalse(self.ready(hosted_window_id=201))
+        self.user.IsIconic.return_value = False
+        self.user.GetWindowRect.return_value = False
+        self.user.GetWindowRect.side_effect = None
+        self.assertFalse(self.ready(hosted_window_id=201))
 
     def test_visible_nonminimized_exact_foreground_on_screen_is_required(self):
         self.assertTrue(self.ready())

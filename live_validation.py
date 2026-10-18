@@ -34,6 +34,9 @@ class Client:
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", env=env, creationflags=subprocess.CREATE_NO_WINDOW)
         self.messages = queue.Queue()
+        self._stderr_chunks = []
+        self._stderr_reader = threading.Thread(target=self._read_stderr, daemon=True)
+        self._stderr_reader.start()
         self.index = 0
         threading.Thread(target=self._read, daemon=True).start()
         try:
@@ -50,8 +53,20 @@ class Client:
             raise
 
     def _read(self):
-        for line in self.child.stdout:
-            self.messages.put(json.loads(line))
+        try:
+            for line in self.child.stdout:
+                self.messages.put(json.loads(line))
+        except (ValueError, OSError) as error:
+            self.messages.put(RuntimeError("Invalid MCP stdout: " + str(error)))
+        finally:
+            self.messages.put(EOFError("MCP stdout closed"))
+
+    def _read_stderr(self):
+        # A verbose dependency must never block the test server on a full pipe.
+        for line in self.child.stderr:
+            self._stderr_chunks.append(line)
+            if len(self._stderr_chunks) > 2000:
+                del self._stderr_chunks[:1000]
 
     def send(self, message):
         self.child.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
@@ -61,6 +76,8 @@ class Client:
         self.index += 1
         self.send({"jsonrpc": "2.0", "id": self.index, "method": method, "params": params or {}})
         result = self.messages.get(timeout=timeout)
+        if isinstance(result, BaseException):
+            raise RuntimeError(str(result) + "\n" + "".join(self._stderr_chunks[-10:])) from result
         assert result.get("id") == self.index, result
         assert "error" not in result, result
         return result["result"]
@@ -82,7 +99,8 @@ class Client:
     def close(self):
         self.child.stdin.close()
         self.child.wait(timeout=10)
-        error = self.child.stderr.read()
+        self._stderr_reader.join(timeout=2)
+        error = "".join(self._stderr_chunks)
         assert self.child.returncode == 0, (self.child.returncode, error)
         assert not error.strip(), error
 

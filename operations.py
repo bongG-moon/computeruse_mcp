@@ -73,7 +73,8 @@ def validate_selector(selector, allow_within=True):
         raise OperationError("selector에는 정확한 name, role, automation_id와 단일 부모 범위 within만 사용할 수 있습니다.")
     if any(not isinstance(v, str) or not v.strip() or len(v) > 1000 for k, v in selector.items() if k != "within"):
         raise OperationError("선택 기준은 1~1000자의 비어 있지 않은 문자열이어야 합니다.")
-    if not ({"name", "automation_id"} & set(selector)):
+    unique_document = allow_within and selector.get("role") == "Document" and set(selector) <= {"role", "within"}
+    if not ({"name", "automation_id"} & set(selector)) and not unique_document:
         raise OperationError("role만으로는 대상을 선택할 수 없습니다. name 또는 automation_id를 함께 지정하세요.")
     if "within" in selector:
         validate_selector(selector["within"], allow_within=False)
@@ -383,6 +384,7 @@ class _Execution:
         self.transition_row = None
         self.action_evidence = []
         self.action_acknowledgement_error = None
+        self.scoped_fallback_reason = None
 
     def _progress(self, stage):
         report = getattr(self.runtime, "report_progress", None)
@@ -469,11 +471,15 @@ class _Execution:
     def _capture(self, target, depth, count):
         snapshot = self._call("get_window_state", dict(target, include_accessibility_tree=True,
                                                       include_screenshot=False, max_depth=depth, max_elements=count))
-        _elements(snapshot)
+        try:
+            _elements(snapshot)
+            for key in ("pid", "window_id"):
+                if key in snapshot and snapshot[key] != target[key]:
+                    raise OperationError("관찰 결과의 창 식별자가 요청한 창과 다릅니다.", "target_mismatch")
+        except Exception:
+            self.read_failed = True
+            raise
         self.snapshot = snapshot
-        for key in ("pid", "window_id"):
-            if key in snapshot and snapshot[key] != target[key]:
-                raise OperationError("관찰 결과의 창 식별자가 요청한 창과 다릅니다.", "target_mismatch")
         return snapshot
 
     def _observe(self, selectors=(), option=None, target=None):
@@ -664,15 +670,75 @@ class _Execution:
         self._progress("verifying")
         selectors = [item["selector"] for item in assertions]
         scoped = getattr(self.runtime, "observe_controls", None)
-        if not callable(scoped):
+        if not callable(scoped) or self.scoped_fallback_reason is not None:
             return self._observe(selectors)
+        data = self._read_scoped_assertions(assertions, scoped)
+        if data is None:
+            return self._observe(selectors)
+        # Different UIA providers can expose the same cell as Custom vs
+        # DataItem. Never invent role aliases: retry the read through the
+        # guarded Driver once, then stay on that route for this operation.
+        # Wrong scope, ambiguity, redaction and provider errors are not misses.
+        missing = None
+        for assertion in assertions:
+            try:
+                element = _unique(data, assertion["selector"])
+            except OperationError as error:
+                if error.code != "selector_not_found":
+                    self.read_failed = True
+                    raise
+                missing = "selector_not_found"
+                continue
+            if any(element.get(key) is True for key in ("protected", "is_password")):
+                return data
+            prop = assertion["property"]
+            if (not ("name" in element or "label" in element) if prop == "name" else prop not in element):
+                missing = missing or "property_unavailable"
+        if missing is None:
+            return data
+        self._remaining()
+        if self.observation_deadline is not None and time.monotonic() >= self.observation_deadline:
+            raise OperationError("완료 확인 제한 시간이 지나 일반 관찰로 전환하지 않았습니다.", "verification_timeout")
+        self.scoped_fallback_reason = missing
+        self.metrics["scoped_fallbacks"] = 1
+        return self._observe(selectors)
+
+    def _complete_missing_values(self, snapshot, assertions):
+        # Driver projections can omit an actual empty ValuePattern string.
+        # Absence is never evidence of emptiness: only a fresh, guarded native
+        # property read can supply it. This does not opt a first run into fast
+        # mode, merge snapshots, refresh input handles, or repeat any input.
+        if (self.scoped_fallback_reason is not None or snapshot.get("scoped_observation") is True
+                or snapshot.get("read_only") is True):
+            return snapshot
+        observer = getattr(self.runtime, "observe_completion_controls", None)
+        if not callable(observer):
+            return snapshot
+        missing = False
+        for assertion in assertions:
+            if assertion["property"] != "value":
+                continue
+            try:
+                element = _unique(snapshot, assertion["selector"])
+            except OperationError:
+                continue  # Missing/ambiguous identity is not missing property.
+            if "value" not in element and not any(element.get(key) is True for key in ("protected", "is_password")):
+                missing = True
+                break
+        if not missing:
+            return snapshot
+        data = self._read_scoped_assertions(assertions, observer)
+        return snapshot if data is None else data
+
+    def _read_scoped_assertions(self, assertions, scoped):
+        selectors = [item["selector"] for item in assertions]
         started = time.monotonic()
         available = True
         try:
             answer = scoped(dict(self.target), copy.deepcopy(selectors), timeout_ms=self._remaining())
         except NotImplementedError:
             available = False
-            return self._observe(selectors)
+            return None
         except Exception as error:
             self.read_failed = True
             raise OperationError(str(error)[:1000], getattr(error, "code", "observation_error")) from error
@@ -724,6 +790,7 @@ class _Execution:
                             or self.transition_tracker.probe is None or self.transition_tracker.original_present()):
                         raise
                     snapshot = self._recover_transition(assertions, deadline if timeout else self.deadline)
+                snapshot = self._complete_missing_values(snapshot, assertions)
                 if timeout and time.monotonic() >= deadline:
                     raise OperationError("완료 확인 제한 시간이 지난 뒤 도착한 관찰은 성공으로 판정하지 않았습니다.", "verification_timeout")
                 if first and self.baseline_at_start:

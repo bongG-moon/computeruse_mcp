@@ -15,6 +15,7 @@ import uuid
 from vendor.guard import atomic_json, check_app, utc_now
 from process_steps import PROCESS_OPERATIONS, execute_process_step, validate_process_step
 from image_steps import IMAGE_OPERATIONS, IMAGE_MUTATIONS, execute_image_step, validate_image_step, validate_image_verification
+from image_steps import _identity as _native_target_identity
 from recording_windows import validate_window_wait, dynamic_window_keys, execute_window_wait
 from task_inputs import (validate_specs, resolve_values, example, expand, MAX_EXPANDED_STEPS, MAX_RECIPE_STEPS, MAX_ITERATIONS,
                          InputError)
@@ -322,7 +323,8 @@ class WorkflowRunner:
                 if not isinstance(receipts, list) or len(receipts) != value["completed_steps"]:
                     raise ValueError("step_receipts")
                 for index, receipt in enumerate(receipts):
-                    if (not isinstance(receipt, dict) or set(receipt) != {"step_index", "step_id", "iteration_id", "status"}
+                    if (not isinstance(receipt, dict) or not {"step_index", "step_id", "iteration_id", "status"} <= set(receipt)
+                            or set(receipt) - {"step_index", "step_id", "iteration_id", "status", "target_hash"}
                             or receipt["step_index"] != index or not isinstance(receipt["step_id"], str)
                             or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}", receipt["step_id"])
                             or not (receipt["iteration_id"] is None or isinstance(receipt["iteration_id"], str)
@@ -330,6 +332,9 @@ class WorkflowRunner:
                                 and int(receipt["iteration_id"].rsplit(":", 1)[1]) <= MAX_ITERATIONS)
                             or receipt["status"] not in {"verified", "awaiting_verification"}):
                         raise ValueError("step_receipts")
+                    if "target_hash" in receipt and (not isinstance(receipt["target_hash"], str)
+                            or not re.fullmatch(r"[a-f0-9]{64}", receipt["target_hash"])):
+                        raise ValueError("step_receipt_target")
             if "visual_assessments" in value:
                 assessments = value["visual_assessments"]
                 if not isinstance(assessments, list) or len(assessments) > value["total_steps"]: raise ValueError("visual_assessments")
@@ -655,6 +660,14 @@ class WorkflowRunner:
                 record["snapshot_hash"] = digest(snapshot)
             record["session_id"] = runtime.id
             record.pop("continuation", None)
+            # Keep the original durable evidence before rebuilding receipts.
+            # Only a verified receipt matching the immutable snapshot may
+            # prove that a prior change already happened. A reconstructed
+            # completion cursor, missing legacy receipt or pending input does
+            # not establish that fact.
+            resume_receipts = (copy.deepcopy(record.get("step_receipts", []))
+                if resume_run_id and "snapshot_hash" in record else [])
+            verified_step_targets = {}
             # Receipts are derived from the frozen recipe and durable completed
             # cursor. Rebuild once when entering/resuming, then append only new
             # completions. In-flight checkpoints need not rewrite the whole
@@ -713,8 +726,19 @@ class WorkflowRunner:
                         for pending in awaiting_receipts: receipts[pending]["status"] = "verified"
                         awaiting_receipts.clear()
                     deferred = deferred_input(step)
-                    receipts.append({"step_index": index, "step_id": step.get("step_id", "step-"+str(index+1)),
-                        "iteration_id": step.get("iteration_id"), "status": "awaiting_verification" if deferred else "verified"})
+                    receipt = {"step_index": index, "step_id": step.get("step_id", "step-"+str(index+1)),
+                        "iteration_id": step.get("iteration_id"), "status": "awaiting_verification" if deferred else "verified"}
+                    if any(check.get("require_change") for check in step.get("expect", [])):
+                        if index < chunk_start:
+                            original = resume_receipts[index] if index < len(resume_receipts) else {}
+                            if ({key: original.get(key) for key in receipt} == receipt and original.get("target_hash")):
+                                receipt["target_hash"] = original["target_hash"]
+                            # Do not manufacture absent target evidence from
+                            # the cursor. Even if the ordinary status is rebuilt,
+                            # a second resume still cannot relax require_change.
+                        elif index in verified_step_targets:
+                            receipt["target_hash"] = verified_step_targets[index]
+                    receipts.append(receipt)
                     if deferred: awaiting_receipts.append(index)
 
             def save(status):
@@ -742,7 +766,28 @@ class WorkflowRunner:
             def save_image_state(index, state):
                 record["image_verification"] = {"step_index": index, "state": state}
                 save("running")
-            def check_step(index):
+            def receipt_target_hash(item, target):
+                return digest({"program_id": item["program_id"], "window_ref": item.get("window_ref", "main"),
+                    "executable": current_executable(target), "identity": _native_target_identity(runtime, target)})
+
+            def prior_assertion(index, assertion, target):
+                if not any(check.get("require_change") for check in assertion.get("expect", [])):
+                    return assertion
+                item = steps[index]
+                expected = {"step_index": index, "step_id": item.get("step_id", "step-"+str(index+1)),
+                    "iteration_id": item.get("iteration_id"), "status": "verified"}
+                original = resume_receipts[index] if index < len(resume_receipts) else {}
+                if (original.get("target_hash") and {key: original.get(key) for key in expected} == expected
+                        and original.get("target_hash") == receipt_target_hash(item, target)):
+                    # The transition was verified during the original action.
+                    # Recheck its current equalities rather than demand that
+                    # it happen a second time without repeating that action.
+                    assertion = copy.deepcopy(assertion)
+                    for check in assertion.get("expect", []):
+                        check.pop("require_change", None)
+                return assertion
+
+            def check_step(index, *, completed_receipt=False):
                 item = steps[index]
                 if deferred_input(item) and item["operation"] not in IMAGE_MUTATIONS:
                     return {"task_verified": False, "input_dispatched": None,
@@ -772,10 +817,13 @@ class WorkflowRunner:
                 if item["operation"] == "wait_for_element":
                     return measured(execute_process_step(runtime, {**operation_step(item), "timeout_ms": 0}, resolve(item)))
                 if item["operation"] == "wait_for_state":
-                    # A past change baseline is not persisted; assertions with
-                    # require_change deliberately stay unverified on resume.
-                    return measured(engine.execute({"operation": "assert", "expect": item["expect"]}, resolve(item), delivery_mode=delivery_mode))
-                return measured(engine.execute(verification_step(operation_step(item)), resolve(item), delivery_mode=delivery_mode))
+                    assertion = {"operation": "assert", "expect": item["expect"]}
+                else:
+                    assertion = verification_step(operation_step(item))
+                target = resolve(item)
+                if completed_receipt:
+                    assertion = prior_assertion(index, assertion, target)
+                return measured(engine.execute(assertion, target, delivery_mode=delivery_mode))
             def check_prior(index):
                 for candidate in range(index-1, -1, -1):
                     # A successfully delivered image mutation intentionally
@@ -783,7 +831,7 @@ class WorkflowRunner:
                     if deferred_input(steps[candidate]):
                         return {"task_verified": True, "input_dispatched": False, "verification_deferred": True}
                     if steps[candidate]["operation"] not in {"delay", "checkpoint"}:
-                        return check_step(candidate)
+                        return check_step(candidate, completed_receipt=True)
                 runtime.check_active()
                 return {"task_verified": True, "input_dispatched": False}
             def recovery_prior_image(index):
@@ -1064,6 +1112,8 @@ class WorkflowRunner:
                             "next_step": ("입력을 보내지 않은 단계입니다. 진단 원인을 해결한 뒤 같은 run_id로 이어가면 현재 대상을 새로 확인하고 이 단계부터 실행합니다. 완료한 앞 단계는 반복하지 않습니다."
                                 if record["step_delivery"]["state"] == "not_sent" else
                                 "현재 화면을 확인하세요. 같은 입력은 자동 반복하지 않습니다. 이어가기는 먼저 미확인 단계의 결과를 다시 검사합니다.")}
+                    if latest.get("task_verified") is True and any(check.get("require_change") for check in item.get("expect", [])):
+                        verified_step_targets[index] = receipt_target_hash(item, resolve(item))
                     record["completed_steps"] = index + 1
                     record["pending_step"] = None
                     stage = "checkpoint_after_verification"

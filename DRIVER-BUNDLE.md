@@ -1,12 +1,12 @@
-# Cua Driver 포함판 안내 — 0.16.0 배포 후보
+# Cua Driver 포함판 안내
 
-Driver 포함판은 Computer Use MCP와 필요한 Cua Driver 파일을 함께 묶어, 사용자가 Driver를 따로 찾는 단계를 줄이는 배포 형식입니다. 이 문서는 **0.16.0 배포 후보의 구성과 사용 방법**을 설명합니다. 게시 완료 여부와 실제 내려받을 파일은 [GitHub Releases](https://github.com/bongG-moon/computeruse_mcp/releases), 검증한 작업은 [검증 기록](VALIDATION.html)에서 확인하세요.
+Driver 포함판은 Computer Use MCP와 필요한 Cua Driver 파일을 함께 묶어, 사용자가 Driver를 따로 찾는 단계를 줄이는 배포 형식입니다. 이 문서는 **Driver 포함판의 구성과 사용 방법**을 설명합니다. 현재 버전과 실제 내려받을 파일은 [GitHub Releases](https://github.com/bongG-moon/computeruse_mcp/releases), 검증한 작업은 [검증 기록](VALIDATION.html)에서 확인하세요. 받은 파일의 정확한 MCP 버전은 함께 제공되는 BUILD-MANIFEST.json에 기록됩니다.
 
 ## 파일 구성
 
 | 구분 | 내용 |
 | --- | --- |
-| MCP 본체 | Computer Use MCP 0.16.0, 포함된 Python 런타임과 화면 도우미 |
+| MCP 본체 | Computer Use MCP, 포함된 Python 런타임과 화면 도우미 |
 | Driver | Cua Driver 0.28.2 Windows x86_64 공식 ZIP의 6개 파일 전체 |
 | 실행파일 | driver/cua-driver.exe |
 | 출처·파일 정보 | Driver 포함 ZIP에 추가되는 DRIVER-BUNDLE-MANIFEST.json |

@@ -222,11 +222,11 @@ class ProgramEditor(tk.Toplevel):
         launching = self._card(2)
         self._label(launching, "여는 방법  ·  선택", bold=True, background=colors["card"]).grid(row=0, column=0, sticky="w")
         launch_help = self._label(launching,
-            "보통은 비워 두면 됩니다. 주소로 여는 프로그램은 실행 주소를, 바로가기에 인자가 있으면 한 줄에 하나씩 입력하세요. 위 실행파일은 실제 업무 창의 프로그램입니다.",
+            "보통은 비워 두면 됩니다. 실행 주소 또는 응용 프로그램 참조(.appref-ms) 경로를 넣을 수 있습니다. 위 실행파일은 실제 업무 창의 프로그램입니다.",
             background=colors["card"], color=colors["muted"], size=9)
         launch_help.grid(row=1, column=0, sticky="ew", pady=(px(6), px(10)))
         self._wrap_with(launching, launch_help, inset=36)
-        self._label(launching, "실행 주소 (https:// 또는 전용 protocol://)", background=colors["card"]).grid(row=2, column=0, sticky="w")
+        self._label(launching, "실행 주소 또는 .appref-ms 파일 경로", background=colors["card"]).grid(row=2, column=0, sticky="w")
         self._entry(launching, self.launch_uri).grid(row=3, column=0, sticky="ew", pady=(px(6), px(10)))
         self._label(launching, "EXE 실행 인자 — 한 줄에 한 개", background=colors["card"]).grid(row=4, column=0, sticky="w")
         self.arguments = self._text(launching, height=2)
@@ -499,7 +499,14 @@ class ProgramEditor(tk.Toplevel):
             if uri and (arguments or cwd):
                 raise ValueError("실행 주소를 사용할 때는 EXE 인자와 시작 폴더를 비워주세요.")
             if uri:
-                item["launch"] = {"kind": "uri", "target": uri}
+                original_launch = self.original.get("launch", {})
+                if original_launch.get("kind") == "appref" and uri == original_launch.get("target"):
+                    item["launch"] = copy.deepcopy(original_launch)
+                elif Path(uri.strip('"')).suffix.lower() == ".appref-ms":
+                    from program_launch import appref_launch_profile
+                    item["launch"] = appref_launch_profile(uri.strip('"'))
+                else:
+                    item["launch"] = {"kind": "uri", "target": uri}
             elif arguments or cwd or "launch" in self.original:
                 item["launch"] = {"kind": "exe", "arguments": arguments}
                 if cwd:

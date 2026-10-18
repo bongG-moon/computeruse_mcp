@@ -3,8 +3,84 @@
 <title>Computer Use MCP — 버전별 검증 결과</title>
 <style>body{margin:0;background:#f2f5f8;color:#203449;font:17px/1.8 'Malgun Gothic',sans-serif}main{max-width:1120px;margin:auto;padding:36px 24px 70px}header{background:#173d61;color:white;padding:30px;border-radius:16px}h1{font-size:30px;line-height:1.4}h2{font-size:23px}section{background:white;border:1px solid #d8e1eb;border-radius:12px;padding:26px;margin-top:22px}table{border-collapse:collapse;width:100%;font-size:15px}th,td{border:1px solid #d8e1eb;padding:12px;text-align:left;vertical-align:top}th{background:#edf3fa}code{background:#eef2f6;padding:2px 5px;overflow-wrap:anywhere}.ok{color:#096149}.warn{color:#9b4b07}.small{font-size:14px;color:#506174}a{color:#176fab}li{margin:8px 0}@media(max-width:700px){main{padding:16px}header,section{padding:18px}table{font-size:13px}h1{font-size:25px}}</style>
 
-<main><header><p>2026년 10월 11일 · Windows 시험 PC</p><h1>Computer Use MCP 0.17.0<br>현재 검증과 이전 기록</h1><p>0.17.0은 자동 검사로 이미지·녹화·초안 저장·반복 작업 변경을 확인했습니다.<br>이번 실제 녹화·재생 시험은 완료하지 못했습니다. 이전 버전의 실제 앱 결과와 구분합니다.</p></header>
+<main><header><p>2026년 10월 18일 · Windows 시험 PC</p><h1>Computer Use MCP 0.18.0<br>수정별 검증과 이전 기록</h1><p>마지막 수정 뒤의 두 클릭 녹화 확인과, 그 전에 수행한 전체 재생·자동 검사를 구분합니다.<br>배포 파일과 공개 상태는 v0.18.0 Release에서 확인하세요.</p></header>
+<section id="image-timeout-0180"><h2>0.18.0 마지막 수정 — 이미지 녹화 제한시간 오류</h2>
+<p><strong>2026-10-18 확인 범위는 Chrome의 실제 클릭 2개입니다.</strong> 드롭다운을 열고 W 항목을 고른 새 녹화에서 이미지 보존을 확인했습니다. 아래의 기존 전체 재생·자동 검사 기록과는 별도의 확인입니다. <a href="https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.18.0">v0.18.0 Release</a> · <a href="CHANGES_0.18.0.html">변경 안내</a></p>
+<table><tr><th>항목</th><th>확인 결과와 범위</th></tr>
+<tr><td>새 실제 클릭 녹화</td><td class="ok">물리적 클릭 2/2개의 이미지를 입력 직전 화면으로 보존했습니다. <code>image_match_timeout</code> 0건, 수동 보완 0개, 미해결 단계 0개입니다. 가져온 초안은 이미지 클릭 2개와 화면 확인 2개를 합한 4단계입니다. 이 확인에서는 새 작업 저장·재생을 수행하지 않았습니다.</td></tr>
+<tr><td>기존 원본과 남은 경고</td><td>이전 녹화 원본의 SHA-256이 동일해 기존 클릭 이미지 4개와 입력 위치 후보 1개가 유지됐음을 확인했습니다. 새 녹화에는 <code>outside_target_not_recorded</code> 경고가 남아 있고 전체 녹화는 부분 기록으로 표시됩니다. 경고 없는 녹화나 전체 업무 성공으로 판정하지 않습니다.</td></tr>
+<tr><td>관련 자동 검사와 합성 측정</td><td class="ok">마지막 수정의 관련 검사 6개 통과, 실패·오류 0개(2.394초)입니다. 메모리에서 생성한 합성 큰 화면의 이미지 처리 309ms를 확인했습니다. 임시 콘솔 도구를 사용한 합성 검사이며 실제 Chrome의 속도 측정이 아닙니다.</td></tr>
+<tr><td>측정하지 않은 값</td><td>실제 클릭별 이미지 처리시간은 녹화 기록에 없어 측정값을 제시하지 않습니다. 프레임 나이는 화면의 최신성을 나타내며 이미지 처리시간이 아닙니다. 이번 결과만으로 임의 앱·다른 클릭·앞으로의 재생 성공을 보장하지 않습니다.</td></tr>
+<tr><td>마지막 수정 이후 검증 범위</td><td>새 전체 자동 검사와 기존 작업의 전체 재생은 다시 실행하지 않았습니다. 아래 1,597개 전체 검사와 Canvas 재생 결과는 마지막 제한시간 수정 이전의 기록입니다. 당시 이미지 도구 해시는 해당 검사 시점을 나타내며 현재 배포 파일 해시는 Release의 파일 명세로 확인합니다.</td></tr>
+</table><p class="small">녹화 원본, 이미지와 원문 진단은 개발용 증거로 보관합니다. 개인 경로·실제 화면·원문 로그와 개발용 데이터 폴더는 공개 배포에 포함하지 않습니다.</p></section>
+<section id="canvas-web-0180"><h2>0.18.0 추가 시험 — 요소가 노출되지 않는 Canvas 화면</h2>
+<p>Chrome의 Canvas 웹 화면과 UIA 자식 요소가 없는 Windows 시험 앱에서 확인했습니다. 인식을 쉽게 만들기 위한 숨은 입력 요소는 추가하지 않았습니다. 아래는 2026-10-17~18 개발 중 마지막 제한시간 수정 전에 수행한 기록입니다. 마지막 수정 뒤의 전체 재생 재검증이나 실제 사내 앱·모든 Canvas 화면의 성공을 뜻하지 않습니다.</p>
+<table><tr><th>항목</th><th>확인 결과</th></tr>
+<tr><td>사용자 실제 시연</td><td>Family=W, Device=D200, 검색어 WEBREC으로 메인 조회 1회와 결과 5행을 화면 및 독립 기록에서 확인했습니다. 다른 11개 조건과 상세 조회는 바뀌지 않았습니다. 이 결과 자체가 자동 재생 성공을 뜻하지는 않습니다.</td></tr>
+<tr><td>창 캡처와 연속 녹화 수정</td><td class="ok">Windows Graphics Capture로 지정한 창을 캡처하고, 요청 시각·원본 촬영 시각·수신 시각을 구분하도록 수정했습니다. 정지 화면의 캡처 갱신과 입력 직전 이미지 보존도 보완했습니다. Chrome 선택창에서 별도 재캡처 없이 화면이 표시되고, 선택한 조회 버튼 이미지가 편집창으로 전달되는 것을 확인했습니다. Windows 시험 앱에서는 연속 클릭 6개의 이미지와 입력 위치 후보가 모두 보존됐습니다.</td></tr>
+<tr><td>Windows Canvas 녹화·저장·재생</td><td class="ok">클릭 6개와 입력 1개를 결과 확인 단계와 함께 14단계로 저장한 뒤, 같은 실행에서 14/14단계를 검증했습니다. 작업 <code>ac9933fc06924d40b4d18c115d0442ac</code>의 revision 2, 실행 <code>139a0a77d23b4d73b142d3c005e74f64</code>입니다. 단, D200 항목과 입력 위치에서 LLM이 새 화면을 보고 대상을 다시 확인하는 절차가 각각 1회 필요했습니다. 결과 화면 확인도 포함하므로 무인 재생 성공으로 분류하지 않습니다.</td></tr>
+<tr><td>재생 결과의 독립 확인</td><td class="ok">앱 자체 기록의 sequence 46→59를 비교하여 Family=W, Device=D200, 검색어 NATREC, 조회 횟수 정확히 +1, 결과 5행을 확인했습니다. MCP의 완료 응답과 앱의 실제 상태를 함께 확인한 결과입니다.</td></tr>
+<tr><td>Canvas 입력 후보와 위치 표시</td><td class="ok">일반 입력 요소의 값을 읽을 수 없으면 직전 클릭 이미지를 후보로 보존하고, 사용자가 위치와 값을 한 번 확인합니다. 실제 편집창에서 NATREC을 확인·저장했고 이 확인 자체는 앱에 입력을 보내지 않았습니다. 후보 미리보기에 정확한 클릭 지점을 나타내는 파란 십자와 원이 표시되는 것도 확인했습니다. 녹화기는 해당 입력의 문자나 클립보드 내용을 자동 수집하지 않습니다.</td></tr>
+<tr><td>빈 입력칸 이미지 구분 개선</td><td>2차원 주변 영역을 추가한 뒤에도, 작은 이미지가 녹화 순간에만 유일하면 바로 저장되는 경로를 실제 Chrome 재생에서 확인했습니다. 자동 녹화는 라벨·테두리가 포함된 주변 영역을 먼저 검사하도록 추가 수정했습니다. 수동 선택은 사용자가 지정한 영역을 우선합니다. 클릭 위치·중복 판정 기준을 유지하며, D100/D200/D300 구분과 반복 행 거부 검사를 통과했습니다. 기존 녹화의 작은 이미지를 새 이미지로 가장하여 교체하지 않았습니다.</td></tr>
+<tr><td>기존 웹 녹화 원본 보존</td><td>사용자 재시연의 11개 기록은 22단계 초안으로 보존했습니다. 이미지 클릭 1개가 확보됐고 10개는 보완이 필요합니다. 마지막 조회 버튼 이미지는 재사용할 수 있지만, 저장되지 않은 나머지 대상 이미지를 원본만으로 복구할 수는 없습니다. 원본을 성공 기록으로 바꾸거나 불명확한 동작을 자동 실행하지 않았습니다.</td></tr>
+<tr><td>Chrome 주소와 시험 환경</td><td>원래 Chrome 시험 탭에 다시 연결해 <code>http://127.0.0.1:8768/</code> 주소를 확인했습니다. 실제 화면에서도 주소가 표시되며, 재생 직전 브라우저 도구로 전체 초기화를 수행했습니다. 재생 자체는 제품 MCP를 사용했습니다. 확장의 연결 해제가 이전에 재발했으므로 연결 안정성 전체나 별도 Sky 도구의 URL 정책 문제가 해결됐다고 주장하지 않습니다.</td></tr>
+<tr><td>새 웹 녹화·편집·저장</td><td>사용자의 실제 시연 8개 기록에서 클릭 이미지 6개를 확보했습니다. 누락된 클릭과 입력값 2개는 제품 편집창에서 검색어 입력칸·WEBREC 전체 바꾸기로 보완했습니다. 기존 이미지 6개와 순서를 유지하여 16단계를 저장했습니다. 작업 <code>888ae49e12e846f1b7e09d63bf6ce5b0</code>, revision 1, 미해결 단계 0개입니다. 대상 밖 동작 경고는 검토 사실과 함께 보존했습니다.</td></tr>
+<tr><td>Chrome 웹 전체 재생</td><td id="canvas-web-018-e2e" class="warn">초기 상태에서 저장 작업을 실행하여 16/16단계와 최종 결과를 확인했습니다. 실행 <code>9382892b46f6462eaced5ddf7cb13b4e</code>의 완료 응답은 <code>task_verified: true</code>, 증거 수준은 <code>visual_assessed</code>입니다. 이미지 대상 6곳은 LLM이 현재 화면으로 다시 식별했고, 결과 확인 8곳도 이미지로 검토했습니다. 따라서 사람의 추가 앱 조작 없이 완료했지만, 로컬 이미지 매칭만으로 끝나는 무인 재생 성공은 아닙니다.</td></tr>
+<tr><td>웹 재생의 독립 결과 확인</td><td class="ok">앱 기록 sequence 66→82: Family=W, Device=D200, 검색어 WEBREC, 메인 조회 3→4, 결과 WEBREC 01~05의 5행입니다. 다른 11개 조건과 상세 조회 횟수 0은 유지됐습니다. 기록된 마지막 조회를 반복 실행하지 않았습니다. 화면 캡처·MCP 완료 응답·앱 상태 기록을 함께 비교했습니다.</td></tr>
+<tr><td>이번에 추가로 발견한 한계</td><td>이미지에 입력값·포커스 테두리가 포함되면 초기화 후 모양이 달라질 수 있습니다. 일부 작은 템플릿은 배율 변경 후 모호하거나 유사도 기준에 미달했습니다. 값이나 기준을 임의로 완화하지 않았습니다. 일시적인 새 캡처 대기 중에도 같은 입력 상태의 유효 캐시를 버리던 경로를 수정했고, 원본 시각과 입력 상태 검사를 유지했습니다. 이 캐시 수정 직후에는 실제 Chrome 재녹화 효과를 확인하지 않았습니다. 이후 마지막 제한시간 수정 뒤의 확인은 위 두 클릭 녹화에 한정되며 전체 재녹화·재생을 다시 검증한 것은 아닙니다.</td></tr>
+<tr><td>이미지 오류 원인과 탐색 개선</td><td>‘후보 257개’는 확인된 동일 요소 수가 아니라 후보 검사 예산 초과였습니다. 검사 한도와 실제 최고 점수를 따로 보고하고, 모든 배율에서 기준 미달이면 찾지 못한 것으로 판정하도록 수정했습니다. 실제 실패 이미지의 오프라인 재검사 결과도 <code>image_not_found / 0.935323</code>으로 바뀌었습니다. 흰 배경에서 불필요한 후보 검사를 줄였으며 유사도 0.94·중복 간격 0.03 기준은 유지합니다. 성공률이나 실제 웹 재생 속도 향상 수치를 검증한 것은 아닙니다.</td></tr>
+<tr><td>녹화창 사용성</td><td>최소화 후 복원할 때 창 너비와 DPI 배율을 유지하고, 버튼이 줄바꿈되면 필요한 높이를 확보하도록 수정했습니다. 새 녹화창에서 시작·일시정지·검토·접어두기·취소 버튼 5개가 모두 보이는 것을 실제 확인했습니다.</td></tr>
+<tr><td>자동 검사</td><td>마지막 제한시간 수정 전에, 추가 캐시·녹화 문맥·이미지 진단 수정까지 포함한 전체 1,597개 중 1,595개 통과, 2개 제외, 실패·오류 0개였습니다(140.336초). 정상 Windows 임시 폴더의 격리된 시험 데이터로 검사했습니다. 샌드박스 임시 폴더의 정리·하드링크 제한 및 Git 저장소 내부 임시 경로 때문에 중단한 이전 시도는 통과 수에 포함하지 않습니다. 자동 검사와 실제 Chrome 녹화·재생의 검증 범위는 별개입니다. 이 전체 검사 당시 이미지 도구 SHA-256(마지막 수정 이전): <code>ee063e09dc43779a3cdf5074a4126334e28e4f0411fd8e2634bcdd0a9dd1bf87</code>.</td></tr></table>
 
+<p class="small">화면 캡처와 원본 응답은 개발용 검증 기록으로 보관하며, 원본 시연·보완·모델 확인을 구분합니다. 이 개발용 원본은 배포 ZIP에 포함하지 않습니다.</p></section>
+
+<section id="validation-0180"><h2>0.18.0 — 실제 녹화·저장·재생과 ClickOnce 실행</h2><p class="small">2026-10-17 개발 중 수행한 시험입니다. 마지막 이미지 제한시간 수정 뒤 다시 수행한 결과는 위 별도 기록을 참고하세요.</p>
+<p><a href="CHANGES_0.18.0.html">변경 내용</a> · <a href="APPREF_GUIDE.md">응용 프로그램 참조 추가 안내</a></p>
+<table><tr><th>대상</th><th>실제 확인한 결과</th></tr>
+<tr><td>MuMu</td><td class="ok">실제 보기 버튼 전환을 녹화·저장한 뒤 4/4단계를 재생했습니다. 클릭 전의 중립 상태 이미지가 사라지는 문제를 보완했으며 실제 결과 화면 2개를 모델이 읽어 확인했습니다. 에뮬레이터 내부 앱 업무 검증은 아닙니다.</td></tr>
+<tr><td>메모장</td><td class="ok">시험 탭에 입력한 문구를 녹화해 문서 값 입력 1단계로 저장했습니다. 다른 문구로 바꾼 뒤 실제 재생으로 원래 문구를 복원했고 값의 정확한 일치를 확인했습니다. 녹화 누락 경고·수동 보완은 없었습니다. 파일 저장·재열기 검증은 아닙니다.</td></tr>
+<tr><td>계산기</td><td class="ok">7 → 제곱의 실제 클릭 2개를 녹화·저장했습니다. 계산기 값을 0으로 초기화한 뒤 4/4단계를 재생해 7과 49를 실제 화면으로 확인했습니다. 이 녹화는 이미지 클릭과 모델의 화면 판단(<code>visual_assessed</code>)을 사용했습니다. 창 프레임과 실제 내부 앱의 활성 상태가 다른 문제, 검은 캡처, 체크포인트 내부 창 판정을 수정했습니다. 초기 재생 중단은 이미 완료한 입력을 반복하지 않고 같은 실행에서 이어갔습니다.</td></tr>
+<tr><td>ClickOnce 설치·실행</td><td class="ok">서명된 로컬 시험 앱을 Windows ClickOnce로 실제 설치했습니다. 기존 창을 닫고 등록한 <code>.appref-ms</code>로 다시 열어 새 창과 <code>ClickOnce deployment: active</code>를 확인했습니다. 최초 설치 실패는 시험 앱의 EXE 식별자와 매니페스트 불일치였으며, 실제 EXE 식별자·해시 검사를 빌드에 추가했습니다. Windows 보안 정책·배율·인증서 저장소는 변경하지 않았습니다.</td></tr>
+<tr><td>ClickOnce 녹화·재생</td><td id="clickonce-018-result" class="ok">200% 배율의 DPI 비인식 시험 앱에서 Family=N 선택 → 검색어 비우기·REC018 입력 → 체크 → 조회를 실제 녹화하고 6단계로 저장했습니다. 수동 보완 0개·누락 경고 0개입니다. 초기화 후 중단 지점 재개와 처음부터 표준 모드 재생이 각각 6/6단계로 완료됐습니다. 선택·입력·체크는 실제 UIA 값으로, 결과 5행과 조회 횟수는 모델의 실제 화면 판단(<code>visual_assessed</code>)으로 확인했습니다. 각 재생에서 Query 누적 횟수가 한 번씩만 늘었습니다. 처음 재생에서 빈 문자열을 Driver가 생략해 검증이 멈춘 문제를 수정했으며, 이미 수행한 입력을 반복하지 않고 실제 속성 조회로 확인했습니다. 이 앱의 이미지 클릭 좌표가 검증된 것은 아니며 요소 방식으로 녹화·재생했습니다.</td></tr>
+<tr><td>자동 검사</td><td id="unit-018-result">전체 1,474개 실행, 1,472개 통과·2개 조건부 제외·실패 0개, 117.929초. 이후 실제 시험에서 발견한 녹화 증거 변경은 관련 125개 검사(1개 제외)와 최종 보호 조건·가져오기 11개 검사로, 빈 값 확인 변경은 관련 177개 검사로 재검증했으며 실패가 없습니다. 이는 전체 검사와 이후 영향 범위 검사를 합친 검증 기록이며, 마지막 수정 후 전체 검사를 다시 실행한 집계는 아닙니다. 전체 검사 제외는 Windows 심볼릭 링크 권한과 별도 실행이 필요한 실제 설치 연결 검사입니다.</td></tr>
+<tr><td>소스·네이티브 빌드</td><td>배포 구성 <code>--check</code>의 런타임·앱 import, 네이티브 컴파일과 격리된 이미지 비교 검사를 통과했습니다. 이 결과는 당시 빌드 검사 범위이며, 배포 파일과 공개 상태는 v0.18.0 Release에서 확인합니다.</td></tr></table>
+<p>Airtest는 기존 비교에서 대상을 찾지 못했을 때만 실행되는 로컬 보조 경로로 반영했습니다. 실제 비교에서 기존 방식이 더 빠른 경우가 있어 순서를 유지했으며, 모든 이미지에서 더 빠르거나 더 정확하다는 결론은 내리지 않았습니다. FlaUI UIA2/UIA3는 이번 앱 비교에서 고유 요소 인식 개선이 확인되지 않아 운영 엔진으로 교체하지 않았습니다.</p>
+<p class="warn">사내 실제 프로그램의 화면·그리드·권한·ClickOnce 업데이트 정책은 이 시험 앱과 다를 수 있습니다. 해당 운영 프로그램, Store의 이번 변경 재시험, 장시간 무인 운영, 10,000단계 실제 앱 완주는 미검증입니다. Chrome의 이후 시험은 별도 Canvas 기록과 마지막 두 클릭 확인에 구분했습니다. 현재 네트워크 공유의 참조 파일과 UNC 배포 주소는 지원하지 않습니다.</p>
+<p class="small">개발용 증거: <code>.data/acceptance018-native-20261017/responses/033-mumu-hover-finish.json</code>, <code>041-note-replay.json</code>, <code>056-calc-complete.json</code>, <code>057-appref-open.json</code>, <code>058-appref-observe.json</code>, <code>068-record-saved.json</code>, <code>072-appref-complete.json</code>, <code>074-appref-fresh-complete.json</code>, <code>.data/validation018-final-native-unittest.log</code>. 개인 경로·원문 로그·실제 화면은 공개 자료에 포함하지 않습니다.</p>
+</section>
+
+<section id="workflow-edit-0180"><h2>0.18.0 추가 시험 — 동작 수정·입력값 변경·스킬 반복 실행</h2><p class="small">2026-10-17 개발 중 수행한 시험입니다. 마지막 이미지 제한시간 수정 이후의 재실행 결과가 아닙니다.</p>
+<p>설치된 로컬 ClickOnce 시험 앱과 공개 MCP 연결로 확인했습니다. 편집창 조작은 별도 Computer Use 도구로 수행했고, 녹화로 저장한 작업을 그대로 수정해 실행했습니다.</p>
+<table><tr><th>시험</th><th>확인한 결과</th></tr>
+<tr><td>실제 입력·클릭</td><td>검색어 DIRECT018 입력과 조회를 수행했습니다. 입력값을 요소로 읽고 실제 결과 5행을 화면으로 확인했습니다.</td></tr>
+<tr><td>편집창에서 값 수정</td><td class="ok">녹화한 입력 단계의 값을 EDIT018로 바꾸고 ‘실행할 때 바꿀 값으로 사용’을 선택했습니다. 같은 작업의 새 버전 저장과 6/6단계 재생을 완료했습니다.</td></tr>
+<tr><td>채팅으로 동작 수정</td><td class="ok">조건 N→P, 체크 해제, 기본 검색어 CHAT018, 클릭 대상 조회→초기화로 변경했습니다. 입력값에 연결된 기존 확인 조건도 함께 갱신됐습니다. 초기화 결과인 W·Sample·빈 표를 확인하고 6/6단계를 완료했습니다.</td></tr>
+<tr><td>목록 반복과 다른 입력값</td><td id="skill-repeat-018-result" class="ok">같은 스킬의 저장 버전 4로 조건 P·검색어 3개를 처리해 9/9단계, 조건 N·다른 검색어 2개를 처리해 7/7단계를 완료했습니다. 각 조회마다 결과 5행의 Family·Item·State 15개 값을 확인했고, 첫 Item 값이 바뀌었는지도 확인했습니다. 마지막 화면 판단은 모델의 visual_assessed입니다. 첫 실행은 45초 구간 저장 후 같은 실행으로 이어갔으며, 이미 수행한 조회를 반복하지 않았습니다.</td></tr>
+<tr><td>빠른 반복 경로</td><td class="ok">성공 기록과 일치하는 fast 모드에서 조건 C·새 검색어 2개로 7/7단계를 완료했습니다. 빠른 읽기의 표 셀 역할 불일치는 일반 Driver 읽기로 전환해 확인했습니다. 최종 Query 횟수는 18→20으로 두 번 증가했고 재개 중 입력은 없었습니다. 확인 조건을 생략하지 않았으며, 모든 앱의 속도 개선을 측정한 것은 아닙니다.</td></tr>
+<tr><td>스킬 내보내기</td><td>SKILL.md 형식 검사를 통과했고, 파일에 적힌 공개 MCP 호출 방법으로 실제 실행했습니다. 최신 작업의 기본값을 바꾼 후에도 내보낸 스킬은 저장 버전 4를 사용했으며, 실행 중 바꾼 값은 최신 버전 5의 기본값을 덮어쓰지 않았습니다. 개인 Codex·Claude 프로필에 자동 설치하거나 새 채팅의 자동 스킬 선택을 검증한 것은 아닙니다.</td></tr>
+<tr><td>잘못된 요청</td><td>허용되지 않은 조건값과 오래된 버전의 수정 요청을 거절했습니다. 잘못된 요청으로 입력을 수행하거나 최신 작업을 덮어쓰지 않았습니다.</td></tr>
+<tr><td>자동 검사·빌드</td><td>실제 시험에서 발견한 재개 문제는 관련 100개 검사, 빠른 확인 문제는 최종 관련 245개 검사에서 모두 통과했습니다. 두 묶음에는 겹치는 검사가 있어 합산하지 않습니다. 최종 배포 구성의 import·네이티브 컴파일·이미지 모듈 검사도 통과했습니다. 이는 당시 검증 기록이며 마지막 이미지 제한시간 수정 이후의 전체 재검증을 뜻하지 않습니다.</td></tr></table>
+<p><strong>시험 중 발견해 수정한 부분:</strong> 값을 바꾸고도 이전 값으로 완료를 확인하던 문제, 이미 확인된 변화 조건을 이어가기에서 다시 요구하던 문제, 빠른 확인 방식과 Driver의 표 셀 종류가 달라 대기를 반복하던 문제를 수정했습니다. 입력 여부가 불확실한 단계는 자동으로 다시 실행하지 않습니다. 확인 기록이 없거나 대상 창이 다른 경우도 완료로 처리하지 않습니다.</p>
+<p class="warn">사내 실제 업무 프로그램과 사내 LLM은 연결하지 않았습니다. 이 결과는 로컬 시험 앱의 기능 검증이며, 장시간 무인 운영이나 모든 프로그램의 성공을 보장하지 않습니다.</p>
+<p class="small">개발용 증거: <code>.data/acceptance018-native-20261017/workflow-edit-skill-report.json</code>, 응답 <code>085-editor-verified.json</code>, <code>089-click-edit-verified.json</code>, <code>107-skill-fixed-verified.json</code>, <code>113-changed-inputs-verified.json</code>, <code>116-fast-final-verified.json</code>, <code>.data/validation018-scoped-fallback-tests.log</code>. 수정 전 실패한 실행도 별도 보존합니다.</p>
+</section>
+
+<section id="dense-windows-0180"><h2>0.18.0 추가 시험 — 조건과 같은 이름의 버튼이 많은 Windows 화면</h2><p class="small">2026-10-17 개발 중 수행한 시험입니다. 마지막 이미지 제한시간 수정 이후의 재실행 결과가 아닙니다.</p>
+<p>14개 조건 입력칸, 두 영역의 같은 이름 ‘조회·초기화’ 버튼, 실행할 때 달라지는 숫자 식별자를 가진 로컬 Windows 시험 앱으로 확인했습니다. 시험용 화면이며 특정 사내 프로그램을 재현한 것은 아닙니다.</p>
+<table><tr><th>항목</th><th>현재 확인한 결과</th></tr>
+<tr><td>요소 구조 읽기</td><td class="ok">이름 없는 중간 컨테이너와 표 영역이 일부 생략돼 <code>invalid_tree_structure</code>로 멈추던 문제를 수정했습니다. 원본의 라벨과 주변 문맥을 유지한 뒤 이 화면에서 고유하게 구분할 수 있는 대상이 7개에서 38개로 늘었습니다. 주변 라벨은 해석을 돕는 정보이며, 실제 UIA 이름이나 다음 실행에도 유지되는 식별자로 간주하지 않습니다.</td></tr>
+<tr><td>말로 조건 설정·조회</td><td class="ok">Family=C, Device=TEST-A, Version=3, Hold 체크 후 주 조회를 한 번 실행했습니다. 시험 앱이 독립적으로 남긴 기록을 검사해 세 입력값·Hold 상태·결과 5행의 Active+Hold, 주 조회 1회·보관 영역 조회 0회, 나머지 11개 조건의 불변을 확인했습니다.</td></tr>
+<tr><td>첫 실제 녹화·저장</td><td>Family=N, Device=REC-A, Version=5, Hold 체크 후 조회하여 주 조회 누적 2회까지 확인했습니다. 녹화는 10단계 초안으로 저장됐지만 드롭다운 선택 1개가 수동 보완 대상으로 남아 실행 가능한 작업으로 완성되지는 않았습니다.</td></tr>
+<tr><td>수정 후 새 녹화·저장</td><td class="ok">드롭다운을 열고 항목을 누른 실제 두 클릭을, 같은 콤보박스의 선택값 변경으로 묶도록 수정했습니다. 새 녹화는 실제 동작 5개와 결과 확인을 합한 6단계로 저장됐으며, 수동 보완·누락 경고·미해결 단계가 모두 0개였습니다.</td></tr>
+<tr><td>초기화 후 실제 재생</td><td id="dense-windows-018-record-result" class="ok">Family=W, Device=DEV-A, Version=1, Hold 해제를 확인한 뒤 저장한 작업을 재생했습니다. Family=N, Device=REC-A, Version=5, Hold 체크와 결과 5행의 Active+Hold를 확인하고 6/6단계, <code>task_verified: true</code>로 완료했습니다. 독립 앱 기록에서도 주 조회는 3회에서 4회로 한 번만 증가했고 보관 영역 조회는 0회였습니다. 최종 결과 확인에는 모델이 실제 화면을 읽는 <code>visual_assessed</code>를 사용했으며, 독립 기록 검사에서도 조건·결과·조회 횟수가 일치했습니다.</td></tr>
+<tr><td>최종 편집창 표시·재녹화</td><td class="ok">편집창에서 Family·Device·Version을 먼저 보여 주고 ‘주변 글자 기준 · 조회 조건’을 덧붙이는 표시를 실제로 확인했습니다. 추론한 주변 라벨을 실제 요소 이름으로 바꾼 것은 아닙니다. 이 최종 표시로 별도의 작업을 새로 녹화해 6단계로 저장했으며, 경고와 미해결 단계는 0개였습니다.</td></tr>
+<tr><td>두 번째 초기화·재생</td><td class="ok">네 가지 초기값을 다시 확인한 뒤 두 번째 작업도 6/6단계, <code>task_verified: true</code>로 완료했습니다. 최종 화면에서 N·REC-A·5·Hold 체크, 결과 5행, 주 조회 누적 6회를 확인했습니다. 독립 앱 기록에서도 주 조회 5→6회, 보관 조회 0회, 나머지 11개 조건과 보관 영역 값의 불변을 확인했습니다. 수정 후 서로 다른 두 녹화를 저장하고 초기화한 뒤 각각 재생한 결과입니다. 최종 결과 확인에는 <code>visual_assessed</code>가 포함됩니다.</td></tr>
+<tr><td>최종 빌드·자동 검사 범위</td><td>이 단계의 전체 자동 검사 1,547개 실행, 1,545개 통과·2개 조건부 제외·실패 0개, 116.814초입니다. 제외 항목은 Windows 심볼릭 링크 생성 권한과 명시적으로 별도 실행해야 하는 실제 설치 연결 검사입니다. 앞선 실행의 임시 폴더·sandbox 환경으로 인한 실패 기록은 보존했고, 저장소 밖의 별도 시험용 임시 폴더에서 재실행했습니다. 보안 정책이나 제품 검사를 완화하지 않았습니다. 당시 배포 구성의 <code>--check</code>도 통과했습니다. 마지막 이미지 제한시간 수정 이후의 빌드·전체 검사 결과와 구분합니다.</td></tr>
+<tr><td>시험 앱 기록 수정</td><td>처음에는 콤보박스 화면 값이 바뀌어도 시험 앱 내부 값과 기록이 갱신되지 않았습니다. 실제 선택 항목을 기준으로 동기화하도록 시험 앱을 별도로 수정했으며, 이 수정 자체를 MCP 성공으로 계산하지 않았습니다. 이전 실패 기록도 유지합니다.</td></tr>
+</table>
+<p class="warn">이 시험의 확인 범위는 Windows 시험 앱입니다. 사내 실제 프로그램·Infragistics 컨트롤, 재실행으로 숫자 식별자가 바뀐 뒤의 재생은 미검증입니다. 이후 웹 화면의 녹화·재생은 별도 Canvas 기록에, 마지막 수정 뒤 확인은 두 클릭 녹화 기록에 구분했습니다.</p>
+<p class="small">개발용 증거: <code>.data/acceptance018-complex-20261017/responses/073-fixed-recorded.json</code>, <code>074-fixed-saved.json</code>, <code>075-reset-before-replay.json</code>, <code>077-replay.json</code>, <code>078-replay-complete.json</code>, <code>business-check-fixed-query4-replay.json</code>, <code>083-final-saved.json</code>, <code>084-final-before-replay.json</code>, <code>085-final-replay.json</code>, <code>086-final-complete.json</code>, <code>business-check-fixed-query6-final-replay.json</code>, <code>.data/validation018-complex-final-build.log</code>, <code>.data/validation018-complex-final-unittest.log</code>. 앞선 환경 실패는 <code>.data/validation018-complex-final-unittest-workspace-temp.log</code>에 보존합니다. 검증은 MCP 응답과 별도로 시험 앱의 실제 이벤트·전체 조건·조회 횟수·결과 행 기록을 비교합니다. 원문 화면, 개인 경로, 업무 데이터는 이 안내에 포함하지 않습니다.</p>
+</section>
 <section id="validation-0170"><h2>0.17.0 — 이미지 선택·초안 저장·긴 반복 작업</h2>
 <p><a href="CHANGES_0.17.0.html">변경 내용</a> · <a href="PROCESS_GUIDE.html">처음 따라 하기</a> · <a href="https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.17.0">배포 파일과 공개 상태</a></p>
 <p><strong>이번 변경의 자동 검사 결과는 최종 1,382개 통과·5개 제외·미해결 실패 0개입니다.</strong> 전체 검사 1,387개 실행 후 새 중지 사유 규약에 맞춰 시험용 모형을 보정하고 관련 41개를 재검사했습니다. 이 집계는 전체 검사와 영향 범위 재검사의 결과이며, 한 번의 전체 실행이 처음부터 모두 통과했다는 뜻은 아닙니다.</p>
@@ -211,4 +287,4 @@
 
 <section><h2>증거와 재현</h2><p>개발 폴더의 <code>.data/acceptance-20261004</code>에 시도별 결과와 단계 기록, 합성 파일을 보관했습니다. <code>.data/report-review</code>에는 원본 보고서 추출본과 실제 진단 결과가 있습니다. 원문 로그에는 화면의 다른 탭 제목이 들어갈 수 있어 사용자용·소스 ZIP에는 포함하지 않았습니다.</p><p>재현용 <code>acceptance_workflows.py</code>와 단위 검사, 빌드 스크립트는 소스 ZIP에 포함합니다. 실제 화면 시험에는 Windows, 해당 앱, 별도 Cua Driver가 필요합니다. 시험 경로와 Driver 위치는 실행 PC에 맞게 지정해야 합니다.</p></section>
 
-<footer class="small">Computer Use MCP 0.17.0 · 버전별 시험 기록 · 로컬 stdio MCP · 이 문서는 인터넷 연결 없이 열 수 있습니다.</footer></main></html>
+<footer class="small">Computer Use MCP 0.18.0 · 버전별 시험 기록 · 로컬 stdio MCP · 이 문서는 인터넷 연결 없이 열 수 있습니다.</footer></main></html>
