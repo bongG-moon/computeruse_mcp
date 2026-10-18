@@ -88,6 +88,8 @@ class ScopedControls:
         if not isinstance(selectors, (list, tuple)) or not 1 <= len(selectors) <= 40:
             raise OperationError("확인할 요소는 1~40개로 지정하세요.")
         selectors = [validate_selector(s) for s in selectors]
+        if any("label" in s for s in selectors):
+            raise NotImplementedError("label_relationship_requires_full_observation")
         if not isinstance(target, dict) or set(target) != {"pid", "window_id"}:
             raise OperationError("현재 프로그램과 창을 지정하세요.")
         return self._query(target, {"selectors": selectors}, timeout_ms=timeout_ms, max_elements=80)

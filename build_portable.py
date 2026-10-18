@@ -48,6 +48,8 @@ SCOPED_CONTROLS_NAME = "Computer Use MCP 빠른 확인.exe"
 CHECKPOINT_REVIEW_NAME = "Computer Use MCP 화면 확인.exe"
 APP_FILES = (
     "artifact_lifecycle.py",
+    "semantic_targets.py",
+    "CHANGES_0.18.2.html",
     "airtest_backend.py", "AIRTEST-NOTICES.md", "CHANGES_0.18.0.html", "CHANGES_0.18.1.html", "APPREF_GUIDE.md",
     "easy_api.py", "interaction.py", "image_pixels.py", "task_inputs.py", "task_revision.py", "visual_review.py", "visual_targets.py", "builtin_programs.py", "hosted_windows.py",
     "server.py", "settings.py", "setup.py", "consent.py", "register.py", "README.html", "VALIDATION.html",
@@ -63,6 +65,7 @@ APP_FILES = (
 )
 OPTIONAL_APP_FILES = ()
 SOURCE_SUPPORT_FILES = (
+    "test_semantic_targets.py",
     "test_artifact_lifecycle.py", "test_artifact_integration.py", "test_capture_temp_scope.py",
     "fixtures/ComplexBusiness018.cs", "fixtures/ComplexWeb018.html", "fixtures/RecordingCanvas018.cs",
     "tools/build_complex_business018.ps1", "tools/build_recording_canvas018.ps1", "tools/serve_complex_web018.py",

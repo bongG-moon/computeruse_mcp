@@ -1,6 +1,8 @@
-# Computer Use MCP 0.18.1
+# Computer Use MCP 0.18.2
 
 Windows 프로그램을 채팅으로 조작하거나, 직접 작업을 녹화해 반복 실행하는 로컬 MCP입니다. 두 방식이 같은 창 확인·요소/이미지 선택·입력·결과 확인 엔진을 사용합니다.
+
+> **0.18.2는 앱 재시작 후 대상 식별과 녹화 추가·교체, 별도 작업 저장을 개선합니다.** [v0.18.2 Release](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.18.2) · [변경 및 검증 범위](CHANGES_0.18.2.html). 특정 앱 전용 규칙 없이 공통 경로에 적용했습니다. 오래된 숫자 ID는 추측하여 바꾸지 않습니다.
 
 > **0.18.1은 캡처 보관과 임시파일 자동 정리를 추가합니다.** [v0.18.1 Release](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.18.1)에서 배포 파일을, [변경 안내](CHANGES_0.18.1.html)에서 보관 기준을 확인하세요. 별도 설정 없이 사용하며, 저장한 작업의 재생 이미지와 보완 중인 녹화 원본은 보존합니다.
 

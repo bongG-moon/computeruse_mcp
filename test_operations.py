@@ -240,6 +240,29 @@ class OperationsTests(unittest.TestCase):
         self.assertEqual(result["diagnostic"]["code"], "unsupported_option_structure")
         self.assertEqual(sum(n == "click" for n, _ in runtime.calls), 1)
 
+    def test_foreground_combo_activates_then_uses_fresh_targeted_clicks(self):
+        combo = element(name="신청 상태", role="ComboBox", value="전체 상태")
+        fresh = dict(combo, element_token="activated:0")
+        option = element(1, "신청", "ListItem", "", parent_index=0)
+        option["element_token"] = "opened:1"
+        after = dict(combo, value="신청")
+        runtime = Runtime([snapshot(combo), snapshot(fresh), snapshot(fresh, option), snapshot(after)])
+        result = Operations(runtime).execute({"operation": "select_option", "selector": COMBO,
+            "value": "신청", "verification_timeout_ms": 0}, TARGET, delivery_mode="foreground")
+        self.assertTrue(result["task_verified"])
+        self.assertEqual([name for name, _ in runtime.calls].count("bring_to_front"), 1)
+        clicks = [args for name, args in runtime.calls if name == "click"]
+        self.assertEqual([args["element_token"] for args in clicks], ["activated:0", "opened:1"])
+        self.assertEqual([args["delivery_mode"] for args in clicks], ["background", "background"])
+
+    def test_foreground_combo_activation_failure_sends_no_selection(self):
+        runtime = Runtime([snapshot(element(name="신청 상태", role="ComboBox", value="전체 상태"))],
+                          actions=[RuntimeError("activation denied")])
+        result = Operations(runtime).execute({"operation": "select_option", "selector": COMBO,
+            "value": "신청"}, TARGET, delivery_mode="foreground")
+        self.assertFalse(result["input_dispatched"])
+        self.assertFalse(any(name == "click" for name, _ in runtime.calls))
+
     def test_duplicate_child_options_refused(self):
         combo = element(name="신청 상태", role="ComboBox", value="전체 상태")
         options = [element(i, "신청", "ListItem", "", parent_index=0) for i in (1, 2)]

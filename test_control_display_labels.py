@@ -80,7 +80,7 @@ class DisplayLabelTests(unittest.TestCase):
         self.assertEqual(control_display_label(snapshot, fields[1], 'unchanged'),
                          'Device (주변 글자 기준) · Conditions')
 
-    def test_recorded_selector_and_expect_are_identical_with_only_label_changed(self):
+    def test_verified_label_relationship_replaces_transient_numeric_id(self):
         source = recording_fixtures.RecordingSemanticTests(); source.setUp()
         event, snapshots = source.event(value='REC-A')
         snapshot = snapshots[('editor', 'main')]
@@ -99,13 +99,21 @@ class DisplayLabelTests(unittest.TestCase):
         source.draft.recorded([event], snapshots=snapshots)
         actual, previous = copy.deepcopy(source.draft.steps[0]), copy.deepcopy(baseline.steps[0])
         actual.pop('step_id', None); previous.pop('step_id', None)
-        self.assertEqual(actual, previous)
+        self.assertEqual(previous['operation'], 'manual_entry')
+        self.assertEqual(actual['operation'], 'set_value')
         self.assertEqual(source.draft.labels, ['Device (주변 글자 기준) · 조회 조건'])
-        self.assertEqual(actual['selector']['automation_id'], '95999070')
+        self.assertNotIn('automation_id', actual['selector'])
+        self.assertEqual(actual['selector']['label'], {'text':'Device','relation':'rendered_preceding'})
+        self.assertEqual(actual['selector'], actual['expect'][0]['selector'])
+        from operations import _unique
+        fresh = copy.deepcopy(snapshot)
+        for item in fresh['elements']:
+            if 'automation_id' in item: item['automation_id'] = 'new-' + item['automation_id']
+        self.assertEqual(_unique(fresh, actual['selector'])['element_index'], 1)
         summary = source.draft.summaries()[0]
         self.assertNotIn('95999070', summary['summary'])
         self.assertIn('확인: Device (주변 글자 기준)', summary['detail'])
-        source.draft.steps[0]['expect'][0]['selector']['automation_id'] = 'different-field'
+        source.draft.steps[0]['expect'][0]['selector'] = {'automation_id': 'different-field'}
         summary = source.draft.summaries()[0]
         self.assertIn('확인: different-field', summary['detail'])
 

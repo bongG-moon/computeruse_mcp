@@ -160,7 +160,13 @@ class ProcessDraft:
         self.variables = copy.deepcopy((task or {}).get("variables", {}))
         self.task_id = (task or {}).get("id")
         self.revision = (task or {}).get("revision", 1)
-        self.labels = [step.get("selector", {}).get("name", "저장한 이미지" if "image_target" in step else "저장된 요소") for step in self.steps]
+        self.labels = []
+        for step in self.steps:
+            selector = step.get("selector", {})
+            label = selector.get("label", {}).get("text") or selector.get("name", "저장한 이미지" if "image_target" in step else "저장된 요소")
+            if selector.get("label") and selector.get("within", {}).get("name"):
+                label += " · " + selector["within"]["name"]
+            self.labels.append(label)
         review = (task or {}).get("recording_review", {})
         self.recording_warnings = list(review.get("warning_codes", []))
         self.recording_acknowledged = bool(review.get("acknowledged", False)) if self.recording_warnings else True
@@ -1053,13 +1059,21 @@ class ProcessEditors:
                     job["result"].pop("last_recognition", None)
         elif action == "record":
             from replay_preflight import image_replay_preflight, prepare_image_foreground
-            if set(payload) - {"review_mode"} or payload.get("review_mode", "human") not in {"human", "visual"}:
+            if set(payload) - {"review_mode", "mode", "index"} or payload.get("review_mode", "human") not in {"human", "visual"}:
                 raise OperationError("녹화 범위는 편집 창에 연결한 프로그램으로 고정됩니다.")
+            record_mode = payload.get("mode", "append")
+            if record_mode not in {"append", "replace_selected", "replace_all"}:
+                raise OperationError("뒤에 추가·선택 단계 교체·전체 다시 녹화 중 하나를 선택하세요.")
+            if record_mode == "replace_selected":
+                if type(payload.get("index")) is not int or not 0 <= payload["index"] < len(draft.steps):
+                    raise OperationError("교체할 단계를 먼저 선택하세요.")
+            elif "index" in payload:
+                raise OperationError("단계 번호는 선택 단계 교체에만 사용하세요.")
             if payload.get("review_mode") == "visual" and not job.get("visual_review_enabled"):
                 raise OperationError("화면을 읽는 모델 연결이 확인되지 않았습니다. 직접 화면 확인을 사용하세요.")
             # Each input can require one popup binding and one checkpoint.
             # Budget for the worst case, rather than a five-visit assumption.
-            maximum_events = min(MAX_RECORDING_EVENTS, (MAX_RECIPE_STEPS - len(draft.steps)) // 3)
+            maximum_events = min(MAX_RECORDING_EVENTS, (MAX_RECIPE_STEPS - (len(draft.steps) if record_mode == "append" else 0)) // 3)
             if maximum_events < 1:
                 raise OperationError("녹화 동작과 화면 확인을 추가할 공간이 없습니다. 기존 단계를 삭제하거나 새 프로세스를 만드세요.")
             roots = [target for target in draft.programs if (target["program_id"], target.get("window_ref", "main")) not in
@@ -1113,9 +1127,11 @@ class ProcessEditors:
             if receipt is None or receipt["data"] != recorded:
                 receipt = self._retain_recording(job, recorded)
             receipt["review_mode"] = payload.get("review_mode", "human")
+            receipt["mode"] = record_mode
+            receipt["replace_index"] = payload.get("index")
             draft = self._import_recording(job, receipt)
             extra["programs"] = draft.program_views()
-            message = "녹화한 동작을 초안에 추가했습니다. 순서와 입력 내용을 검토한 뒤 저장하세요. 아직 재실행하지 않았습니다."
+            message = {"append": "기존 단계 뒤에 녹화를 추가했습니다.", "replace_selected": "선택 단계와 연결된 확인 단계를 새 녹화로 교체했습니다.", "replace_all": "전체 단계를 새 녹화로 교체했습니다."}[record_mode] + " 순서와 입력 내용을 검토한 뒤 저장하세요."
             if draft.recording_warnings: message = "일부 동작이 빠졌거나 확인되지 않은 부분 기록입니다. [누락 경고 확인]과 각 단계를 검토하세요."
         elif action == "reimport_recording":
             if payload:
@@ -1168,8 +1184,10 @@ class ProcessEditors:
         elif action in {"remove_step", "move_step"}:
             draft.change(action, payload)
         elif action == "save":
-            if set(payload) != {"name", "description"}:
+            if not {"name", "description"} <= set(payload) or set(payload) - {"name", "description", "save_mode"}:
                 raise OperationError("프로세스 이름과 설명을 입력하세요.")
+            save_mode = payload.get("save_mode", "update")
+            if save_mode not in {"update", "copy"}: raise OperationError("기존 작업 수정 또는 새 작업 저장을 선택하세요.")
             name = _text(payload["name"], "프로세스 이름", 100).strip()
             description = _text(payload["description"], "설명", 4000, empty=True)
             draft.validate(allow_pending=True)
@@ -1188,10 +1206,12 @@ class ProcessEditors:
                 "steps": draft.steps, "variables": draft.variables, **review}
             readiness = draft.readiness()
             if not readiness["runnable"]: save_args["draft"] = draft.draft_metadata()
-            if draft.task_id:
+            if draft.task_id and save_mode == "update":
                 from task_revision import TaskRevisions
                 saved = TaskRevisions(self.tasks).save({**save_args, "id": draft.task_id}, expected_revision=draft.revision)
             else:
+                # Task ID and history are independent. Step IDs remain local
+                # to this copied task so draft warning references stay intact.
                 saved = self.tasks.save(save_args)
             draft.task_id, draft.revision = saved["id"], saved.get("revision", 1)
             # TaskStore has already persisted independent image templates.
@@ -1254,8 +1274,13 @@ class ProcessEditors:
         """Read-only re-analysis into an atomic replacement of this import."""
         from replay_preflight import image_replay_preflight
         draft, runtime, recorded = copy.deepcopy(receipt["before"]), job["runtime"], receipt["data"]
+        if receipt.get("mode", "append") != "append":
+            draft.steps, draft.labels = [], []
+            draft.recording_warnings, draft._target_warning_steps = [], set()
+            draft._persistent_semantic_warning = False
+            draft.recording_acknowledged = True
         roots = [target for target in draft.programs if (target["program_id"], target.get("window_ref", "main")) not in
-                 {(step["program_id"], step["window_ref"]) for step in draft.steps if step["operation"] == "wait_for_window"}]
+                 {(step["program_id"], step["window_ref"]) for step in receipt["before"].steps if step["operation"] == "wait_for_window"}]
         snapshots = {}
         popup_targets = [item[0] for item in draft.recorded_windows(recorded.get("windows", [])).values()]
         recorded_events = copy.deepcopy(recorded.get("events"))
@@ -1284,6 +1309,30 @@ class ProcessEditors:
                     self._check(job)
         draft.recorded(recorded_events, snapshots=snapshots, warning_codes=recorded.get("warnings", []),
                        windows=recorded.get("windows", []), review_mode=receipt["review_mode"])
+        if receipt.get("mode") == "replace_selected":
+            prior = copy.deepcopy(receipt["before"])
+            for step in prior.steps: step.setdefault("step_id", uuid.uuid4().hex)
+            original_ids = [step.get("step_id") for step in prior.steps]
+            prior.change("remove_step", {"index": receipt["replace_index"]})
+            remaining_ids = {step.get("step_id") for step in prior.steps}
+            position = next(i for i, ident in enumerate(original_ids) if ident not in remaining_ids)
+            prior.steps[position:position] = draft.steps
+            prior.labels[position:position] = draft.labels
+            # Replacement recordings may introduce a new owned popup. Keep
+            # its binding alongside the untouched steps, rather than leaving
+            # an otherwise valid replacement with a missing target.
+            for target in draft.programs:
+                key = (target["program_id"], target.get("window_ref", "main"))
+                if key not in prior.targets:
+                    prior.targets[key] = copy.deepcopy(target)
+                    prior.programs.append(copy.deepcopy(target))
+            prior.recording_warnings = list(dict.fromkeys(prior.recording_warnings + draft.recording_warnings))
+            prior.recording_acknowledged = prior.recording_acknowledged and draft.recording_acknowledged
+            prior._target_warning_steps |= draft._target_warning_steps
+            prior._persistent_semantic_warning |= draft._persistent_semantic_warning
+            prior.recording_import_diagnostics = draft.recording_import_diagnostics
+            prior.validate(allow_pending=True)
+            draft = prior
         with self.lock:
             self._check(job)
             job["draft"] = draft
@@ -1643,7 +1692,7 @@ class ProcessEditors:
             self._write(request, {"nonce": nonce, "timeout_seconds": timeout, "programs": job["draft"].program_views(),
                                  "max_steps": MAX_RECIPE_STEPS,
                                  "visual_review_enabled": job.get("visual_review_enabled", False),
-                                 "draft": {"name": job["name"], "description": job["description"], "steps": job["summaries"], "recording_review": job["draft"].recording_review()}})
+                                 "draft": {"name": job["name"], "description": job["description"], "task_id": job["draft"].task_id, "steps": job["summaries"], "recording_review": job["draft"].recording_review()}})
             child = subprocess.Popen([str(helper), "--edit", str(request), str(response)], cwd=str(helper.parent),
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 close_fds=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0)

@@ -80,6 +80,11 @@ def stable_selector(snapshot, element):
     if type(element.get("element_index")) is not int or element["element_index"] < 0 or element.get("synthetic_ancestor"):
         raise LearningError("실제 관찰된 조작 요소만 학습할 수 있습니다.", "invalid_control")
     _fingerprint(element)
+    from semantic_targets import recorded_label_selector
+    semantic = recorded_label_selector(snapshot, element)
+    if semantic is not None:
+        validate_selector(semantic)
+        return semantic
     original = _elements(snapshot)
     safe_elements = [_identity(item) for item in original]
     # Numeric WinForms IDs are often per-launch handles. Prefer a name/role
@@ -125,6 +130,8 @@ def stable_selector(snapshot, element):
                         break
             parent = ancestor.get("parent_index")
     validate_selector(selector)
+    if str(selector.get("automation_id", "")).isdigit() or str(selector.get("within", {}).get("automation_id", "")).isdigit():
+        raise LearningError("현재 실행에서만 유효할 수 있는 숫자 ID입니다. 재실행 가능한 라벨 관계를 확인하지 못해 이미지 대상으로 보존합니다.", "unstable_control_identity")
     # Verify that sanitizing the projection did not manufacture a unique match.
     if _unique(snapshot, selector) is not element:
         raise LearningError("요소 선택 기준이 현재 화면과 일치하지 않습니다.", "target_mismatch")

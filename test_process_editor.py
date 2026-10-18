@@ -1387,6 +1387,55 @@ class EditorIPCTests(unittest.TestCase):
         self.assertEqual(self.runtime.mutations, [])
         self.status(job, cancel=True); self.terminal(job)
 
+    def test_recording_modes_replace_exact_group_and_preserve_other_steps(self):
+        self.context(); job = self.start()
+        event = {**image_choice(), "operation": "click", "program_id": "editor"}
+        with mock.patch("replay_preflight.image_replay_preflight", return_value={"ready_for_input": True}), \
+                mock.patch.object(self.editors, "_visual", side_effect=[{"events": [event], "nonce": str(i)} for i in range(4)]):
+            for mode in ("append", "append"):
+                self.assertEqual(self.command("record", {"mode": mode})["status"], "ok")
+            before = copy.deepcopy(self.editors.jobs[job["editor_id"]]["draft"].steps)
+            self.assertEqual(len(before), 4)
+            replaced = self.command("record", {"mode": "replace_selected", "index": 0})
+            self.assertEqual(replaced["status"], "ok", replaced)
+            after = self.editors.jobs[job["editor_id"]]["draft"].steps
+            self.assertEqual(len(after), 4)
+            self.assertEqual([{k: v for k, v in s.items() if k != "step_id"} for s in after[2:]], before[2:])
+            self.assertEqual(self.command("record", {"mode": "replace_all"})["status"], "ok")
+            self.assertEqual(len(self.editors.jobs[job["editor_id"]]["draft"].steps), 2)
+        self.status(job, cancel=True); self.terminal(job)
+
+    def test_failed_recording_replacement_keeps_old_draft(self):
+        self.context(); job = self.start()
+        event = {**image_choice(), "operation": "click", "program_id": "editor"}
+        with mock.patch("replay_preflight.image_replay_preflight", return_value={"ready_for_input": True}), \
+                mock.patch.object(self.editors, "_visual", return_value={"events": [event]}):
+            self.assertEqual(self.command("record", {})["status"], "ok")
+        before = copy.deepcopy(self.editors.jobs[job["editor_id"]]["draft"].steps)
+        with mock.patch("replay_preflight.image_replay_preflight", return_value={"ready_for_input": True}), \
+                mock.patch.object(self.editors, "_visual", side_effect=OperationError("cancelled")):
+            self.assertNotEqual(self.command("record", {"mode": "replace_all"})["status"], "ok")
+        self.assertEqual(self.editors.jobs[job["editor_id"]]["draft"].steps, before)
+        self.status(job, cancel=True); self.terminal(job)
+
+    def test_save_new_task_keeps_existing_task_and_revision_unchanged(self):
+        self.context(); job = self.start()
+        draft = self.editors.jobs[job["editor_id"]]["draft"]
+        draft.steps = [{"operation": "delay", "program_id": "editor", "duration_ms": 0}]
+        draft.labels = ["현재 창"]
+        first = self.command("save", {"name": "original", "description": ""})
+        self.assertEqual(first["status"], "ok", first)
+        original = copy.deepcopy(self.manager.tasks.get(first["saved_task"]["id"]))
+        atomic_json(self.paths["response"], {"nonce": self.nonce, "status": "saved"})
+        self.terminal(job)
+        self.child = Child(); self.seq = 0
+        job = self.start(task_id=original["id"])
+        copied = self.command("save", {"name": "copy", "description": "", "save_mode": "copy"})
+        self.assertEqual(copied["status"], "ok", copied)
+        self.assertNotEqual(copied["saved_task"]["id"], original["id"])
+        self.assertEqual(self.manager.tasks.get(original["id"]), original)
+        self.status(job, cancel=True); self.terminal(job)
+
     def test_recording_reserves_remaining_step_capacity_without_changing_configuration(self):
         self.context(); job = self.start()
         draft = self.editors.jobs[job["editor_id"]]["draft"]

@@ -175,6 +175,8 @@ internal static class ProcessEditor
         readonly Timer timer = new Timer();
         readonly Color ink = Color.FromArgb(24, 43, 72), blue = Color.FromArgb(37, 99, 235), muted = Color.FromArgb(92, 108, 132);
         readonly ComboBox program = new ComboBox(), action = new ComboBox(), expectProperty = new ComboBox(), expectBoolean = new ComboBox(), imageCompletion = new ComboBox(), checkedValue = new ComboBox();
+        readonly ComboBox saveMode = new ComboBox();
+        bool editingExisting;
         readonly Label selected = new Label(), expectSelected = new Label(), status = new Label(), valueCaption = new Label(), timeCaption = new Label(), timeUnit = new Label(), actionHelp = new Label();
         readonly TextBox value = new TextBox(), optionOrder = new TextBox(), expected = new TextBox(), processName = new TextBox(), description = new TextBox();
         readonly NumericUpDown seconds = new NumericUpDown();
@@ -289,7 +291,11 @@ internal static class ProcessEditor
             ButtonStyle(add, "AddStep", "이 동작을 다음 단계로 추가", Box(20, 507, 404, 38), true, left);
             var right = new Panel { BackColor = Color.White, Bounds = Box(488, 110, 548, 562) }; Controls.Add(right);
             right.Controls.Add(new Label { Text = "프로세스 이름", Bounds = Box(20, 18, 508, 25), ForeColor = muted, Font = new Font(Font.FontFamily, 9, FontStyle.Bold) });
-            processName.MaxLength = 100; Input(processName, "ProcessName", Box(20, 46, 508, 34), right);
+            processName.MaxLength = 100; Input(processName, "ProcessName", Box(20, 46, 290, 34), right);
+            ConfigureCombo(saveMode); Input(saveMode, "ProcessSaveMode", Box(320, 46, 208, 34), right);
+            saveMode.Items.Add(new Choice { Code = "update", Label = "기존 작업 수정" });
+            saveMode.Items.Add(new Choice { Code = "copy", Label = "새 작업으로 저장" });
+            saveMode.SelectedIndex = 1;
             right.Controls.Add(new Label { Text = "업무 설명 (선택 사항)", Bounds = Box(20, 93, 508, 25), ForeColor = muted, Font = new Font(Font.FontFamily, 9, FontStyle.Bold) });
             description.Multiline = true; description.MaxLength = 4000; description.ScrollBars = ScrollBars.Vertical; Input(description, "ProcessDescription", Box(20, 122, 508, 56), right);
             right.Controls.Add(new Label { Text = "실행 순서 · 두 번 클릭 / Enter로 대상 확인", Bounds = Box(20, 195, 508, 25), ForeColor = blue, Font = new Font(Font.FontFamily, 11, FontStyle.Bold) });
@@ -314,12 +320,12 @@ internal static class ProcessEditor
             expectProperty.SelectedIndexChanged += delegate { UpdateExpectFields(); };
             imageCompletion.SelectedIndexChanged += delegate { UpdateActionFields(); };
             pick.Click += delegate { Pick("action", false); }; pickImage.Click += delegate { Pick("action", true); }; pickExpect.Click += delegate { Pick("expect", false); }; add.Click += delegate { AddStep(); };
-            record.Click += delegate { Send("record", new Dictionary<string, object> { { "review_mode", CompletionMode == "visual" ? "visual" : "human" } }, null); if (busy) { hiddenForPicker = true; Hide(); } };
+            record.Click += delegate { StartRecording(); };
             reanalyzeRecording.Click += delegate { Send("reimport_recording", new Dictionary<string, object>(), null); };
             reviewRecording.Click += delegate { ShowRecordingReview(); };
             editInput.Click += delegate { if (steps.SelectedIndices.Count == 1) Send("preview_step", new Dictionary<string, object> { { "index", steps.SelectedIndices[0] } }, "edit"); };
             trial.Click += delegate { Send("test_run", new Dictionary<string, object> { { "name", processName.Text.Trim() }, { "description", description.Text } }, null); if (busy) { hiddenForPicker = true; Hide(); } };
-            save.Click += delegate { Send("save", new Dictionary<string, object> { { "name", processName.Text.Trim() }, { "description", description.Text } }, null); };
+            save.Click += delegate { Send("save", new Dictionary<string, object> { { "name", processName.Text.Trim() }, { "description", description.Text }, { "save_mode", ((Choice)saveMode.SelectedItem).Code } }, null); };
             cancel.Click += delegate { Finish("cancelled", null); };
             up.Click += delegate { MoveStep(-1); }; down.Click += delegate { MoveStep(1); };
             remove.Click += delegate { if (steps.SelectedIndices.Count == 1) Send("remove_step", new Dictionary<string, object> { { "index", steps.SelectedIndices[0] } }, null); };
@@ -333,6 +339,11 @@ internal static class ProcessEditor
             };
             program.SelectedIndex = 0; PopulateActions(); UpdateExpectFields();
             var draft = Map(request, "draft"); processName.Text = Str(draft, "name", ""); description.Text = Str(draft, "description", ""); UpdateSteps(List(draft, "steps")); SetRecordingReview(Map(draft, "recording_review")); UpdateButtons();
+            editingExisting = Str(draft, "task_id", "").Length > 0;
+            saveMode.SelectedIndex = editingExisting ? 0 : 1;
+            saveMode.Enabled = editingExisting;
+            saveMode.SelectedIndexChanged += delegate { UpdateButtons(); };
+            UpdateButtons();
             FormClosing += delegate(object sender, FormClosingEventArgs args) { if (!done) { args.Cancel = true; Finish("cancelled", null); } };
             Shown += delegate { BeginInvoke(new Action(delegate {
                 if (!Visible || !IsWindowVisible(Handle)) { Finish("startup_failed", new Dictionary<string, object> { { "code", "editor_not_visible" } }); return; }
@@ -408,6 +419,35 @@ internal static class ProcessEditor
                 selection = expectation = null; ShowThumbnail(null); selected.Text = "아직 선택한 요소가 없습니다"; expectSelected.Text = "확인할 요소를 선택하세요";
             }
             PopulateActions();
+        }
+        void StartRecording()
+        {
+            string mode = "append";
+            int index = steps.SelectedIndices.Count == 1 ? steps.SelectedIndices[0] : -1;
+            if (stepCount > 0) {
+                using (var dialog = new Form()) {
+                    dialog.Text = "녹화를 어디에 반영할까요?"; dialog.ClientSize = new Size(Px(530), Px(248));
+                    dialog.StartPosition = FormStartPosition.CenterParent; dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
+                    dialog.MaximizeBox = dialog.MinimizeBox = false; dialog.BackColor = Color.FromArgb(245,247,251);
+                    dialog.Font = Font;
+                    dialog.Controls.Add(new Label { Text = "기존 " + stepCount + "단계는 녹화를 마칠 때까지 유지됩니다.\n취소하거나 가져오기에 실패하면 바꾸지 않습니다.", Bounds = Box(22,18,486,50), ForeColor = ink });
+                    string[] codes = { "append", "replace_selected", "replace_all" };
+                    string[] titles = { "기존 단계 뒤에 추가", "선택한 단계 교체 · 연결된 확인 단계 포함", "전체 단계를 새 녹화로 교체" };
+                    string chosen = null;
+                    for (int i=0; i<codes.Length; i++) {
+                        string code = codes[i]; var button = new Button();
+                        ButtonStyle(button, "RecordMode_"+code, titles[i], Box(22,80+i*48,486,38), i==0, dialog);
+                        button.Enabled = code != "replace_selected" || index >= 0;
+                        button.Click += delegate { chosen=code; dialog.DialogResult=DialogResult.OK; dialog.Close(); };
+                    }
+                    if (dialog.ShowDialog(this) != DialogResult.OK || chosen == null) return;
+                    mode = chosen;
+                }
+            }
+            var payload = new Dictionary<string, object> { { "review_mode", CompletionMode == "visual" ? "visual" : "human" }, { "mode", mode } };
+            if (mode == "replace_selected") payload["index"] = index;
+            Send("record", payload, null);
+            if (busy) { hiddenForPicker=true; Hide(); }
         }
         void Pick(string purpose, bool image)
         {
@@ -765,7 +805,7 @@ internal static class ProcessEditor
             reanalyzeRecording.Enabled = !busy && connected;
             add.Enabled = !busy && stepCount < maximumSteps && ActionCode.Length > 0 && (!NeedsElement || selection != null) && (!NeedsExpect || expectation != null);
             save.Enabled = !busy && stepCount > 0 && processName.Text.Trim().Length > 0;
-            save.Text = pendingInputs || pendingRecordingReview ? "초안 저장 · 이어서 수정" : "프로세스 저장";
+            save.Text = pendingInputs || pendingRecordingReview ? "초안 저장 · 실행 불가" : editingExisting && saveMode.SelectedIndex == 0 ? "기존 작업 저장" : "새 작업 저장";
             trial.Enabled = save.Enabled && !pendingInputs && !pendingRecordingReview;
             reviewRecording.Enabled = !busy;
             int index = steps.SelectedIndices.Count == 1 ? steps.SelectedIndices[0] : -1;

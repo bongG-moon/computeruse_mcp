@@ -27,6 +27,11 @@ ANCESTOR_SELECTOR_SCHEMA = {
 SELECTOR_SCHEMA = copy.deepcopy(ANCESTOR_SELECTOR_SCHEMA)
 SELECTOR_SCHEMA["properties"]["within"] = dict(copy.deepcopy(ANCESTOR_SELECTOR_SCHEMA),
     description="One exact unique ancestor identified in the same UIA snapshot. Restricts matches to its descendants; nested within is not allowed.")
+SELECTOR_SCHEMA["properties"]["label"] = {"type": "object", "additionalProperties": False,
+    "required": ["text", "relation"], "properties": {
+        "text": {"type": "string", "minLength": 1, "maxLength": 200},
+        "relation": {"enum": ["uia_labeled_by", "rendered_preceding"]}},
+    "description": "Recorded label relationship, resolved anew in a fresh full observation. rendered_preceding requires a named within scope; geometry hints alone are not selectors."}
 ASSERTION_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "properties": {"selector": SELECTOR_SCHEMA,
@@ -68,13 +73,22 @@ OPERATION_SCHEMA = {
 
 
 def validate_selector(selector, allow_within=True):
-    permitted = {"name", "role", "automation_id"} | ({"within"} if allow_within else set())
+    permitted = {"name", "role", "automation_id"} | ({"within", "label"} if allow_within else set())
     if not isinstance(selector, dict) or not selector or set(selector) - permitted:
-        raise OperationError("selector에는 정확한 name, role, automation_id와 단일 부모 범위 within만 사용할 수 있습니다.")
-    if any(not isinstance(v, str) or not v.strip() or len(v) > 1000 for k, v in selector.items() if k != "within"):
+        raise OperationError("selector에는 정확한 name, role, automation_id 또는 검증된 label 관계와 단일 부모 범위 within을 사용할 수 있습니다.")
+    if any(not isinstance(v, str) or not v.strip() or len(v) > 1000 for k, v in selector.items() if k not in {"within", "label"}):
         raise OperationError("선택 기준은 1~1000자의 비어 있지 않은 문자열이어야 합니다.")
     unique_document = allow_within and selector.get("role") == "Document" and set(selector) <= {"role", "within"}
-    if not ({"name", "automation_id"} & set(selector)) and not unique_document:
+    if "label" in selector:
+        label = selector["label"]
+        if (not isinstance(label, dict) or set(label) != {"text", "relation"}
+                or not isinstance(label["text"], str) or not 1 <= len(label["text"].strip()) <= 200
+                or not isinstance(label["relation"], str)
+                or label["relation"] not in {"uia_labeled_by", "rendered_preceding"}
+                or not selector.get("role") or "automation_id" in selector
+                or (label["relation"] == "rendered_preceding" and not selector.get("within"))):
+            raise OperationError("라벨의 글자·관계·요소 종류와 상위 영역을 확인하세요.")
+    if not ({"name", "automation_id", "label"} & set(selector)) and not unique_document:
         raise OperationError("role만으로는 대상을 선택할 수 없습니다. name 또는 automation_id를 함께 지정하세요.")
     if "within" in selector:
         validate_selector(selector["within"], allow_within=False)
@@ -231,7 +245,7 @@ def _name(element):
 
 def _matches(element, selector):
     for key, value in selector.items():
-        if key == "within":
+        if key in {"within", "label"}:
             continue
         actual = _name(element) if key == "name" else element.get(key)
         if actual != value:
@@ -261,6 +275,9 @@ def _limited(snapshot, depth, count):
 
 def _find(snapshot, selector):
     found = [e for e in _elements(snapshot) if _matches(e, selector)]
+    if "label" in selector:
+        from semantic_targets import matches_label
+        found = [e for e in found if matches_label(snapshot, e, selector["label"])]
     if "within" in selector:
         ancestors = [e for e in _elements(snapshot) if _matches(e, selector["within"])]
         if len(ancestors) > 1:
@@ -540,6 +557,11 @@ class _Execution:
         request = dict(self.target if target is None else target, **self._handle(element, snapshot), **args)
         if name in ("click", "double_click", "right_click", "press_key", "hotkey"):
             request["delivery_mode"] = self.delivery
+        if name == "click" and getattr(self, "selection_target_delivery", False):
+            # Activation was completed and the ComboBox was re-resolved first.
+            # Driver foreground clicks can toggle a native dropdown twice.
+            # Use one targeted dispatch, never retry a previously sent click.
+            request["delivery_mode"] = "background"
         self._call(name, request, mutation=True)
 
     def _options(self, snapshot, selector, value):
@@ -1001,6 +1023,17 @@ class _Execution:
                         passed = self._verify(assertions, snapshot)
                         return self._result("verified" if passed else "failed", "verified" if passed else "verification_failed",
                                             "확인된 순서로 선택하고 완료 조건을 확인했습니다." if passed else "선택 후 완료 조건을 충족하지 못했습니다.")
+                    if self.delivery == "foreground":
+                        self._call("bring_to_front", dict(self.target), mutation=True)
+                        snapshot = self._observe([selector])
+                        element = _unique(snapshot, selector)
+                        if element.get("role") != "ComboBox":
+                            raise OperationError("활성화 후 선택 상자가 달라졌습니다.", "unsupported_control")
+                        if element.get("value") == self.step["value"] and not requires_change:
+                            passed = self._verify(assertions, snapshot)
+                            return self._result("verified" if passed else "failed", "already_satisfied" if passed else "verification_failed",
+                                                "활성화 후 현재 선택값과 완료 조건을 확인했습니다.")
+                        self.selection_target_delivery = True
                     options = self._options(snapshot, selector, self.step["value"])
                     option_target = self.target
                     if not options:
