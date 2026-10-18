@@ -22,10 +22,24 @@ class CheckpointReviews:
         self.process_factory, self.clock = process_factory, clock
         self.lock, self.jobs = threading.RLock(), {}
 
+    @staticmethod
+    def _helper_exited(job):
+        try:
+            return job['process'].poll() is not None
+        except (OSError, ValueError):
+            return False
+
+    def _prune_completed(self):
+        # Keep ownership even after a decision when the helper is still alive
+        # or its termination could not be confirmed.
+        completed = [key for key, job in self.jobs.items()
+                     if job['status'] not in {'starting', 'pending'} and self._helper_exited(job)]
+        for key in completed[:-39]:
+            del self.jobs[key]
+
     def open(self, runtime, record, images, arguments):
         with self.lock:
-            for old in [k for k, j in self.jobs.items() if j['status'] not in {'starting', 'pending'}][:-39]:
-                del self.jobs[old]
+            self._prune_completed()
             key = (getattr(runtime, 'id', None), record.get('run_id'), record.get('checkpoint', {}).get('id'))
             for identity, job in self.jobs.items():
                 if job['key'] == key:
@@ -150,6 +164,16 @@ class CheckpointReviews:
             if state not in {'starting', 'pending'}:
                 self._remove_pixels(job)
             return value
+
+    def pending(self, runtime=None):
+        """A terminal decision is not proof that its image viewer has exited."""
+        with self.lock:
+            for identity, job in self.jobs.items():
+                if runtime is not None and job['runtime'] is not runtime:
+                    continue
+                if not self._helper_exited(job):
+                    return identity
+        return None
 
     def stop(self, runtime=None):
         with self.lock:

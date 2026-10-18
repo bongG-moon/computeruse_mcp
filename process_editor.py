@@ -1194,6 +1194,15 @@ class ProcessEditors:
             else:
                 saved = self.tasks.save(save_args)
             draft.task_id, draft.revision = saved["id"], saved.get("revision", 1)
+            # TaskStore has already persisted independent image templates.
+            # Drafts and receipts whose normalization failed remain recoverable.
+            if readiness["runnable"]:
+                from artifact_lifecycle import mark_recording_saved
+                for receipt_id in job.get("imported_receipt_ids", ()):
+                    try:
+                        mark_recording_saved(runtime.run_dir, receipt_id, saved["id"])
+                    except (OSError, ValueError):
+                        extra["storage_notice"] = "프로세스는 저장됐습니다. 원본 정리 예약을 확인하지 못해 녹화 원본은 보존합니다."
             extra["saved_task"] = {"id": saved["id"], "name": saved["name"], "revision": draft.revision, "step_count": len(saved["steps"]), **readiness}
             message = ("프로세스를 저장했습니다. 실행할 수 있습니다." if readiness["runnable"] else
                        "초안을 저장했습니다 · 보완할 단계 " + str(readiness["unresolved_steps"]) + "개" + (" · 녹화 경고 확인 필요" if readiness["review_required"] else "") + ". 같은 프로세스를 다시 열어 이어서 수정할 수 있습니다.")
@@ -1278,6 +1287,7 @@ class ProcessEditors:
         with self.lock:
             self._check(job)
             job["draft"] = draft
+            job.setdefault("imported_receipt_ids", set()).add(receipt["id"])
             receipt["after"] = copy.deepcopy(draft)
             job["result"]["recording_import"] = {"receipt_id": receipt["id"],
                 "diagnostics": copy.deepcopy(draft.recording_import_diagnostics), "input_dispatched": False,

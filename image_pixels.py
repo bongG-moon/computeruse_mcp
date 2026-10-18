@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import struct
 import subprocess
 import tempfile
@@ -22,27 +23,66 @@ from operations import OperationError
 _UNSUPPORTED_NATIVE = set()
 
 
-def _native_crop(encoded, regions, *, helper=None):
+def _check_crop_path(path, *, file=False):
+    """Validate the original local path and every component before file I/O."""
+    from learning import ElementLibrary
+    if (not path.is_absolute() or str(path).startswith(('\\\\', '//')) or '..' in path.parts
+            or (os.name == 'nt' and any(':' in part for part in path.parts[1:]))):
+        raise OperationError('이미지 임시 폴더는 이 PC의 연결되지 않은 전체 경로여야 합니다.', 'unsafe_store')
+    for parent in reversed(path.parents):
+        ElementLibrary._reject_link(parent)
+        if parent.exists() and not parent.is_dir():
+            raise OperationError('이미지 임시 폴더의 경로가 올바르지 않습니다.', 'unsafe_store')
+    ElementLibrary._reject_link(path, file=file)
+    if not file and path.exists() and not stat.S_ISDIR(path.lstat().st_mode):
+        raise OperationError('이미지 임시 폴더의 종류가 올바르지 않습니다.', 'unsafe_store')
+
+
+def _crop_parent(run_dir):
+    """Keep screenshot-bearing IPC beside the owning session, not global TEMP."""
+    root = Path(run_dir)
+    _check_crop_path(root)
+    parent = root / 'image-crops'
+    _check_crop_path(parent)
+    parent.mkdir(parents=True, exist_ok=True)
+    _check_crop_path(parent)
+    return parent
+
+
+def _native_crop(encoded, regions, *, helper=None, runtime=None, run_dir=None):
     """Fixed local decoder; bounded files/process, no UI and no network.
 
     Older installed helpers lack --crop. Cache that version's absence and use
     the portable decoder; updating the helper automatically clears that fact.
     """
+    if runtime is not None and run_dir is not None:
+        raise OperationError('이미지 임시 폴더는 세션 또는 실행 폴더 중 하나로 지정하세요.', 'unsafe_store')
+    if runtime is not None:
+        run_dir = getattr(runtime, 'run_dir', None)
+        # Pure-function callers and small runtime test doubles can use the
+        # in-memory decoder without making an unowned screenshot temp file.
+        if run_dir is None: return None
     if os.name != 'nt': return None
     helper = Path(helper) if helper is not None else Path(__file__).with_name('Computer Use MCP 이미지 도구.exe')
+    _check_crop_path(helper, file=True)
     if not helper.is_file(): return None
-    from learning import ElementLibrary
-    ElementLibrary._reject_link(helper, file=True)
     stat = helper.stat()
     version = (str(helper), stat.st_mtime_ns, stat.st_size)
     if version in _UNSUPPORTED_NATIVE: return None
     nonce = uuid.uuid4().hex + uuid.uuid4().hex
     try:
-        with tempfile.TemporaryDirectory(prefix='computer-image-crop-') as directory:
+        parent = _crop_parent(run_dir) if run_dir is not None else None
+        with tempfile.TemporaryDirectory(prefix='crop-' if parent else 'computer-image-crop-', dir=parent) as directory:
             request, response = Path(directory)/'request.json', Path(directory)/'response.json'
-            request.write_text(json.dumps({'nonce': nonce, 'screenshot_png': encoded, 'regions': regions}), encoding='utf-8')
+            _check_crop_path(request, file=True)
+            with request.open('x', encoding='utf-8') as stream:
+                stream.write(json.dumps({'nonce': nonce, 'screenshot_png': encoded, 'regions': regions}))
+            _check_crop_path(request, file=True)
+            _check_crop_path(response, file=True)
             process = subprocess.run([str(helper), '--crop', str(request), str(response)], capture_output=True,
                 timeout=4, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            _check_crop_path(request, file=True)
+            _check_crop_path(response, file=True)
             if process.returncode == 2 and not response.is_file():
                 _UNSUPPORTED_NATIVE.clear(); _UNSUPPORTED_NATIVE.add(version)
                 return None
@@ -125,13 +165,13 @@ def validate_region(region, width, height, *, maximum=4096):
     return dict(region)
 
 
-def crop_regions(encoded, regions):
+def crop_regions(encoded, regions, *, runtime=None, run_dir=None):
     from image_targets import png_dimensions
     width, height = png_dimensions(encoded)
     if not isinstance(regions, list) or not 1 <= len(regions) <= 16:
         raise OperationError('이미지 영역은 1~16개로 지정하세요.', 'invalid_image_region')
     regions = [validate_region(region, width, height) for region in regions]
-    native = _native_crop(encoded, regions)
+    native = _native_crop(encoded, regions, runtime=runtime, run_dir=run_dir)
     if native is not None: return native
     width, height, color, channels, rows = decode_png(encoded)
     result = []
@@ -142,8 +182,8 @@ def crop_regions(encoded, regions):
     return result
 
 
-def crop_png(encoded, region):
-    return crop_regions(encoded, [region])[0]
+def crop_png(encoded, region, *, runtime=None, run_dir=None):
+    return crop_regions(encoded, [region], runtime=runtime, run_dir=run_dir)[0]
 
 
 def pixel_digest(encoded):
@@ -154,12 +194,12 @@ def pixel_digest(encoded):
     return digest.hexdigest()
 
 
-def target_from_region(encoded, region, *, anchor=None):
+def target_from_region(encoded, region, *, anchor=None, runtime=None, run_dir=None):
     """Create the same immutable image target used by recording and replay."""
     from image_targets import png_dimensions, validate_image_target
     width, height = png_dimensions(encoded)
     region = validate_region(region, width, height, maximum=512)
     return validate_image_target({'format': 'computer-image-target/v1',
-        'template_png': crop_png(encoded, region), 'width': region['width'], 'height': region['height'],
+        'template_png': crop_png(encoded, region, runtime=runtime, run_dir=run_dir), 'width': region['width'], 'height': region['height'],
         'anchor': anchor or {'x': .5, 'y': .5}, 'capture_window': {'width': width, 'height': height},
         'min_score': .98, 'ambiguity_margin': .03})

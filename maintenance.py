@@ -16,6 +16,8 @@ RUN_FILES = {"session.json", ".computer-use-active.json", "capabilities.json", "
              "actions.jsonl", "driver-stderr.log", "stop.flag"}
 SCHEMA_FILES = {"schema-session.json", "driver-stderr.log", "stop.flag"}
 CONSENT_FILE = re.compile(r"[a-f0-9]{64}\.(?:request|response|audit)\.json$")
+EMPTY_HELPER_DIRS = {"im", "visual", "learning", "process-editor", "image-crops", "recording-receipts"}
+CHECKPOINT_DIR = re.compile(r"checkpoint-review-[a-f0-9]{32}$")
 
 
 def _root(value: dict | str | Path) -> Path:
@@ -30,6 +32,18 @@ def _identity(path: Path) -> tuple:
     if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400 or info.st_nlink != 1:
         raise ValueError("일반 파일이 아니거나 다른 경로와 연결된 파일이 있습니다.")
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
+def _empty_directory_identity(path: Path) -> tuple:
+    """Recognize an empty owned helper directory without following links."""
+    if not _plain_chain(path):
+        raise ValueError("도우미 폴더에 연결 경로가 있어 보존합니다.")
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+        raise ValueError("도우미 폴더가 일반 폴더가 아니어서 보존합니다.")
+    if next(path.iterdir(), None) is not None:
+        raise ValueError("도우미 폴더의 녹화 원본 또는 임시 자료를 보존합니다. 빈 폴더만 정리합니다.")
+    return info.st_dev, info.st_ino, info.st_mtime_ns
 
 
 def _inspect_run(run: Path, root: Path) -> dict:
@@ -53,9 +67,13 @@ def _inspect_run(run: Path, root: Path) -> dict:
                 or not isinstance(owner.get("birth"), str) or not owner["birth"]
                 or not re.fullmatch(r"[a-f0-9]{64}", str(owner.get("token", "")))):
             raise ValueError("이 도구의 작업 소유 기록을 확인하지 못했습니다.")
-    files = []
+    files, empty_directories = [], []
     for item in sorted(run.iterdir()):
-        if item.name == "consent" and not schema_run:
+        if item.name == ".artifacts.json":
+            raise ValueError("자동 정리로 관리하는 작업입니다. 저장 원본은 자동 보관 정책에 따라 보존합니다.")
+        if not schema_run and (item.name in EMPTY_HELPER_DIRS or CHECKPOINT_DIR.fullmatch(item.name)):
+            empty_directories.append((item.name, _empty_directory_identity(item)))
+        elif item.name == "consent" and not schema_run:
             if not _plain_chain(item) or not item.is_dir():
                 raise ValueError("승인 기록 폴더가 일반 폴더가 아닙니다.")
             for detail in sorted(item.iterdir()):
@@ -66,9 +84,11 @@ def _inspect_run(run: Path, root: Path) -> dict:
             files.append((item.name, _identity(item)))
         else:
             raise ValueError("사용자 파일 또는 알 수 없는 파일이 있어 폴더를 보존합니다.")
-    fingerprint = hashlib.sha256(json.dumps(files, ensure_ascii=False).encode()).hexdigest()
+    fingerprint = hashlib.sha256(json.dumps({"files": files, "empty_directories": empty_directories},
+                                            ensure_ascii=False).encode()).hexdigest()
     return {"kind": "run", "path": str(run), "bytes": sum(identity[2] for _, identity in files),
-            "file_count": len(files), "fingerprint": fingerprint, "files": files}
+            "file_count": len(files), "fingerprint": fingerprint, "files": files,
+            "empty_directories": empty_directories}
 
 
 def _log_paths() -> tuple[Path, ...]:
@@ -132,6 +152,14 @@ def cleanup_completed_runs(config_or_state_dir: dict | str | Path, preview: dict
                 path.unlink()
                 result["deleted_bytes"] += check["bytes"]
             else:
+                # Only empty, unchanged helper directories are candidates. A
+                # recording or a temporary file needs its own lifecycle policy;
+                # this manual cleanup must never recursively remove one.
+                for relative, identity in check["empty_directories"]:
+                    directory = path / relative
+                    if _empty_directory_identity(directory) != tuple(identity):
+                        raise ValueError("확인 후 도우미 폴더가 바뀌어 나머지 기록을 보존했습니다.")
+                    directory.rmdir()
                 # Keep ownership and terminal state until all payload files are gone.
                 files = sorted(check["files"], key=lambda item: (item[0] in {"session.json", ".computer-use-active.json", "schema-session.json"}, item[0]))
                 for relative, identity in files:

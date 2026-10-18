@@ -100,6 +100,89 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(preview["candidate_count"], 0)
         self.assertEqual(preview["preserved_count"], 2)
 
+    def test_empty_owned_helper_directories_are_removed_with_completed_run(self):
+        run = self.run_record()
+        names = sorted(maintenance.EMPTY_HELPER_DIRS) + ["checkpoint-review-" + uuid.uuid4().hex]
+        for name in names:
+            (run / name).mkdir()
+        preview = maintenance.preview_cleanup(self.root)
+        self.assertEqual(preview["candidate_count"], 1)
+        candidate = preview["candidates"][0]
+        self.assertEqual({name for name, identity in candidate["empty_directories"]}, set(names))
+        result = maintenance.cleanup_completed_runs(self.root, preview)
+        self.assertEqual(result["deleted_count"], 1)
+        self.assertFalse(run.exists())
+
+    def test_nonempty_owned_helper_directories_keep_all_run_files(self):
+        for name in sorted(maintenance.EMPTY_HELPER_DIRS) + ["checkpoint-review-" + uuid.uuid4().hex]:
+            run = self.run_record()
+            folder = run / name
+            folder.mkdir()
+            (folder / "keep.json").write_text("synthetic raw recording")
+        preview = maintenance.preview_cleanup(self.root)
+        self.assertEqual(preview["candidate_count"], 0)
+        self.assertEqual(preview["preserved_count"], len(maintenance.EMPTY_HELPER_DIRS) + 1)
+        self.assertTrue(all((Path(row["path"]) / "actions.jsonl").is_file() for row in preview["preserved"]))
+
+    def test_new_helper_file_after_preview_preserves_entire_run(self):
+        run = self.run_record()
+        folder = run / "recording-receipts"
+        folder.mkdir()
+        preview = maintenance.preview_cleanup(self.root)
+        self.json(folder / "new-recording.json", {"keep": True})
+        result = maintenance.cleanup_completed_runs(self.root, preview)
+        self.assertEqual(result["deleted_count"], 0)
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertTrue((run / "actions.jsonl").exists())
+        self.assertTrue((folder / "new-recording.json").exists())
+
+    def test_helper_directory_inventory_changes_after_preview_are_preserved(self):
+        for change in ("added", "removed"):
+            with self.subTest(change=change):
+                run = self.run_record()
+                folder = run / "visual"
+                if change == "removed":
+                    folder.mkdir()
+                preview = maintenance.preview_cleanup(self.root)
+                preview["candidates"] = [item for item in preview["candidates"] if item["path"] == str(run)]
+                if change == "added":
+                    folder.mkdir()
+                else:
+                    folder.rmdir()
+                result = maintenance.cleanup_completed_runs(self.root, preview)
+                self.assertEqual(result["deleted_count"], 0)
+                self.assertTrue((run / "actions.jsonl").exists())
+
+    def test_helper_lookalikes_and_nested_directories_are_preserved(self):
+        for name in ("checkpoint-review-personal", "my-visual", "im"):
+            run = self.run_record()
+            folder = run / name
+            folder.mkdir()
+            if name == "im":
+                (folder / "nested").mkdir()
+        preview = maintenance.preview_cleanup(self.root)
+        self.assertEqual(preview["candidate_count"], 0)
+        self.assertEqual(preview["preserved_count"], 3)
+
+    def test_helper_link_chain_rejected_and_files_preserved(self):
+        run = self.run_record()
+        folder = run / "visual"
+        folder.mkdir()
+        plain_chain = maintenance._plain_chain
+        with patch.object(maintenance, "_plain_chain", side_effect=lambda path, **kwargs:
+                          False if Path(path) == folder else plain_chain(path, **kwargs)):
+            preview = maintenance.preview_cleanup(self.root)
+        self.assertEqual(preview["candidate_count"], 0)
+        self.assertTrue((run / "actions.jsonl").exists())
+
+    def test_artifact_lifecycle_marker_excludes_run_from_manual_cleanup(self):
+        run = self.run_record()
+        self.json(run / ".artifacts.json", {"owned": "synthetic"})
+        preview = maintenance.preview_cleanup(self.root)
+        self.assertEqual(preview["candidate_count"], 0)
+        self.assertIn("자동 정리", preview["preserved"][0]["reason"])
+        self.assertTrue((run / "actions.jsonl").exists())
+
     def test_changed_state_or_log_after_preview_is_preserved(self):
         for change in ("state", "payload"):
             with self.subTest(change=change):

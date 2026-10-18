@@ -179,7 +179,7 @@ class WorkflowVisualTargets:
                                  'target_recovery_observation_changed')
         region, scope = job['region'], job['scope']
         selected = [scope, region] if scope is not None else [region]
-        before, after = crop_regions(frame['png'], selected), crop_regions(current_png, selected)
+        before, after = crop_regions(frame['png'], selected, runtime=runtime), crop_regions(current_png, selected, runtime=runtime)
         if any(not _same_pixels(left, right) for left, right in zip(before, after)):
             raise OperationError('관찰 뒤 선택한 그림 또는 주변 문구가 바뀌었습니다.', 'target_recovery_observation_changed')
         if scope is None:
@@ -221,7 +221,7 @@ class WorkflowVisualTargets:
                         or scope['x']+scope['width'] < region['x']+region['width']
                         or scope['y']+scope['height'] < region['y']+region['height']):
                     raise OperationError('scope_region에는 대상과 구별할 주변 문구가 함께 포함되어야 합니다.', 'invalid_target_recovery')
-            job.update(region=region, scope=scope, image_target=target_from_region(frame['png'], region))
+            job.update(region=region, scope=scope, image_target=target_from_region(frame['png'], region, runtime=runtime))
             fresh = runtime.capture_checkpoint(target)
             self._window(job)
             images = [item for item in fresh.get('content', []) if item.get('type') == 'image']

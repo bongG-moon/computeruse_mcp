@@ -176,6 +176,14 @@ class SessionRuntime:
         self.fast_verification_enabled = False
         self.scoped_reader = None
         self.progress_callback = None
+        from artifact_lifecycle import initialize_run_artifacts
+        self.storage_notice = None
+        try:
+            initialize_run_artifacts(self.run_dir, task, self.id)
+        except (OSError, ValueError) as error:
+            # Unmarked records stay protected; a housekeeping failure must not
+            # invalidate an otherwise usable desktop session.
+            self.storage_notice = str(error)
 
     def report_progress(self, stage, **fields):
         callback = getattr(self, "progress_callback", None)
@@ -462,6 +470,7 @@ class SessionRuntime:
             return result
 
     def status(self):
+        from artifact_lifecycle import storage_status
         return {"session_id": self.id, "state": self.state, "reason": self.reason, "mode": self.mode,
                 "program_ids": [p["id"] for p in self.programs], "approval": self.config["approval"],
                 "approval_description": ("MCP 클라이언트의 승인에 의존합니다. 서버의 별도 승인 창은 생략합니다."
@@ -472,6 +481,7 @@ class SessionRuntime:
                 "log_detail": self.config.get("log_detail", "metadata"),
                 "actions_used": self.guard.action_count if self.guard is not None else 0,
                 "created_at": self.created_at, "run_dir": str(self.run_dir),
+                "storage": storage_status(self.run_dir), "storage_notice": self.storage_notice,
                 "emergency_hotkey_available": bool(getattr(self.emergency, "available", False))}
 
     def stop(self, reason="사용자가 화면 작업을 중지했습니다.", *, cause="requested_or_error"):

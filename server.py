@@ -503,6 +503,33 @@ class ComputerManager:
         self.process_editors.test_runner = lambda runtime, task, targets, **kwargs: self.workflows.run(
             runtime, task, {}, targets, delivery_mode="foreground", image_delivery_enabled=self.image_delivery.status()["delivery_mode"] == "vision", **kwargs)
         self.process_editors.visual_review_enabled = lambda runtime: self.image_delivery.status()["delivery_mode"] == "vision"
+        self.storage_cleanup = None
+        self._cleanup_storage()
+
+    def _cleanup_storage(self, runtime=None):
+        """Only seal owned files after all asynchronous helper owners exited."""
+        from artifact_lifecycle import cleanup_artifacts, mark_run_closed
+        try:
+            if (runtime is not None and getattr(runtime, "run_dir", None) is not None
+                    and getattr(runtime, "state", None) == "stopped"):
+                execution = getattr(runtime, "execution_lock", None)
+                # stop() is deliberately responsive and does not wait for a
+                # matching/crop subprocess. Its files stay owned until the
+                # entire execution finally block has released this lock.
+                already_owned = bool(execution and getattr(execution, "_is_owned", lambda: False)())
+                if execution is not None and not already_owned and execution.acquire(blocking=False):
+                    try:
+                        if (runtime.state == "stopped" and self.teachings.pending(runtime) is None
+                                and self.process_editors.pending(runtime) is None
+                                and self.checkpoint_reviews.pending(runtime) is None):
+                            mark_run_closed(runtime.run_dir)
+                    finally:
+                        execution.release()
+            self.storage_cleanup = cleanup_artifacts(self.config["state_dir"])
+        except (OSError, ValueError) as error:
+            self.storage_cleanup = {"status": "deferred", "message": str(error),
+                                    "records_preserved": True}
+        return self.storage_cleanup
 
     def status(self):
         from configuration_state import configuration_status
@@ -514,6 +541,7 @@ class ComputerManager:
                 "enabled_programs": sum(p.get("enabled", False) for p in self.config["programs"]),
                 "approval": self.config["approval"], "default_mode": self.config["mode"],
                 "log_detail": self.config.get("log_detail", "metadata"),
+                "storage_cleanup": self.storage_cleanup,
                 "observation_timeout_seconds": self.config.get("observation_timeout_seconds", 20),
                 "session": self.session.status() if self.session else None,
                 "activity": self.activity.snapshot(), "image_delivery": {**self.image_delivery.status(),
@@ -671,6 +699,7 @@ class ComputerManager:
                 raise SessionError("연결 갱신 도중 중지 요청이나 다른 연결 변경이 있어 이어가지 않았습니다.")
             if self.session is not None and self.session.state != "stopped":
                 raise SessionError("화면 작업이 이미 진행 중입니다. computer_end 후 새 작업을 시작하세요.")
+            self._cleanup_storage(self.session)
             current = self.runtime_factory(self.config, [enabled[i] for i in args["program_ids"]], mode, task,
                                            max_minutes=minutes, max_actions=actions, cancel_event=cancel_event)
             self.session = current
@@ -692,9 +721,12 @@ class ComputerManager:
         probe_stopped = self._close_probe(probe) if probe is not None else True
         teaching_pending = self.teachings.pending(current) is not None
         editor_pending = self.process_editors.pending(current) is not None
-        return {"stop_requested": True, "stopped": probe_stopped and not teaching_pending and not editor_pending and (current is None or current.state == "stopped"),
+        checkpoint_pending = self.checkpoint_reviews.pending(current) is not None
+        storage_cleanup = self._cleanup_storage(current)
+        return {"stop_requested": True, "stopped": probe_stopped and not teaching_pending and not editor_pending and not checkpoint_pending and (current is None or current.state == "stopped"),
                 "teaching_cleanup_pending": teaching_pending,
                 "editor_cleanup_pending": editor_pending,
+                "checkpoint_cleanup_pending": checkpoint_pending, "storage_cleanup": storage_cleanup,
                 "session": current.status() if current else None, "scope": "automation_session_only", "application_exit_checked": False}
 
     def close(self, reason="MCP 입력 연결이 닫혀 화면 작업을 중지했습니다.", timeout=10):
@@ -709,6 +741,7 @@ class ComputerManager:
             raise SessionError("요소 학습 중지를 요청했지만 도우미 정리를 확인하지 못했습니다.")
         if current is not None and not current.wait_stopped(timeout):
             raise SessionError("화면 작업 중지를 요청했지만 종료 상태 기록을 제한 시간 안에 확인하지 못했습니다.")
+        self._cleanup_storage(current)
 
     def call(self, name, args, cancel_event=None):
         if self.config.get("tool_profile") == "simple":

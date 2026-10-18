@@ -202,7 +202,7 @@ class InteractionEngine:
                         or scope_region['y']+scope_region['height'] < image_region['y']+image_region['height']
                         or scope_region == image_region):
                     raise OperationError('구별할 행의 문구가 포함되도록 대상보다 넓은 범위를 지정하세요.', 'invalid_image_scope')
-            template = target_from_region(frame['png'], image_region)
+            template = target_from_region(frame['png'], image_region, runtime=self.runtime)
             operation = step.pop('operation', None)
             if operation == 'set_value':
                 operation = 'type_text'; step['replace_all'] = True
@@ -211,14 +211,14 @@ class InteractionEngine:
             image_step = {**step, 'operation': 'image_'+operation, 'image_target': template}
             from image_steps import validate_image_step
             validate_image_step(image_step)
-            scope_png = crop_png(frame['png'], scope_region) if scope_region else None
+            scope_png = crop_png(frame['png'], scope_region, runtime=self.runtime) if scope_region else None
             def locate(image_target, current_png):
                 self.target(window_ref)
                 if (self.runtime.guard.image_geometry_resolver(target['window_id']) != frame['geometry']
                         or png_dimensions(current_png) != tuple(frame['image_size'][key] for key in ('width', 'height'))):
                     raise OperationError('화면 관찰 이후 창 위치나 배율이 달라졌습니다.', 'observation_geometry_changed')
                 if scope_region:
-                    current_scope, current_target = crop_regions(current_png, [scope_region, image_region])
+                    current_scope, current_target = crop_regions(current_png, [scope_region, image_region], runtime=self.runtime)
                     if not _same_pixels(scope_png, current_scope):
                         raise OperationError('선택한 행 또는 주변 문구가 바뀌었습니다. 다시 관찰하세요.', 'observation_scope_changed')
                 else:
@@ -227,7 +227,7 @@ class InteractionEngine:
                         return found
                     if found.get('rect') != image_region:
                         raise OperationError('관찰한 대상의 위치가 바뀌었습니다. 다른 행을 대신 누르지 않았습니다.', 'observation_target_moved')
-                    current_target = crop_png(current_png, image_region)
+                    current_target = crop_png(current_png, image_region, runtime=self.runtime)
                 if not _same_pixels(template['template_png'], current_target):
                     raise OperationError('관찰 이후 대상 그림이 바뀌었습니다. 새 화면을 읽으세요.', 'observation_target_changed')
                 return {'status': 'matched', 'score': 1.0, 'candidate_count': 1,
@@ -362,7 +362,8 @@ class InteractionEngine:
                   and png_dimensions(images[0].get('data')) == tuple(frame['image_size'][key] for key in ('width', 'height')))
         if usable:
             usable = (all(_same_pixels(before, after) for before, after in
-                          zip(crop_regions(frame['png'], evidence_regions), crop_regions(images[0]['data'], evidence_regions)))
+                          zip(crop_regions(frame['png'], evidence_regions, runtime=self.runtime),
+                              crop_regions(images[0]['data'], evidence_regions, runtime=self.runtime)))
                       if evidence_regions else _same_pixels(frame['png'], images[0]['data']))
         if not usable:
             raise OperationError('확인 중 화면 내용이 바뀌었습니다. 새 관찰로 결과만 다시 확인하세요.', 'review_observation_changed')
