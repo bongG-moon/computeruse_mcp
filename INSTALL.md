@@ -2,7 +2,7 @@
 
 사용 방법은 두 가지입니다. **말로 부탁해서 지금 화면을 조작하거나, 프로세스 편집창에서 직접 작업을 기록해 다시 실행합니다.** 사용자가 PID·창 번호·설정 파일을 다룰 필요는 없습니다.
 
-이 문서는 0.18.2의 사용 안내입니다. 배포 파일은 [v0.18.2 Release](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.18.2)에서 확인하세요. [변경 안내](CHANGES_0.18.2.html)와 [처음 따라 하는 안내](PROCESS_GUIDE.html)를 제공합니다. 사용자는 FlaUI나 Airtest를 직접 설치하지 않습니다.
+이 문서는 0.18.2의 사용 안내입니다. 배포 파일은 [v0.18.2 Release](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.18.2)에서 확인하세요. [변경 안내](CHANGES.html)와 [처음 따라 하는 안내](PROCESS_GUIDE.html)를 제공합니다. 사용자는 FlaUI나 Airtest를 직접 설치하지 않습니다.
 
 이전 0.18.0 이미지 처리 제한시간 수정의 확인 범위는 Chrome 실제 클릭 2개의 이미지 보존입니다. 새 전체 재생이나 전체 자동 검사 결과로 해석하지 마세요. [수정 뒤 결과와 남은 경고](VALIDATION.html#image-timeout-0180)를 확인할 수 있습니다.
 

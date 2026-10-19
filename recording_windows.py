@@ -103,7 +103,7 @@ def combo_list_owned_by(owner_id, list_id, pid):
     return related
 
 
-def execute_window_wait(runtime, step, bindings):
+def execute_window_wait(runtime, step, bindings, *, image_hint=None):
     validate_window_wait(step)
     began = time.monotonic()
     owner = bindings.get((step["program_id"], step["owner_ref"]))
@@ -124,7 +124,8 @@ def execute_window_wait(runtime, step, bindings):
         deadline = began + step.get("timeout_ms", 5000) / 1000
         while True:
             runtime.check_active()
-            state = probe.snapshot()
+            snapshot = getattr(probe, "transition_snapshot", probe.snapshot)
+            state = snapshot()
             if state.get("process_exited") or not state.get("target_present") or (state.get("creation_time"), state.get("executable")) != identity:
                 raise OperationError("팝업을 연 원래 프로그램이나 창이 없어졌습니다.", "window_owner_unavailable")
             rows = state.get("windows", [])
@@ -156,6 +157,13 @@ def execute_window_wait(runtime, step, bindings):
                 if not reasons: matches.append(row)
             result["observed_candidates"] = sorted(observed, key=lambda item: (
                 item["rejected_by"] != ["owner_mismatch"], len(item["rejected_by"])))[:10]
+            result["observation_summary"] = {
+                "scope": "top_level_and_child_hwnds" if callable(getattr(probe, "transition_snapshot", None)) else "top_level_hwnds",
+                "observed_count": len(observed), "returned_count": len(result["observed_candidates"]),
+                "truncated": len(observed) > 10,
+                "popup_absence_proven": False,
+                "uia_only_controls_scanned": False,
+            }
             result["candidates"] = [{key: row.get(key) for key in ("pid", "window_id", "title", "class_name")} for row in matches[:10]]
             if len(matches) > 1:
                 raise OperationError("같은 조건의 관련 팝업이 여러 개라 선택하지 않았습니다.", "recording_window_ambiguous")
@@ -168,12 +176,24 @@ def execute_window_wait(runtime, step, bindings):
                 return result
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                recovery = getattr(runtime, "recover_msaa_dropdown", None)
+                if image_hint and callable(recovery):
+                    recovered = recovery(owner, rows, image_hint, probe)
+                    runtime.check_active()
+                    fresh = probe.snapshot()
+                    if fresh.get("process_exited") or not fresh.get("target_present") or (fresh.get("creation_time"), fresh.get("executable")) != identity:
+                        raise OperationError("MSAA 확인 중 원래 창이 바뀌었습니다.", "window_owner_unavailable")
+                    if recovered:
+                        result.update(status="verified", task_verified=True, target=recovered,
+                                      accessibility_scope="msaa_list", verification_scope="msaa_list_and_saved_image",
+                                      business_result_verified=False)
+                        return result
                 result["missing_reason"] = "candidate_conditions_not_met" if observed else "no_same_process_popup_observed"
                 detail = ("제목·종류·프로세스·표시 조건이 일치하는 팝업은 있지만 등록된 창까지의 소유자·부모 연결을 확인하지 못했습니다. observed_candidates의 실제 owner_window_id와 expected_owner_window_id를 확인하세요."
                           if any(item["rejected_by"] == ["owner_mismatch"] for item in observed) else
                           "같은 프로그램의 다른 창은 관찰했지만 제목·종류·소유 관계·표시 조건이 일치하지 않습니다. observed_candidates의 rejected_by를 확인하세요."
                           if observed else "확인 시점에 같은 프로그램의 팝업 후보가 없습니다. 팝업이 잠깐 열렸다 닫힌 경우도 포함합니다.")
-                raise OperationError("조건에 맞는 관련 팝업을 찾지 못했습니다. " + detail + " 입력은 반복하지 않았습니다.", "recording_window_missing")
+                raise OperationError("조건에 맞는 관련 팝업을 찾지 못했습니다. " + detail + " 이 결과만으로 클릭 실패나 드롭다운이 열리지 않았다고 판단할 수 없습니다. HWND가 없는 접근성 목록은 이 창 검색에 포함되지 않습니다. 입력은 반복하지 않았습니다.", "recording_window_missing")
             runtime.stop_event.wait(min(.1, remaining))
     except Exception as error:
         result["diagnostic"] = {"code": getattr(error, "code", "recording_window_unavailable"), "message": str(error), "automatic_replay": False}

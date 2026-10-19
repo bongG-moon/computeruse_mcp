@@ -47,24 +47,26 @@ VISUAL_TOOLS_NAME = "Computer Use MCP 이미지 도구.exe"
 SCOPED_CONTROLS_NAME = "Computer Use MCP 빠른 확인.exe"
 CHECKPOINT_REVIEW_NAME = "Computer Use MCP 화면 확인.exe"
 APP_FILES = (
+    "msaa_dropdown.py",
     "artifact_lifecycle.py",
     "semantic_targets.py",
-    "CHANGES_0.18.2.html", "CHANGES_0.18.3.html", "CHANGES_0.18.4.html",
-    "airtest_backend.py", "AIRTEST-NOTICES.md", "CHANGES_0.18.0.html", "CHANGES_0.18.1.html", "APPREF_GUIDE.md",
+    
+    "airtest_backend.py", "AIRTEST-NOTICES.md", "APPREF_GUIDE.md",
     "easy_api.py", "interaction.py", "image_pixels.py", "task_inputs.py", "task_revision.py", "visual_review.py", "visual_targets.py", "builtin_programs.py", "hosted_windows.py",
     "server.py", "settings.py", "setup.py", "consent.py", "register.py", "README.html", "VALIDATION.html",
     "maintenance.py", "diagnostics.py", "install.py", "programs.py", "INSTALL.md", "vendor/__init__.py", "vendor/guard.py", "vendor/windows.py",
     "session_runtime.py", "configuration_state.py", "operations.py", "workflows.py", "inspection.py", "accessibility_tree.py", "closing.py", "close_actions.py", "privileges.py",
     "program_launch.py", "learning.py", "learning_picker.py", "teaching_sessions.py", "teaching_support.py", "process_editor.py", "process_steps.py", "image_targets.py", "image_steps.py",
-    "README.md", "DRIVER-BUNDLE.md", "CUA-DRIVER-LICENSE.md", "PROCESS_GUIDE.html", "REDESIGN_PLAN.html",
-    "scoped_controls.py", "repeat_profiles.py", "result_files.py", "CHANGES_0.12.0.html", "CHANGES_0.13.0.html",
+    "README.md", "DRIVER-BUNDLE.md", "CUA-DRIVER-LICENSE.md", "PROCESS_GUIDE.html", "CHANGES.html",
+    "scoped_controls.py", "repeat_profiles.py", "result_files.py", 
     "window_transitions.py", "program_registration.py",
-    "execution_progress.py", "image_delivery.py", "CHANGES_0.14.0.html", "CHANGES_0.14.1.html",
+    "execution_progress.py", "image_delivery.py", 
     "recording_windows.py",
-    "replay_preflight.py", "checkpoint_review.py", "CHANGES_0.15.0.html", "CHANGES_0.16.0.html", "CHANGES_0.17.0.html",
+    "replay_preflight.py", "checkpoint_review.py", 
 )
 OPTIONAL_APP_FILES = ()
 SOURCE_SUPPORT_FILES = (
+    "MsaaDropdown.cs", "test_msaa_dropdown.py", "fixtures/MsaaListFixture.cs", "tools/test_msaa_native.py",
     "test_semantic_targets.py",
     "test_artifact_lifecycle.py", "test_artifact_integration.py", "test_capture_temp_scope.py",
     "fixtures/ComplexBusiness018.cs", "fixtures/ComplexWeb018.html", "fixtures/RecordingCanvas018.cs",
@@ -345,6 +347,13 @@ def compile_scoped_controls(destination: Path) -> None:
         print(output.stdout.strip())
 
 
+def compile_msaa(destination: Path) -> None:
+    run_hidden([str(COMPILER), '/nologo', '/target:exe', '/platform:anycpu', '/optimize+', '/codepage:65001',
+                '/reference:System.dll', '/reference:System.Core.dll', '/reference:System.Web.Extensions.dll',
+                '/reference:' + str(COMPILER.parent / 'Accessibility.dll'),
+                '/out:' + str(destination), str(SOURCE / 'MsaaDropdown.cs')], cwd=SOURCE)
+
+
 def write_bundle_manifest(bundle: Path) -> None:
     entries = []
     for path in sorted(bundle.rglob("*")):
@@ -417,6 +426,7 @@ def main() -> int:
         compile_process_editor(staging / PROCESS_EDITOR_NAME)
         compile_visual_tools(staging / VISUAL_TOOLS_NAME)
         compile_scoped_controls(staging / SCOPED_CONTROLS_NAME)
+        compile_msaa(staging / 'Computer Use MCP MSAA 목록.exe')
         compile_checkpoint_review(staging / CHECKPOINT_REVIEW_NAME)
         result = run_hidden([str(python_root / "python.exe"), "-B", "-s", "-c", IMPORT_CHECK], cwd=staging, env=runtime_environment(python_root))
         print(result.stdout.strip())
@@ -452,6 +462,7 @@ def main() -> int:
     compile_process_editor(bundle / PROCESS_EDITOR_NAME)
     compile_visual_tools(bundle / VISUAL_TOOLS_NAME)
     compile_scoped_controls(bundle / SCOPED_CONTROLS_NAME)
+    compile_msaa(bundle / 'Computer Use MCP MSAA 목록.exe')
     compile_checkpoint_review(bundle / CHECKPOINT_REVIEW_NAME)
     result = run_hidden([str(runtime / "python.exe"), "-B", "-s", "-c", IMPORT_CHECK], cwd=bundle, env=runtime_environment(runtime))
     proof = json.loads(result.stdout)

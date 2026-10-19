@@ -504,6 +504,35 @@ class NativeProbeTests(unittest.TestCase):
         kernel.WaitForSingleObject.result = 0
         self.assertTrue(probe.snapshot()["process_exited"])
 
+    def test_transition_discovers_nested_children_without_changing_close_inventory(self):
+        probe, _, user = self.make_probe()
+        user.EnumChildWindows = WinFunction(callback=lambda hwnd, cb, arg: cb(200, arg) and cb(300, arg))
+        self.capture(probe)
+        self.assertEqual([r["window_id"] for r in probe.snapshot()["windows"]], [100])
+        self.assertEqual([r["window_id"] for r in probe.transition_snapshot()["windows"]], [100, 200, 300])
+
+    def test_transition_excludes_foreign_children_and_deduplicates(self):
+        probe, _, user = self.make_probe()
+        def pid(hwnd, ptr):
+            ptr._obj.value = 99 if hwnd == 300 else 42
+            return 7
+        user.GetWindowThreadProcessId.callback = pid
+        user.EnumChildWindows = WinFunction(callback=lambda hwnd, cb, arg: cb(100, arg) and cb(200, arg) and cb(200, arg) and cb(300, arg))
+        self.capture(probe)
+        self.assertEqual([r["window_id"] for r in probe.transition_snapshot()["windows"]], [100, 200])
+
+    def test_transition_truncation_cannot_prove_unique_popup(self):
+        probe, _, user = self.make_probe()
+        def many(hwnd, cb, arg):
+            for handle in range(200, 4400):
+                if not cb(handle, arg): break
+            return True
+        user.EnumChildWindows = WinFunction(callback=many)
+        self.capture(probe)
+        with self.assertRaises(ProbeError) as error:
+            probe.transition_snapshot()
+        self.assertEqual(error.exception.code, "transition_scan_limit")
+
     def test_popup_owner_parent_chain_includes_non_enumerated_hosted_child(self):
         probe, _, user = self.make_probe()
         user.GetWindow.callback = lambda hwnd, flag: {300:200}.get(hwnd, 0)

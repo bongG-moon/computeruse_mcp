@@ -422,14 +422,26 @@ class SessionRuntime:
         known = self.guard.policy.get('hosted_windows', [])
         return any(frame not in known for frame in discover(self.guard.policy['allowed_apps']))
 
+    def recover_msaa_dropdown(self, owner, rows, image_hint, probe):
+        from msaa_dropdown import recover
+        return recover(self, owner, rows, image_hint, probe)
+
     def image_action(self, step, target):
         """Only saved, validated image recipe steps can reach the private guard."""
         from image_targets import match_image, match_failure_message
         with self.execution_lock:
             self.check_active()
             last_match = {}
+            scope = getattr(self, "msaa_replay_target", None)
+            self.msaa_replay_target = None
             def compare(image_target, png):
-                matched = match_image(self, image_target, png)
+                if scope is not None:
+                    if scope != target:
+                        raise SessionError("MSAA 목록과 실행 대상이 다릅니다.")
+                    from msaa_dropdown import read_lists, match_lists
+                    matched = match_lists(self, image_target, png, read_lists(self, target))
+                else:
+                    matched = match_image(self, image_target, png)
                 last_match.clear(); last_match.update(matched)
                 return matched
             answer = self.guard.image_action(step, target,

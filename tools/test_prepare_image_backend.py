@@ -9,10 +9,15 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-from tools.prepare_image_backend import ARCHIVES, _checked_path, copy_runtime
+from tools.prepare_image_backend import ARCHIVES, _checked_path, copy_runtime, runtime_file
 
 
 class BackendCopyTests(unittest.TestCase):
+    def test_runtime_filter_keeps_execution_and_license_but_not_development(self):
+        for name in ['numpy/_core/a.pyd','numpy.libs/openblas.dll','PIL/Image.py','numpy/tests/LICENSE.txt']:
+            self.assertTrue(runtime_file(name),name)
+        for name in ['numpy/tests/test_numeric.py','numpy/_core/include/a.h','cv2/__init__.pyi','PIL/__pycache__/a.pyc']:
+            self.assertFalse(runtime_file(name),name)
     def setUp(self):
         self.temp = self.enterContext(tempfile.TemporaryDirectory())
         self.root = Path(self.temp)

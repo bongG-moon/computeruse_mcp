@@ -209,6 +209,28 @@ class WorkflowWindowTests(unittest.TestCase):
         self.assertTrue(final["task_verified"])
         self.assertEqual(actions, [10, 20])
 
+    def test_old_popup_recording_msaa_scope_survives_resume_without_reopening(self):
+        self.windows=[]
+        self.task['steps']=self.opened_popup_steps()+[
+            {'program_id':'editor','window_ref':'popup_1','operation':'image_click','image_target':image_target()},
+            {'program_id':'editor','operation':'checkpoint','return_from':'popup_1','message':'Confirm value'}]
+        original=copy.deepcopy(self.task)
+        self.runtime.recover_msaa_dropdown=mock.Mock(return_value={'pid':42,'window_id':10})
+        actions=[]
+        def action(spec,target):
+            actions.append((spec['operation'],copy.deepcopy(getattr(self.runtime,'msaa_replay_target',None))))
+            return {'task_verified':False,'input_dispatched':True,'verification_deferred':True}
+        self.runtime.image_action=action
+        self.runtime.capture_checkpoint=lambda target: {'structuredContent':target,'content':[{'type':'image','mimeType':'image/png','data':png()}]}
+        first=self.run_task(ScriptedOperations())
+        self.assertEqual(first['pending_step'],2)
+        second=self.run_task(ScriptedOperations(),resume_run_id=first['run_id'],acknowledge_checkpoint=first['checkpoint']['id'])
+        self.assertEqual(second['pending_step'],4)
+        final=self.run_task(ScriptedOperations(),resume_run_id=first['run_id'],acknowledge_checkpoint=second['checkpoint']['id'])
+        self.assertTrue(final['task_verified'])
+        self.assertEqual(actions,[('image_click',None),('image_click',{'pid':42,'window_id':10})])
+        self.assertEqual(self.task,original)
+
     def test_opened_popup_checkpoint_cannot_bypass_unknown_image_input(self):
         self.task["steps"] = self.opened_popup_steps()
         self.runtime.image_action = mock.Mock(return_value={"task_verified": False, "input_dispatched": None, "verification_deferred": False})

@@ -90,6 +90,15 @@ def build_runtime(archives: Path, destination: Path):
     return manifest
 
 
+def runtime_file(name):
+    """Exclude development payload, preserve binaries, modules and licenses."""
+    path = PurePosixPath(name)
+    if any(word in path.name.lower() for word in ('license', 'copying', 'notice')):
+        return True
+    return (not {'tests', 'test', '__pycache__', 'include'} & set(path.parts)
+            and path.suffix.lower() not in {'.pyi', '.pyc', '.pyo', '.h', '.hpp', '.pxd', '.pyx', '.pdb'})
+
+
 def copy_runtime(source: Path, destination: Path):
     """Release builder entry point: verify every payload file before copying."""
     source, destination = _checked_path(source), _checked_path(destination, allow_missing=True)
@@ -105,7 +114,8 @@ def copy_runtime(source: Path, destination: Path):
     if destination.exists():
         raise FileExistsError(destination)
     destination.mkdir(parents=True)
-    for name in [*manifest["files"], "BACKEND-MANIFEST.json"]:
+    selected = {name: digest for name, digest in manifest['files'].items() if runtime_file(name)}
+    for name in selected:
         target = destination/name
         target.parent.mkdir(parents=True, exist_ok=True)
         # Recheck immediately before copying instead of trusting the earlier
@@ -117,7 +127,10 @@ def copy_runtime(source: Path, destination: Path):
         shutil.copy2(item, target)
         if name != "BACKEND-MANIFEST.json" and hashlib.sha256(target.read_bytes()).hexdigest() != manifest["files"][name]:
             raise ValueError(f"Image backend changed during copying: {name}")
-    return {"files": len(manifest["files"]), "bytes": sum((destination/p).stat().st_size for p in manifest["files"])}
+    reduced = {**manifest, 'files': selected, 'distribution_profile': 'runtime-only',
+               'excluded_development_files': len(manifest['files'])-len(selected)}
+    (destination/'BACKEND-MANIFEST.json').write_text(json.dumps(reduced, indent=2)+'\n', encoding='utf-8')
+    return {"files": len(selected), "bytes": sum((destination/p).stat().st_size for p in selected)}
 
 
 if __name__ == "__main__":

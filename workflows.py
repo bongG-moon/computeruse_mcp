@@ -555,12 +555,23 @@ class WorkflowRunner:
         explicit_bindings = {key: dict(value) for key, value in bindings.items()}
         dynamic_keys = dynamic_window_keys([window_step(s) for s in steps])
         dynamic_definitions = {target_key(step): step for step in steps if step["operation"] == "wait_for_window"}
+        def popup_image_hint(definition):
+            # Reuse the original recording, never rewrite a stored recipe. Only
+            # the first input in that popup can establish the recovery identity.
+            after = False
+            for candidate in steps:
+                if candidate is definition: after = True; continue
+                if not after or target_key(candidate) != target_key(definition): continue
+                if candidate['operation'] == 'checkpoint': continue
+                return candidate.get('image_target') if candidate['operation'] in IMAGE_OPERATIONS else None
+            return None
         all_keys = {target_key(step) for step in steps} | {(step["program_id"], step["owner_ref"])
             for step in steps if step["operation"] == "wait_for_window"}
         if not (all_keys - dynamic_keys) <= set(bindings) or set(bindings) - all_keys:
             raise WorkflowError("작업 단계에 사용한 모든 프로그램/창 이름에 맞춰 현재 창을 지정하세요.")
 
         def resolve(item):
+            runtime.msaa_replay_target = None
             binding = bindings.get(target_key(item))
             dynamic_target = None
             if target_key(item) in dynamic_definitions:
@@ -568,10 +579,15 @@ class WorkflowRunner:
                 owner_item = {"program_id": item["program_id"], "window_ref": definition["owner_ref"]}
                 owner = resolve(owner_item)
                 bindings[target_key(owner_item)] = owner
-                answer = execute_window_wait(runtime, {**window_step(definition), "timeout_ms": 0}, bindings)
+                answer = execute_window_wait(runtime, {**window_step(definition), "timeout_ms": 0}, bindings,
+                                             image_hint=popup_image_hint(definition))
                 if answer.get("task_verified") is not True:
                     raise BindingError("저장한 소유 관계와 제목·종류에 맞는 팝업을 확인하지 못했습니다. 현재 창을 다시 지정하세요.")
                 dynamic_target = answer["target"]
+                if answer.get('accessibility_scope') == 'msaa_list':
+                    if item.get('operation') not in IMAGE_OPERATIONS | {'checkpoint', 'wait_for_window'}:
+                        raise BindingError('MSAA 복구 목록은 기존 이미지 단계만 실행할 수 있습니다.')
+                    runtime.msaa_replay_target = dict(dynamic_target)
                 # Automatically discovered HWNDs are transient observations.
                 # A recreated popup must be resolved again, not pinned forever.
                 # Explicit caller bindings remain constraints, never overwritten.
@@ -816,7 +832,7 @@ class WorkflowRunner:
                 if item["operation"] == "wait_for_window":
                     owner_item = {"program_id": item["program_id"], "window_ref": item["owner_ref"]}
                     bindings[target_key(owner_item)] = resolve(owner_item)
-                    answer = measured(execute_window_wait(runtime, {**window_step(item), "timeout_ms": 0}, bindings))
+                    answer = measured(execute_window_wait(runtime, {**window_step(item), "timeout_ms": 0}, bindings, image_hint=popup_image_hint(item)))
                     if answer.get("task_verified") is True:
                         bindings[target_key(item)] = answer["target"]
                         resolve(item)
@@ -1059,7 +1075,7 @@ class WorkflowRunner:
                         progress_event("waiting", index, item["operation"])
                         owner_item = {"program_id": item["program_id"], "window_ref": item["owner_ref"]}
                         bindings[target_key(owner_item)] = resolve(owner_item)
-                        latest = execute_window_wait(runtime, window_step(item), bindings)
+                        latest = execute_window_wait(runtime, window_step(item), bindings, image_hint=popup_image_hint(item))
                         if latest.get("task_verified") is True:
                             bindings[target_key(item)] = latest["target"]
                             progress_event("transition", index, item["operation"], resolve(item))

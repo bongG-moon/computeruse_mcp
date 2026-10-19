@@ -195,7 +195,11 @@ class NativeClosureProbe:
                 self.close()
                 raise
 
-    def snapshot(self):
+    def transition_snapshot(self):
+        """Include child HWNDs for dropdown discovery, without changing close proofs."""
+        return self.snapshot(include_children=True)
+
+    def snapshot(self, *, include_children=False):
         with self._lock:
             if self.handle is None:
                 raise ProbeError("probe_closed")
@@ -232,6 +236,38 @@ class NativeClosureProbe:
                     rows.append(self._window(hwnd))
             if present and self.window_id not in {row["window_id"] for row in rows}:
                 rows.append(self._window(self.window_id))
+            if include_children:
+                enum_children = self.user.EnumChildWindows
+                enum_children.argtypes = [wintypes.HWND, self.callback_type, wintypes.LPARAM]
+                enum_children.restype = wintypes.BOOL
+                seen = {row["window_id"] for row in rows}
+                children, errors = [], []
+                # EnumChildWindows already includes all descendants. Limit the
+                # whole scan, never treat a truncated inventory as unique.
+                @self.callback_type
+                def collect_child(hwnd, _):
+                    try:
+                        hwnd = int(hwnd)
+                        if hwnd in seen:
+                            return True
+                        seen.add(hwnd)
+                        if len(seen) > 4096:
+                            raise ProbeError("transition_scan_limit")
+                        if self.user.IsWindow(hwnd) and self._window_pid(hwnd) == self.pid:
+                            children.append(self._window(hwnd))
+                        return True
+                    except Exception as error:
+                        if isinstance(error, ProbeError) and not self.user.IsWindow(hwnd):
+                            # A transient dropdown may close during enumeration.
+                            # A still-existing unreadable control remains unknown.
+                            return True
+                        errors.append(error)
+                        return False
+                for root in list(rows):
+                    enum_children(root["window_id"], collect_child, 0)
+                    if errors:
+                        raise errors[0]
+                rows.extend(children)
             # Recheck after enumeration: transient races are unknown, not success.
             if self._process_exited():
                 return {"process_exited": True, "target_present": False, "windows": [],

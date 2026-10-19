@@ -39,6 +39,27 @@ class Runtime:
 
 
 class WindowBindingTests(unittest.TestCase):
+    def test_transition_inventory_finds_child_dropdown_without_repeating_click(self):
+        probe = Probe([])
+        state = probe.snapshot()
+        state["windows"].append(row(20, owner=30))
+        probe.transition_snapshot = mock.Mock(return_value=state)
+        probe.ownership_path = mock.Mock(return_value=[{"window_id":20}, {"window_id":30}, {"window_id":10}])
+        result = execute_window_wait(Runtime(probe), step(), {("editor", "main"): {"pid":42,"window_id":10}})
+        self.assertTrue(result["task_verified"])
+        self.assertEqual(result["target"]["window_id"], 20)
+        self.assertFalse(result["input_dispatched"])
+        self.assertEqual(result["observation_summary"]["scope"], "top_level_and_child_hwnds")
+
+    def test_diagnostic_sample_is_not_total_scan_or_absence_proof(self):
+        result = self.run_wait([row(i, class_name="Other") for i in range(100, 115)])
+        summary = result["observation_summary"]
+        self.assertEqual(summary["observed_count"], 15)
+        self.assertEqual(summary["returned_count"], 10)
+        self.assertTrue(summary["truncated"])
+        self.assertFalse(summary["popup_absence_proven"])
+        self.assertIn("클릭 실패", result["diagnostic"]["message"])
+
     def test_winforms_runtime_suffix_changes_but_kind_style_and_ownership_do_not(self):
         recorded = "WindowsForms10.Window.808.app.0.3d8c971_r10_ad1"
         current = "WindowsForms10.Window.808.app.0.ab123_r12_ad2"
