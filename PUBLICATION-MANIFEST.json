@@ -1,17 +1,17 @@
 {
   "format": 2,
   "product": "Computer-Use-MCP",
-  "version": "0.18.2",
-  "release_tag": "v0.18.2",
+  "version": "0.18.3",
+  "release_tag": "v0.18.3",
   "release_status": "release",
   "publication_note": "Generated from final release assets. Source bytes match the tested source ZIP exactly. Publication tooling is listed separately and is not part of the tested application payload. This manifest excludes itself to avoid a circular checksum.",
-  "source_snapshot_sha256": "d07d9b4655ec15718059618787bfbbf6823a0a98a3e322be62001302057ef5f7",
+  "source_snapshot_sha256": "2496ab96815b6524e76e8f0fccd161c85b282ec58ee001750b9ad8d48dbaabce",
   "source_files": {
     ".gitignore": "c06b98e06935c103e42cb3f512c1ab8a18e42037c697c7d7d7359afdb8e97214",
     "AIRTEST-NOTICES.md": "508d9c648dcc11106e850e7cb6f71d5639f01270252a12eda8c7b2fd80800c2c",
     "APPREF_GUIDE.md": "fa79b8e2d89115ecfc7cd06b8c1ff8dadb5697d2304cb23a41a3abd995efc87e",
     "AdministratorBridge.cs": "56dd5c12cbb5199fab020e58609dbb728ddd7d0d37537237695d2688151c4cf5",
-    "BUILD-MANIFEST.json": "733239b15d89c58bcf3786878e90f7a8c61ce9e4e61ce0575c17868ff3bfd804",
+    "BUILD-MANIFEST.json": "1f6131ad5087d324b338641a305cd56c99c871ceee7e6304d1f3ec1bde9e5060",
     "CHANGES_0.12.0.html": "7d314d83097ecb2a0c6850a3722e286039c17c288af159e97ff9920212bdcb1e",
     "CHANGES_0.13.0.html": "30adfeec7f5559ec618e366a036f3d40467a1c718575203997a1145439047b6d",
     "CHANGES_0.14.0.html": "883456a9138e9cca7d6fc99c5dbea87187ef0ec63d70c87b748c247ee72f68a0",
@@ -22,9 +22,10 @@
     "CHANGES_0.18.0.html": "fcc110bb89e5735d8dbc1a3ad3c0a280bf528442e3b0ea33f453da499a6e421c",
     "CHANGES_0.18.1.html": "53ff10fa5020f4e58f97c0bda216182422a35035c831a6fee67054fe0d94e04d",
     "CHANGES_0.18.2.html": "0cca1b64efd4a3e8ebaf18d56296fa73060ca4759ea768cd18af7ac6422da829",
+    "CHANGES_0.18.3.html": "76da6efac6fb1ef982993957fc4efc165c51f6c12a0d26b8affbc8399b316a1f",
     "CUA-DRIVER-LICENSE.md": "c0779290c1d4783169aa3dbfb55feb505e563ef8a004bbf55298ceffcfbda8d9",
-    "CheckpointReview.cs": "6efc72158c4542e05c088a66a5725711474035d8dc9bdb60f1e71270883146fa",
-    "DRIVER-BUNDLE-MANIFEST.json": "ac9c714ec51f22e76c2d91ac0d89759af4240e7f6add042f36f4d5d0b5d41632",
+    "CheckpointReview.cs": "3142ba2e5f8bb524bc2740cf56833e5688d676d621f2d7b9995fec1e2359b57c",
+    "DRIVER-BUNDLE-MANIFEST.json": "452c526114afe0f43a3df2a075e609c1eb01d2d87adcd26659062065f3a9f879",
     "DRIVER-BUNDLE.md": "61bac48e5c084341ab210154f4825fbbdf8b94cf108d007c724cfba509ce23d4",
     "ElementPicker.cs": "d60fee41b683f6a3caad278fcec3c847198e11a638b349f89fc9edfb2613966d",
     "FlaUIProbe.cs": "f36b5077ebee88a7c607ef55055104c4fc948e6dba6d5e916ad8a09298a40120",
@@ -33,7 +34,7 @@
     "PROCESS_GUIDE.html": "bd02974510b3dc73f1e45579bfb78a3c4700eb46d2cb3c66f32f7469f35edc10",
     "ProcessEditor.cs": "b692153f385d9ef1a2e8164d913447df5f30ed2df9558575ba2982520c84660d",
     "README.html": "b12ae2c42675edbfcb040a1692fce5f8771691c154db6876525479dc04468de7",
-    "README.md": "4c18a1bbb5bb241ca7e80797282407e60948301bf5683de918949d86424d0fb4",
+    "README.md": "36fb4c4f8bfe53c1f20a258ab64073186bfd0a5109c0a5cd11c0d0c1885034bc",
     "REDESIGN_PLAN.html": "5c8d3f8281ff54ac65d2b031d2af446a577f8eee1356317fae83f142c5735469",
     "ScopedControls.cs": "a69a0e9a7fd608396eb0b615051fc882d48f57639f2078680b7b06a3d283104b",
     "VALIDATION.html": "37566f3eeb55441f76c58ee09f279483f36917e0d375e1eb2cfc237a087cb2f4",
@@ -50,11 +51,11 @@
     "administrator_validation.py": "50928abbf954b1e82833ad744a9fc065645bcdcc797e6d58da79aa336fa6c714",
     "airtest_backend.py": "6b29c18a77d66cc15edb0fabaa4db43a507e0fcc62e5556e5b4ea3d170543529",
     "artifact_lifecycle.py": "c9a060c745709eb3e60807faec5ffe0cbfde7b7bfcf8d69062149ce38b96d0b6",
-    "build_portable.py": "331b0e4c6eff918ba5cba4c9d8da270d53a505fbfcb857664cf4f0d03bd58eda",
+    "build_portable.py": "2d6b509e6332db3b6244240f73de054c5dc19d7311837532e070786813587803",
     "builtin_programs.py": "6251ab60831d2319118c2535ed63b0fdb4ddfc0ddfeb4d8b2f72f64ab1fa0b8e",
-    "bundle_driver.py": "6eca70094c58fd0bb418c1193341124b8b7fcf49e194e472ca5857cd30cd9d36",
+    "bundle_driver.py": "be1b26f7aa02e2532a1bc6d233b4dd3cb43c6cdb88f8083a775a09acf34847a1",
     "capture_picker_fixture.py": "d0250a832991cce26d1f85bbde6ff300c1e792609599e3629d08e067edec532a",
-    "checkpoint_review.py": "a09e9269a02e96defe50c2ecf5b53f2375136458567ade56923961a35c5a1a7d",
+    "checkpoint_review.py": "e8b0a0f4e7460dbd58ba1cf23a077a528cecbd6eaaaf973058c95c878b5fdb46",
     "close_actions.py": "8059b28b834733941bcb524ab9069fed907a267106d83a784bb575b5b7617fc8",
     "closing.py": "95b08cc8956a80ac29eb57655094e998c8f09772413467004648fe5cfe1d8f34",
     "closure_validation.py": "786c8a2c06ace7b5711f90bf7cf972a62770d5f92e3f76230efbd18c1d619007",
@@ -97,7 +98,7 @@
     "program_registration.py": "687e95d5eda7a0e5f155f88e8f318ae1ac3ee0fa5c0bcb694fb3e3835e99b82d",
     "programs.py": "365a11ed59bd3cabce0e9dea8668f981c575a00e8864f5bdca3e681bd98d3eed",
     "recording_validation.py": "083dc5172ea4fdcba749fa5a61fd6e4aba7063cdbe091bd9f6cffa5a7b1acbd9",
-    "recording_windows.py": "728d536f603859c483c04d8e924efb575356d16aad4c0948f32c3108e93bbdbb",
+    "recording_windows.py": "424982f5c0476c9feb0081265cda6c601fb0495a3cd64bbaec35ee9e9725c156",
     "register.py": "be987b1ec88ef6e844efbc67f3a53901b0dcd686a131cc6c4c0e35f94c70a1d2",
     "repeat_profiles.py": "ce6a7243c422d060ecf74ced7b8243ade1b8662404afb7030ceaea680bccd7a1",
     "repeat_validation.py": "4d02c8af489798cec91a1faa3a3db5e7143434e7f61d69e01f810e949a61fba5",
@@ -108,7 +109,7 @@
     "semantic_targets.py": "1aeaccf047792f266ddbfd1eb300983fb433d51dddf25dfc3ca1f21a1dac812d",
     "server.py": "a77ce77898d963043ac876c531bfd76d5bc8509f18cd33344d5efa5143f8080d",
     "session_runtime.py": "1648247c3b7067a48ce39a685b91ccfc36cc466ad425a201ccbca9d15810586e",
-    "settings.py": "3cb0daa6f09416c80387b160cd046e68919bf79aa29660ef22cc50608ce06d39",
+    "settings.py": "f3cd24b06f8a86f1f080eaac11cc4d663d8c8d8ecf99fbe0764b9f36d45ed5a4",
     "setup.py": "cea6875f1394f3d52e8960938ddc7219be4d2f8240ac1d76aacb648583688f7e",
     "task_inputs.py": "22260f04cbb1b6740ea32de34f10a9a9ac59eac88dec9f6aa5c9a6e2a220a676",
     "task_revision.py": "9150d484517edba0844a2871838b6f2c77b7130bfece9a53bf82865f94e75c2f",
@@ -126,7 +127,7 @@
     "test_capture_geometry.py": "461cc767f78f3aa0581b1a845b458cd3272e6ad45f024c1f52bb3666f663c5ed",
     "test_capture_temp_scope.py": "d192c1ed0b5404df0f8fe093a8cead64ea6b600d6a06722d19eaa48313ab4373",
     "test_checkpoint_capture.py": "0d18265d916e063600cadf74d866ae42333f57d9e239088d6e095c7a4d670dea",
-    "test_client_compatibility.py": "3d382e63203679ae54e2e16f17db99ca94f549aabec65c95ee1ffbb0c3c75691",
+    "test_client_compatibility.py": "8209c663a93306bd4e6c48ea5a2f3475369aba8b6c690aedfc0083a8ff07462f",
     "test_close_actions.py": "cb64f7e336f1defc2480a6e93591d101feb4813fbcf221fef272562061f46dca",
     "test_close_tools.py": "f5b3e89794d85711aad702777737b64f9cc017ae6823f31594ba22d87280d3bf",
     "test_closing.py": "f5de13e2a2b6f63dba444bc70116435c9f25492b6d698bdeedf32941f2f5f6ed",
@@ -173,7 +174,7 @@
     "test_recording_hover.py": "82fce61f6620524ce0c8c82f34a5e9d011ecbbd6668e85de13d9bc629f7349d9",
     "test_recording_pointer_scope.py": "d36c18d92c20672dc41cd293d2de11c516cf203a220b2824898cb61981806fb9",
     "test_recording_reliability.py": "9c8f54726a0e4ef06e46d2e7e1e714e607bb057e3b6f564d036819a478f7c450",
-    "test_recording_windows.py": "2d4025ad0f16f65e65b9bac11b05ffd696123a3e326e1454e448ebc23ac9134f",
+    "test_recording_windows.py": "c6b3eaa033c06b4bb6cad41e1f88bbd52d4ee8f60b499d26ecc586f42cbacadf",
     "test_register.py": "8b0d52c8e3889498eb39884a91e68e5b737a0e6a70cc13afffc9433ff5e9722b",
     "test_register_upgrades.py": "70ddd1a25ece41e687ae31afe87f13f5047472b36e579424518f50ed56560eb8",
     "test_repeat_profiles.py": "48af43359aaa0ce72ea940c76dede833cdcc36d05e56d49c22f8c01b18c6360b",
@@ -200,7 +201,7 @@
     "test_workflow_contract012.py": "c0b7b2241ceef434e55451c8fc1476c404984eab43f5f17beed8ec25e6248e4c",
     "test_workflow_target_review.py": "3dc755253f022e242b4b8cc390271405e1e69da6e675a4c2f19470bbda3c3662",
     "test_workflow_visual_review.py": "44f66fd670664a9cf7f24d5cd962a0d57913770c9a53d7448eb641d4b7d44f7c",
-    "test_workflow_windows.py": "f1eef3ba5898b85cd48f981b4b3ab79d5aa1a8b3fd5c754b3940b30afbf9c594",
+    "test_workflow_windows.py": "2d4727b3b1c7f04bd70ddb76866bd2f985fe589c96f2e3bd481ebbce0f0b73a9",
     "test_workflows.py": "22ecced253f51d9b6bd1d97a0317aa80ef25a851ea5408ad6a7d7db22945c98e",
     "tools/ClickOnceFixture.cs": "888aa4863d9b6c2d898402d40f7b1595d486694df5cd82f8df3481c8d74e9c90",
     "tools/FLAUI_COMPARISON.md": "c25dcabd8adf448484c7ff90287b5096b525f8ec6c2ce965997bf5d803af1b1b",
@@ -224,7 +225,7 @@
     "visual_targets.py": "50853933501ab7d59fe7ab9b3108c86cb08faa5e21cb8726d83b71f04989bc7f",
     "visual_validation.py": "474e6a266403097259a633f0a55dd6d66f6fe1de51e572a6425ceff04ef6eb55",
     "window_transitions.py": "574774036c60153bcc73a1c26e48c8b0e6fbae0269ef28737e65bdf067277c29",
-    "workflows.py": "52083e6aa5b039c121fc6258b468a1f72e88067b986730c9d45f9c488a5be92c"
+    "workflows.py": "899177a1857f9f0e4f0ed8903a52ce78e745e064af2f29c2496499efbd1ec257"
   },
   "publication_support_files": {
     ".github/workflows/publication.yml": "6b6e949d1dad736814b2d86a19ed4cba613f0cf52bb51cbad78b76ec38538733",
@@ -239,29 +240,29 @@
       "sha256": "c0779290c1d4783169aa3dbfb55feb505e563ef8a004bbf55298ceffcfbda8d9"
     },
     {
-      "name": "Computer-Use-MCP-0.18.2-source.zip",
-      "size": 1352364,
-      "sha256": "9e33ec8dac363701679b4fa3bf9ddb5f2875e4228b065c2cffbe648954048007"
+      "name": "Computer-Use-MCP-0.18.3-source.zip",
+      "size": 1356456,
+      "sha256": "942857e852198fa91974f25ebebd55da64d9634e08d2af01c1b401d30e69e4fd"
     },
     {
-      "name": "Computer-Use-MCP-0.18.2-with-driver.zip",
-      "size": 102481607,
-      "sha256": "e9854ce36f7611e6a60bff8beb07eb7e4ea59431c795e9b3598357259d6359ed"
+      "name": "Computer-Use-MCP-0.18.3-with-driver.zip",
+      "size": 102484857,
+      "sha256": "137a3771cb810ffe96c5333c080689609cdf2ac78e81314c7fc0ed686a3da307"
     },
     {
-      "name": "Computer-Use-MCP-0.18.2.zip",
-      "size": 74492743,
-      "sha256": "cb2f305ee681cbafe22fe414f4a51f0b36b56c7856f3a34f4c6d36b27d67cddd"
+      "name": "Computer-Use-MCP-0.18.3.zip",
+      "size": 74495968,
+      "sha256": "bc01eb4964747250e9f98c93f66f6cd23c5ae28f4d3c07fdc85ee4dde357121f"
     },
     {
       "name": "DRIVER-BUNDLE-MANIFEST.json",
       "size": 1730,
-      "sha256": "ac9c714ec51f22e76c2d91ac0d89759af4240e7f6add042f36f4d5d0b5d41632"
+      "sha256": "452c526114afe0f43a3df2a075e609c1eb01d2d87adcd26659062065f3a9f879"
     },
     {
       "name": "SHA256SUMS.txt",
       "size": 570,
-      "sha256": "0a1eb1cc2e62203539d252536c6e9f74e31aaf3fa125ee95bc17a2edeb52f7d6"
+      "sha256": "12b172e6e89ed81ff019cba257f41e3d74da329c00e03a26545aa9eb5208e616"
     },
     {
       "name": "cua-driver.exe",

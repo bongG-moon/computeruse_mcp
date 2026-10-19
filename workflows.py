@@ -883,6 +883,7 @@ class WorkflowRunner:
                 save("needs_review")
                 return {**record, "last_result": captured,
                         "checkpoint": {**checkpoint, "message": item["message"], "human_review_required": True,
+                                       **({"preserve_target_focus": True} if item.get("opened_from") else {}),
                                        "image_verified": False},
                         "checkpoint_content": images,
                         "next_step": ("이미지를 확인한 뒤 같은 run_id와 checkpoint.id를 acknowledge_checkpoint로 지정해 이어가세요. 승인 없이 다음 단계는 실행하지 않습니다."

@@ -6,7 +6,7 @@ from unittest import mock
 
 from operations import OperationError
 from process_editor import ProcessDraft
-from recording_windows import dynamic_window_keys, execute_window_wait, validate_window_wait
+from recording_windows import dynamic_window_keys, execute_window_wait, validate_window_wait, popup_class_matches
 from test_learning import TARGET
 from test_process_editor import image_choice
 
@@ -39,6 +39,34 @@ class Runtime:
 
 
 class WindowBindingTests(unittest.TestCase):
+    def test_winforms_runtime_suffix_changes_but_kind_style_and_ownership_do_not(self):
+        recorded = "WindowsForms10.Window.808.app.0.3d8c971_r10_ad1"
+        current = "WindowsForms10.Window.808.app.0.ab123_r12_ad2"
+        self.assertTrue(popup_class_matches(recorded, current))
+        for other in (current.replace(".808.", ".909."), current.replace(".Window.", ".EDIT."), current + "junk", "WindowsForms10.Window"):
+            self.assertFalse(popup_class_matches(recorded, other))
+        for candidates, verified, code in (
+            ([row(20, title="", class_name=current)], True, None),
+            ([row(20, title="", class_name=current, owner=99)], False, "recording_window_missing"),
+            ([row(20, title="", class_name=current, pid=43)], False, "recording_window_missing"),
+            ([row(20, title="", class_name=current), row(21, title="", class_name=recorded)], False, "recording_window_ambiguous"),
+        ):
+            result = execute_window_wait(Runtime(Probe(candidates)), step(title="", class_name=recorded),
+                                         {("editor", "main"): {"pid":42, "window_id":10}})
+            self.assertEqual(result["task_verified"], verified)
+            self.assertFalse(result["input_dispatched"])
+            if code: self.assertEqual(result["diagnostic"]["code"], code)
+            else:
+                self.assertEqual(result["class_match"], "winforms_runtime_suffix")
+                self.assertFalse(result["business_result_verified"])
+
+    def test_missing_popup_reports_why_visible_candidates_did_not_bind(self):
+        result = self.run_wait([row(20, class_name="WrongClass"), row(21, owner=99)])
+        self.assertEqual(result["missing_reason"], "candidate_conditions_not_met")
+        self.assertEqual(result["observed_candidates"][0]["rejected_by"], ["class_mismatch"])
+        self.assertEqual(result["observed_candidates"][1]["rejected_by"], ["owner_mismatch"])
+        self.assertEqual(self.run_wait([])["missing_reason"], "no_same_process_popup_observed")
+
     def run_wait(self, windows, **extra):
         probe = Probe(windows, **extra); runtime = Runtime(probe)
         result = execute_window_wait(runtime, step(), {("editor", "main"): {"pid": 42, "window_id": 10}})

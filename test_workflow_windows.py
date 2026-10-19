@@ -159,11 +159,38 @@ class WorkflowWindowTests(unittest.TestCase):
         self.assertFalse(first["task_verified"])
         self.assertEqual(first["pending_step"], 2)
         self.assertTrue(first["checkpoint"]["capture_available"])
+        self.assertTrue(first["checkpoint"]["preserve_target_focus"])
         self.assertEqual(captures, [{"pid": 42, "window_id": 20}])
         done = self.run_task(ScriptedOperations(), resume_run_id=first["run_id"], acknowledge_checkpoint=first["checkpoint"]["id"])
         self.assertTrue(done["task_verified"])
         self.assertFalse(done["checkpoint_images_verified"])
         self.assertEqual(self.runtime.image_action.call_count, 1)
+
+    def test_custom_winforms_popup_replay_selects_then_returns_without_reopening(self):
+        self.task["steps"] = self.opened_popup_steps() + [
+            {"program_id":"editor", "window_ref":"popup_1", "operation":"image_click", "image_target":image_target()},
+            {"program_id":"editor", "operation":"checkpoint", "return_from":"popup_1", "message":"Confirm selected value"}]
+        self.task["steps"][1].update(title="", class_name="WindowsForms10.Window.808.app.0.3d8c971_r10_ad1")
+        self.windows = [row(20, title="", class_name="WindowsForms10.Window.808.app.0.ab123_r12_ad2")]
+        actions = []
+        def action(step, target):
+            actions.append(target["window_id"])
+            if target["window_id"] == 20:
+                self.windows = []
+                self.runtime.guard.window_resolver = lambda hwnd: 42 if hwnd == 10 else 0
+            return {"task_verified":False, "input_dispatched":True, "verification_deferred":True}
+        self.runtime.image_action = action
+        self.runtime.capture_checkpoint = lambda target: {"structuredContent":target,
+            "content":[{"type":"image", "mimeType":"image/png", "data":png()}]}
+        first = self.run_task(ScriptedOperations())
+        self.assertEqual(first["pending_step"], 2)
+        self.assertTrue(first["checkpoint"]["preserve_target_focus"])
+        second = self.run_task(ScriptedOperations(), resume_run_id=first["run_id"], acknowledge_checkpoint=first["checkpoint"]["id"])
+        self.assertEqual(second["pending_step"], 4)
+        self.assertNotIn("preserve_target_focus", second["checkpoint"])
+        final = self.run_task(ScriptedOperations(), resume_run_id=first["run_id"], acknowledge_checkpoint=second["checkpoint"]["id"])
+        self.assertTrue(final["task_verified"])
+        self.assertEqual(actions, [10, 20])
 
     def test_opened_popup_checkpoint_cannot_bypass_unknown_image_input(self):
         self.task["steps"] = self.opened_popup_steps()

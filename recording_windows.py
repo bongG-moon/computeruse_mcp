@@ -8,6 +8,18 @@ import os
 from operations import OperationError
 
 REF = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
+# WinForms app-domain suffixes are runtime identities, not durable selectors.
+# Keep the control kind/style intact; this is NOT a general prefix match.
+WINFORMS_CLASS = re.compile(r"(WindowsForms10\.[A-Za-z0-9_]+\.[0-9a-fA-F]+)\.app\.0\.[0-9a-fA-F]+_r[0-9]+_ad[0-9]+\Z")
+
+
+def popup_class_matches(expected, actual):
+    if expected == actual:
+        return True
+    if not isinstance(expected, str) or not isinstance(actual, str):
+        return False
+    left, right = WINFORMS_CLASS.fullmatch(expected), WINFORMS_CLASS.fullmatch(actual)
+    return bool(left and right and left[1] == right[1])
 
 
 def validate_window_wait(step):
@@ -97,7 +109,7 @@ def execute_window_wait(runtime, step, bindings):
     owner = bindings.get((step["program_id"], step["owner_ref"]))
     probe = None
     result = {"operation": "wait_for_window", "status": "unknown", "task_verified": False,
-              "input_dispatched": False, "checks": [], "candidates": []}
+              "input_dispatched": False, "checks": [], "candidates": [], "observed_candidates": []}
     try:
         if not isinstance(owner, dict) or set(owner) != {"pid", "window_id"}:
             raise OperationError("먼저 원래 창의 현재 연결을 확인하세요.", "window_owner_unavailable")
@@ -120,21 +132,39 @@ def execute_window_wait(runtime, step, bindings):
                 current_owner = next((row for row in rows if row.get("window_id") == owner["window_id"]), {})
                 if any(current_owner.get(key) != initial_owner.get(key) for key in ("pid", "class_name", "thread_id")):
                     raise OperationError("기다리는 동안 원래 창의 소유 정보가 바뀌었습니다.", "window_owner_unavailable")
-            matches = [row for row in rows if row.get("pid") == owner["pid"] and row.get("window_id") != owner["window_id"]
-                       and row.get("visible") is True and row.get("title") == step["title"]
-                       and row.get("class_name") == step["class_name"] and (owned_by(row, owner["window_id"], rows)
-                       or (row.get("class_name") == "ComboLBox" and combo_list_owned_by(owner["window_id"], row["window_id"], owner["pid"])))]
+            matches, observed = [], []
+            for row in rows:
+                if row.get("pid") != owner["pid"] or row.get("window_id") == owner["window_id"]:
+                    continue
+                reasons = []
+                if row.get("visible") is not True: reasons.append("not_visible")
+                if row.get("title") != step["title"]: reasons.append("title_mismatch")
+                if not popup_class_matches(step["class_name"], row.get("class_name")): reasons.append("class_mismatch")
+                related = owned_by(row, owner["window_id"], rows)
+                if not related and not reasons and row.get("class_name") == "ComboLBox":
+                    related = combo_list_owned_by(owner["window_id"], row["window_id"], owner["pid"])
+                if not related: reasons.append("owner_mismatch")
+                if len(observed) < 10:
+                    observed.append({**{key: row.get(key) for key in ("window_id", "title", "class_name", "visible")},
+                                     "rejected_by": reasons})
+                if not reasons: matches.append(row)
+            result["observed_candidates"] = observed
             result["candidates"] = [{key: row.get(key) for key in ("pid", "window_id", "title", "class_name")} for row in matches[:10]]
             if len(matches) > 1:
                 raise OperationError("같은 조건의 관련 팝업이 여러 개라 선택하지 않았습니다.", "recording_window_ambiguous")
             if len(matches) == 1:
                 target = {key: matches[0][key] for key in ("pid", "window_id")}
                 runtime.check_active()
-                result.update(status="verified", task_verified=True, target=target)
+                result.update(status="verified", task_verified=True, target=target,
+                              class_match="exact" if matches[0]["class_name"] == step["class_name"] else "winforms_runtime_suffix",
+                              verification_scope="owned_window_presence_only", business_result_verified=False)
                 return result
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise OperationError("기다린 관련 팝업이 나타나지 않았습니다. 입력은 반복하지 않았습니다.", "recording_window_missing")
+                result["missing_reason"] = "candidate_conditions_not_met" if observed else "no_same_process_popup_observed"
+                detail = ("같은 프로그램의 다른 창은 관찰했지만 제목·종류·소유 관계·표시 조건이 일치하지 않습니다. observed_candidates의 rejected_by를 확인하세요."
+                          if observed else "확인 시점에 같은 프로그램의 팝업 후보가 없습니다. 팝업이 잠깐 열렸다 닫힌 경우도 포함합니다.")
+                raise OperationError("조건에 맞는 관련 팝업을 찾지 못했습니다. " + detail + " 입력은 반복하지 않았습니다.", "recording_window_missing")
             runtime.stop_event.wait(min(.1, remaining))
     except Exception as error:
         result["diagnostic"] = {"code": getattr(error, "code", "recording_window_unavailable"), "message": str(error), "automatic_replay": False}

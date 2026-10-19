@@ -173,6 +173,18 @@ class CheckpointReviewTests(unittest.TestCase):
         self.assertFalse(self.reviews.acknowledgement(self.runtime, 'run1', 'another')['human_reviewed'])
         self.assertFalse((self.reviews.jobs[started['review_id']]['folder'] / 'screen.png').exists())
 
+    def test_popup_review_preserves_focus_without_granting_confirmation(self):
+        self.record['checkpoint']['preserve_target_focus'] = True
+        started = self.start()
+        request = json.loads((self.reviews.jobs[started['review_id']]['folder'] / 'request.json').read_text(encoding='utf-8'))
+        self.assertIs(request['preserve_target_focus'], True)
+        self.assertFalse(self.reviews.acknowledgement(self.runtime, 'run1', 'check1')['human_reviewed'])
+
+    def test_normal_review_does_not_request_noactivation(self):
+        started = self.start()
+        request = json.loads((self.reviews.jobs[started['review_id']]['folder'] / 'request.json').read_text(encoding='utf-8'))
+        self.assertIs(request['preserve_target_focus'], False)
+
     def test_rejection_and_invalid_nonce_never_authorize_resume(self):
         for state, changes in [('rejected', {}), ('confirmed', {'nonce': '0'*64})]:
             self.record['checkpoint']['id'] += 'x'

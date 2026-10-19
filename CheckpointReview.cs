@@ -32,9 +32,23 @@ internal static class CheckpointReview
     {
         readonly string folder, nonce, id; bool finished; readonly Timer timer = new Timer(); readonly Image picture;
         readonly DateTime expires = DateTime.UtcNow.AddMinutes(10);
+        readonly bool preserveTargetFocus;
+        protected override bool ShowWithoutActivation { get { return preserveTargetFocus; } }
+        protected override CreateParams CreateParams {
+            get { var value = base.CreateParams; if (preserveTargetFocus) value.ExStyle |= 0x08000000; return value; }
+        }
+        protected override void WndProc(ref Message message) {
+            // MA_NOACTIVATE keeps auto-dismiss dropdowns alive while the human
+            // clicks the review buttons. Never acknowledge on the user's behalf.
+            if (preserveTargetFocus && message.Msg == 0x0021) { message.Result = new IntPtr(3); return; }
+            base.WndProc(ref message);
+        }
         internal ReviewWindow(string dir, Dictionary<string, object> request, string token, string identity)
         {
             folder = dir; nonce = token; id = identity;
+            object preserve;
+            preserveTargetFocus = request.TryGetValue("preserve_target_focus", out preserve) && preserve is bool && (bool)preserve;
+            if (preserveTargetFocus) { TopMost = true; ShowInTaskbar = false; }
             Text = "작업 결과 확인 · Computer Use MCP"; BackColor = Color.FromArgb(244,247,252);
             AutoScaleMode = AutoScaleMode.None;
             Font = new Font("Malgun Gothic", 10);

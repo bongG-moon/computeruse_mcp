@@ -66,6 +66,7 @@ class CheckpointReviews:
                 nonce = secrets.token_hex(32)
                 (folder / 'screen.png').write_bytes(pixels)
                 request = {'nonce': nonce, 'review_id': identity,
+                           'preserve_target_focus': record['checkpoint'].get('preserve_target_focus') is True,
                            'message': str(record['checkpoint'].get('message', '작업 결과를 확인하세요.'))[:2000]}
                 atomic_json(folder / 'request.json', request)
                 child = self.process_factory([str(helper), str(folder / 'request.json')], shell=False,
