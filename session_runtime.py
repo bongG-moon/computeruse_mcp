@@ -424,11 +424,22 @@ class SessionRuntime:
 
     def image_action(self, step, target):
         """Only saved, validated image recipe steps can reach the private guard."""
-        from image_targets import match_image
+        from image_targets import match_image, match_failure_message
         with self.execution_lock:
             self.check_active()
+            last_match = {}
+            def compare(image_target, png):
+                matched = match_image(self, image_target, png)
+                last_match.clear(); last_match.update(matched)
+                return matched
             answer = self.guard.image_action(step, target,
-                lambda image_target, png: match_image(self, image_target, png), self.check_active)
+                compare, self.check_active)
+            diagnostic = answer.get("diagnostic", {})
+            if answer.get("input_dispatched") is False and diagnostic.get("code") in {"image_not_found", "image_ambiguous"} and last_match:
+                details = dict(diagnostic.get("image_match", {}))
+                details.update({key:last_match[key] for key in ("frame_comparison", "frame_sha256", "score_gap", "review_candidates") if key in last_match})
+                answer = {**answer, "diagnostic":{**diagnostic,"image_match":details,
+                    "message":match_failure_message(details) if diagnostic["code"]=="image_not_found" else diagnostic.get("message", "이미지 후보가 여러 개입니다.")}}
             if self._driver_ended():
                 self.stop("Cua Driver 연결이 종료되어 이미지 작업을 중지했습니다. 미확인 입력을 반복하지 마세요.")
             self.check_active()

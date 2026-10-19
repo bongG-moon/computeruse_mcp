@@ -18,6 +18,15 @@ using System.Runtime.Serialization;
 using System.Web.Script.Serialization;
 internal static class PointerProbe {
  static int Main(string[] args) {
+  if(args[0].StartsWith("relationship_")) {
+   string relationMode=args[0];
+   long destination=relationMode=="relationship_nested"?200:100;
+   bool result=VisualTools.HasWindowRelationship(300,destination,42,
+    delegate(long h){return relationMode=="relationship_foreign" && h==200?43:42;},
+    delegate(long h){return h==300?200:relationMode=="relationship_cycle" && h==200?300:0;},
+    delegate(long h){return h==200?(relationMode=="relationship_other_root"?999:relationMode=="relationship_cycle"?0:100):0;});
+   Console.WriteLine(new JavaScriptSerializer().Serialize(new {related=result})); return 0;
+  }
   if(args[0].StartsWith("draft_candidate_")) {
    string draftMode=args[0]; bool same=true,current=true,foreground=true,ordinary=true,focus=true,secret=false; double age=1;
    if(draftMode=="draft_candidate_other_target")same=false;
@@ -203,6 +212,12 @@ class RecordingPointerScopeTests(unittest.TestCase):
 
     def test_exact_registered_root_is_accepted_before_foreground_activation(self):
         self.assertEqual(self.call("inactive_registered"), {"accepted": True})
+
+    def test_owner_parent_relationship_retains_nested_business_window(self):
+        for mode in ("relationship_parent", "relationship_nested"):
+            self.assertEqual(self.call(mode), {"related":True})
+        for mode in ("relationship_foreign", "relationship_other_root", "relationship_cycle"):
+            self.assertEqual(self.call(mode), {"related":False})
 
     def test_unknown_input_candidate_requires_recent_exact_target_and_no_scope_or_focus_change(self):
         self.assertEqual(self.call("draft_candidate_exact"), {"candidate": True})

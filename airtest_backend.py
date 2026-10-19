@@ -98,6 +98,10 @@ def _scales(target, width, height):
     ratio = (rx+ry)/2 if abs(rx-ry)/max(rx, ry) < .12 else 1
     source_scale = source["width"]/target["width"]
     near_border = abs(capture["width"]-width) <= 4 and abs(capture["height"]-height) <= 4
+    # A missing frame border is not evidence that every client pixel shrank.
+    # Retain source scale for tiny deltas instead of interpolating text by 1px.
+    if near_border:
+        ratio = 1
     seen = set()
     for factor in (1, ratio, .75, .85, 1.15, 1.25, 1.5, ratio*.9, ratio*1.1):
         w, h = round(source["width"]*factor), round(source["height"]*factor)
@@ -155,6 +159,34 @@ def match_candidates(image_target, screenshot_png, *, deadline=None, check_activ
         delta = screen[y:y+h, x:x+w].astype(np.float32)-resized.astype(np.float32)
         return max(0., min(1., 1-float(np.sqrt(np.mean(delta*delta)))/255))
 
+    def review_candidates():
+        """Structural suggestions only; never a match or an input coordinate.
+
+        Value/highlight changes can destroy RGB agreement while surrounding
+        labels/borders remain. Show a bounded shortlist for explicit review,
+        without treating edge correlation as probability or relaxing RGB gates.
+        """
+        suggestions = []
+        screen_edges = cv2.Canny(screen, 60, 160)
+        for spec in list(_scales(target, width, height))[:2]:
+            if time.monotonic() > deadline-1: break
+            active()
+            resized = raster(spec)
+            edges = cv2.Canny(resized, 60, 160)
+            if np.count_nonzero(edges) < 20: continue
+            matrix = cv2.matchTemplate(screen_edges, edges, cv2.TM_CCOEFF_NORMED)
+            h, w = edges.shape
+            for _ in range(3):
+                _, correlation, _, point = cv2.minMaxLoc(matrix)
+                if not math.isfinite(correlation) or correlation < .6: break
+                x,y = point
+                candidate = {"rect":{"x":x,"y":y,"width":w,"height":h},
+                    "score":exact_rgb(resized, point), "structure_score":float(correlation),
+                    "review_only":True}
+                if not any(_same(candidate, old) for old in suggestions): suggestions.append(candidate)
+                matrix[max(0,y-h//2):y+h//2+1,max(0,x-w//2):x+w//2+1] = -1
+        return sorted(suggestions,key=lambda item:-item["structure_score"])[:3]
+
     # A mostly white field can have thousands of .91 runner-up locations but
     # no .94 match at any scale. Establish whether a winning score is possible
     # before spending the uniqueness budget on those background locations.
@@ -172,7 +204,7 @@ def match_candidates(image_target, screenshot_png, *, deadline=None, check_activ
         ranked.append((upper, spec))
     if not ranked or (max(upper for upper, _ in ranked) < target["min_score"]-.00001
                       and (highest_evaluated is None or highest_evaluated < target["min_score"])):
-        return {**result, "score": highest_evaluated or 0.0}
+        return {**result, "score": highest_evaluated or 0.0, "review_candidates":review_candidates()}
     # A genuine high-score scale is checked first. Once present, only candidates
     # inside its unchanged ambiguity margin can affect the result.
     ranked.sort(key=lambda item: item[0], reverse=True)
@@ -233,7 +265,7 @@ def match_candidates(image_target, screenshot_png, *, deadline=None, check_activ
     if len(best) > 1:
         result["second_score"] = best[1]["score"]
     if not best or best[0]["score"] < target["min_score"]:
-        return result
+        return {**result, "review_candidates":review_candidates()}
     if len(best) > 1 and best[0]["score"]-best[1]["score"] < target["ambiguity_margin"]:
         return {**result, "status": "ambiguous"}
     if not math.isfinite(best[0]["correlation"]) or best[0]["correlation"] < .75:

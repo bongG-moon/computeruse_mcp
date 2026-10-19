@@ -49,7 +49,7 @@ CHECKPOINT_REVIEW_NAME = "Computer Use MCP 화면 확인.exe"
 APP_FILES = (
     "artifact_lifecycle.py",
     "semantic_targets.py",
-    "CHANGES_0.18.2.html", "CHANGES_0.18.3.html",
+    "CHANGES_0.18.2.html", "CHANGES_0.18.3.html", "CHANGES_0.18.4.html",
     "airtest_backend.py", "AIRTEST-NOTICES.md", "CHANGES_0.18.0.html", "CHANGES_0.18.1.html", "APPREF_GUIDE.md",
     "easy_api.py", "interaction.py", "image_pixels.py", "task_inputs.py", "task_revision.py", "visual_review.py", "visual_targets.py", "builtin_programs.py", "hosted_windows.py",
     "server.py", "settings.py", "setup.py", "consent.py", "register.py", "README.html", "VALIDATION.html",

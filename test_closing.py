@@ -504,6 +504,39 @@ class NativeProbeTests(unittest.TestCase):
         kernel.WaitForSingleObject.result = 0
         self.assertTrue(probe.snapshot()["process_exited"])
 
+    def test_popup_owner_parent_chain_includes_non_enumerated_hosted_child(self):
+        probe, _, user = self.make_probe()
+        user.GetWindow.callback = lambda hwnd, flag: {300:200}.get(hwnd, 0)
+        user.GetAncestor.callback = lambda hwnd, flag: {200:100}.get(hwnd, 0)
+        path = probe.ownership_path(300, 100)
+        self.assertEqual([node["window_id"] for node in path], [300,200,100])
+        self.assertEqual(path[1]["parent_window_id"], 100)
+
+    def test_popup_relationship_rejects_foreign_intermediate_cycle_and_other_root(self):
+        probe, _, user = self.make_probe()
+        user.GetWindow.callback = lambda hwnd, flag: {300:200,200:300}.get(hwnd,0)
+        user.GetAncestor.result = 0
+        self.assertEqual(probe.ownership_path(300,100), [])
+        user.GetAncestor.callback = lambda hwnd, flag: {200:999}.get(hwnd,0)
+        self.assertEqual(probe.ownership_path(300,100), [])
+        user.GetAncestor.callback = lambda hwnd, flag: {200:100}.get(hwnd,0)
+        def pid(hwnd, ptr):
+            ptr._obj.value = 43 if hwnd == 200 else 42
+            return 7
+        user.GetWindowThreadProcessId.callback = pid
+        self.assertEqual(probe.ownership_path(300,100), [])
+
+    def test_popup_relationship_rechecks_reparenting_before_acceptance(self):
+        probe, _, user = self.make_probe()
+        user.GetWindow.callback = lambda hwnd, flag: 200 if hwnd == 300 else 0
+        calls = []
+        def parent(hwnd, flag):
+            if hwnd != 200: return 0
+            calls.append(hwnd)
+            return 100 if len(calls) == 1 else 999
+        user.GetAncestor.callback = parent
+        self.assertEqual(probe.ownership_path(300,100), [])
+
     def test_open_failure_and_user_session_mismatch_are_rejected(self):
         probe, kernel, _ = self.make_probe()
         kernel.OpenProcess.result = 0

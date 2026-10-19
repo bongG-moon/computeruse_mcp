@@ -135,6 +135,32 @@ class LegacyCoordinateTests(unittest.TestCase):
 
 
 class ReadinessContractTests(unittest.TestCase):
+    def test_image_diagnostic_keeps_evidence_without_assuming_dpi_or_screen_change(self):
+        from image_targets import match_failure_message
+        target=image_target(); target['capture_window']={'width':102,'height':102}
+        result=validate_match({'status':'not_found','score':.857213,'candidate_count':0,
+            'review_candidates':[{'rect':{'x':99,'y':99,'width':20,'height':20},'score':.85,'structure_score':.9,'review_only':True}]},target,png(100,100))
+        self.assertAlmostEqual(result['score_gap'],.082787)
+        self.assertEqual(result['review_candidates'],[])
+        self.assertFalse(result['frame_comparison']['dpi_change_proven'])
+        message=match_failure_message(result)
+        self.assertIn('0.857',message); self.assertIn('0.940',message)
+        self.assertIn('확정한 것은 아닙니다',message)
+
+    def test_runtime_propagates_review_evidence_without_dispatching(self):
+        from session_runtime import SessionRuntime
+        detail={'status':'not_found','score':.857,'threshold':.94,'score_gap':.083,
+                'frame_comparison':{'dpi_change_proven':False},'review_candidates':[]}
+        def action(step,target,matcher,check):
+            matcher(image_target(),png(100,100))
+            return {'input_dispatched':False,'diagnostic':{'code':'image_not_found','image_match':{'score':.857,'threshold':.94}}}
+        runtime=SimpleNamespace(execution_lock=threading.RLock(),check_active=lambda:None,
+            guard=SimpleNamespace(image_action=action),_driver_ended=lambda:False)
+        with mock.patch('image_targets.match_image',return_value=detail):
+            result=SessionRuntime.image_action(runtime,{'operation':'image_click'},TARGET)
+        self.assertFalse(result['input_dispatched'])
+        self.assertEqual(result['diagnostic']['image_match']['score_gap'],.083)
+        self.assertIn('0.857',result['diagnostic']['message'])
     def test_invalid_geometry_and_proof_are_not_silently_accepted(self):
         for geometry in ((0, 0, 100, 100, -1), (False, 0, 100, 100, 2), (0, 0, 0, 100, 2)):
             with self.assertRaises(OperationError): input_coordinate_contract(geometry)

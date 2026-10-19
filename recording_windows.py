@@ -141,14 +141,21 @@ def execute_window_wait(runtime, step, bindings):
                 if row.get("title") != step["title"]: reasons.append("title_mismatch")
                 if not popup_class_matches(step["class_name"], row.get("class_name")): reasons.append("class_mismatch")
                 related = owned_by(row, owner["window_id"], rows)
+                path = []
+                # EnumWindows omits hosted WinForms/WPF child windows. Resolve
+                # the actual owner/parent chain only for otherwise valid candidates.
+                if not related and not reasons and callable(getattr(probe, "ownership_path", None)):
+                    path = probe.ownership_path(row["window_id"], owner["window_id"])
+                    related = bool(path)
                 if not related and not reasons and row.get("class_name") == "ComboLBox":
                     related = combo_list_owned_by(owner["window_id"], row["window_id"], owner["pid"])
                 if not related: reasons.append("owner_mismatch")
-                if len(observed) < 10:
-                    observed.append({**{key: row.get(key) for key in ("window_id", "title", "class_name", "visible")},
-                                     "rejected_by": reasons})
+                observed.append({**{key: row.get(key) for key in ("window_id", "pid", "title", "class_name", "visible", "owner_window_id", "root_owner_window_id")},
+                                 "expected_owner_window_id": owner["window_id"],
+                                 "relationship_path": path, "rejected_by": reasons})
                 if not reasons: matches.append(row)
-            result["observed_candidates"] = observed
+            result["observed_candidates"] = sorted(observed, key=lambda item: (
+                item["rejected_by"] != ["owner_mismatch"], len(item["rejected_by"])))[:10]
             result["candidates"] = [{key: row.get(key) for key in ("pid", "window_id", "title", "class_name")} for row in matches[:10]]
             if len(matches) > 1:
                 raise OperationError("같은 조건의 관련 팝업이 여러 개라 선택하지 않았습니다.", "recording_window_ambiguous")
@@ -162,7 +169,9 @@ def execute_window_wait(runtime, step, bindings):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 result["missing_reason"] = "candidate_conditions_not_met" if observed else "no_same_process_popup_observed"
-                detail = ("같은 프로그램의 다른 창은 관찰했지만 제목·종류·소유 관계·표시 조건이 일치하지 않습니다. observed_candidates의 rejected_by를 확인하세요."
+                detail = ("제목·종류·프로세스·표시 조건이 일치하는 팝업은 있지만 등록된 창까지의 소유자·부모 연결을 확인하지 못했습니다. observed_candidates의 실제 owner_window_id와 expected_owner_window_id를 확인하세요."
+                          if any(item["rejected_by"] == ["owner_mismatch"] for item in observed) else
+                          "같은 프로그램의 다른 창은 관찰했지만 제목·종류·소유 관계·표시 조건이 일치하지 않습니다. observed_candidates의 rejected_by를 확인하세요."
                           if observed else "확인 시점에 같은 프로그램의 팝업 후보가 없습니다. 팝업이 잠깐 열렸다 닫힌 경우도 포함합니다.")
                 raise OperationError("조건에 맞는 관련 팝업을 찾지 못했습니다. " + detail + " 입력은 반복하지 않았습니다.", "recording_window_missing")
             runtime.stop_event.wait(min(.1, remaining))

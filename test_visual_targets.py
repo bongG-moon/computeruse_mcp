@@ -1,5 +1,6 @@
 """Saved image recovery uses real guarded capture/input contracts, no desktop."""
 import copy
+import hashlib
 import unittest
 from unittest import mock
 
@@ -26,6 +27,20 @@ class WorkflowVisualTargetTests(unittest.TestCase):
         self.failure = {'input_dispatched': False, 'diagnostic': {'code': 'image_not_found'}}
 
     def mutations(self): return fixtures.FacadeTests.mutations(self)
+
+    def test_review_candidates_are_bound_to_exact_current_frame_and_never_input(self):
+        first=self.open()
+        frame=first['image_content'][1]['data']
+        candidate={'rect':{'x':10,'y':10,'width':30,'height':20},'score':.857,'structure_score':.95,'review_only':True}
+        self.failure['diagnostic']['image_match']={'score':.857,'threshold':.94,'review_candidates':[candidate],
+            'frame_sha256':hashlib.sha256(frame.encode('ascii')).hexdigest()}
+        opened=self.open()
+        self.assertEqual(opened['target_review']['review_candidates'],[candidate])
+        self.assertFalse(opened['input_dispatched'])
+        self.failure['diagnostic']['image_match']['frame_sha256']='stale'
+        stale=self.open()
+        self.assertEqual(stale['target_review']['review_candidates'],[])
+        self.assertEqual(self.mutations(),[])
 
     def open(self, vision=True):
         return self.manager.open(self.runtime, self.record, self.step, fixtures.TARGET,

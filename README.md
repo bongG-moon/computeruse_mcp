@@ -1,6 +1,8 @@
-# Computer Use MCP 0.18.3
+# Computer Use MCP 0.18.4
 
 Windows 프로그램을 채팅으로 조작하거나, 직접 작업을 녹화해 반복 실행하는 로컬 MCP입니다. 두 방식이 같은 창 확인·요소/이미지 선택·입력·결과 확인 엔진을 사용합니다.
+
+> **0.18.4는 업무 자식 창·중첩 팝업 추적과 이미지 매칭 실패 복구를 개선합니다.** [v0.18.4 Release](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.18.4) · [변경 및 검증 범위](CHANGES_0.18.4.html). 실제 사내 SmartFX에서의 성공 여부는 아직 미검증입니다.
 
 > **0.18.3은 WinForms 팝업 재식별과 팝업 확인창의 포커스 처리를 개선합니다.** [v0.18.3 Release](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.18.3) · [변경 및 검증 범위](CHANGES_0.18.3.html). 회귀 테스트 137개 통과. 실제 사내 앱 재생과 확인창의 포커스 유지 효과는 추가 실기 검증이 필요합니다.
 

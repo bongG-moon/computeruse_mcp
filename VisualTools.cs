@@ -311,12 +311,23 @@ internal static class VisualTools
     static string WindowText(IntPtr hwnd) { var text = new StringBuilder(1025); GetWindowText(hwnd, text, text.Capacity); return text.ToString(); }
     static string WindowClass(IntPtr hwnd) { var text = new StringBuilder(257); if (GetClassName(hwnd, text, text.Capacity) == 0) return ""; return text.ToString(); }
     static bool OwnedBy(IntPtr hwnd, IntPtr owner, int pid) {
-        var seen = new HashSet<IntPtr>(); IntPtr current = hwnd;
-        for (int count = 0; count < 32 && current != IntPtr.Zero && seen.Add(current); count++) {
-            current = GetWindow(current, 4); if (current == IntPtr.Zero) return false;
-            uint found; if (GetWindowThreadProcessId(current, out found) == 0 || found != (uint)pid) return false;
-            current = GetAncestor(current, 2); if (current == owner) return true;
-        } return false;
+        return HasWindowRelationship(hwnd.ToInt64(), owner.ToInt64(), pid,
+            delegate(long handle) { uint found; return GetWindowThreadProcessId(new IntPtr(handle), out found) == 0 ? 0 : (int)found; },
+            delegate(long handle) { return GetWindow(new IntPtr(handle), 4).ToInt64(); },
+            delegate(long handle) { return GetAncestor(new IntPtr(handle), 1).ToInt64(); });
+    }
+    internal static bool HasWindowRelationship(long hwnd, long owner, int pid,
+            Func<long,int> process, Func<long,long> getOwner, Func<long,long> getParent) {
+        // Follow actual owner AND parent edges. Jumping straight to GA_ROOT
+        // loses intermediate business windows when a popup opens another popup.
+        if (hwnd == 0 || owner == 0 || hwnd == owner || pid <= 0) return false;
+        var seen = new HashSet<long>(); var pending = new Queue<long>(); pending.Enqueue(hwnd);
+        while (pending.Count > 0 && seen.Count < 64) {
+            long current = pending.Dequeue(); if (current == 0 || !seen.Add(current) || process(current) != pid) continue;
+            if (current == owner) return true;
+            pending.Enqueue(getOwner(current)); pending.Enqueue(getParent(current));
+        }
+        return false;
     }
     static bool RelatedTo(IntPtr hwnd, IntPtr owner, int pid) {
         if (OwnedBy(hwnd, owner, pid)) return true;
@@ -1410,6 +1421,7 @@ internal static class VisualTools
             int sourceWidth = source == null ? original.Width : Num(source, "width", original.Width);
             int sourceHeight = source == null ? original.Height : Num(source, "height", original.Height);
             bool nearBorder = capture != null && Math.Abs(Num(capture, "width", 0) - image.W) <= 4 && Math.Abs(Num(capture, "height", 0) - image.H) <= 4;
+            if (nearBorder) ratio = 1; // Frame trimming is not proven DPI scaling.
             HashSet<long> sampledSizes = new HashSet<long>();
             // A different capture border can change the window ratio without
             // changing the control's pixels. Always preserve the original
@@ -2381,8 +2393,18 @@ internal static class VisualTools
                     foreach (Target root in targets) if (root.Owner == null && atPid == (uint)root.Pid && at != root.Hwnd && RelatedTo(at, root.Hwnd, root.Pid)) { candidate = at; break; }
             }
             foreach (Target known in targets) if (known.Hwnd == candidate && !known.Retired) return;
-            foreach (Target root in targets.ToArray()) {
-                if (root.Owner != null || !root.Valid() || candidate == root.Hwnd || !IsWindowVisible(candidate) || !RelatedTo(candidate, root.Hwnd, root.Pid)) continue;
+            var owners = new List<Target>();
+            foreach (Target known in targets) if (known.Valid() && known.Hwnd != candidate
+                    && RelatedTo(candidate, known.Hwnd, known.Pid)) owners.Add(known);
+            // Bind to the closest known related window, not always the initial
+            // root. The recipe can then return to the actual business dialog.
+            var ownerSnapshot = new List<Target>(owners);
+            owners.RemoveAll(delegate(Target possible) { return ownerSnapshot.Exists(delegate(Target other) {
+                return other != possible && other.Pid == possible.Pid && RelatedTo(other.Hwnd, possible.Hwnd, possible.Pid);
+            }); });
+            if (owners.Count > 1) { Warn("recording_window_ambiguous"); return; }
+            foreach (Target root in owners) {
+                if (!root.Valid() || candidate == root.Hwnd || !IsWindowVisible(candidate) || !RelatedTo(candidate, root.Hwnd, root.Pid)) continue;
                 string title = WindowText(candidate), cls = WindowClass(candidate); if (cls.Length == 0 || cls == "IME" || cls == "MSCTFIME UI" || cls == "tooltips_class32") return;
                 int matches = 0; EnumWindows(delegate(IntPtr hwnd, IntPtr ignored) {
                     if (IsWindowVisible(hwnd) && WindowText(hwnd) == title && WindowClass(hwnd) == cls && RelatedTo(hwnd, root.Hwnd, root.Pid)) matches++;

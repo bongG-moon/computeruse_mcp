@@ -512,6 +512,12 @@ class ProcessDraft:
                 raise OperationError("녹화한 팝업의 소유 관계 정보가 없습니다.", "recording_invalid_windows")
             key = (row["program_id"], row["window_ref"])
             owner = self.targets.get((row["program_id"], row["owner_ref"]))
+            if owner is None:
+                # Recorder emits parents before children. Resolve a nested
+                # popup only through an already validated parent, never a
+                # same-PID guess or a forward/cyclic reference.
+                parent = found.get((row["program_id"], row["owner_ref"]))
+                owner = parent[0] if parent else None
             if (key in self.targets or key in found or owner is None or row["owner_verified"] is not True
                     or row["pid"] != owner["pid"] or row["owner_window_id"] != owner["window_id"]
                     or type(row["window_id"]) is not int or row["window_id"] <= 0 or row["window_id"] == owner["window_id"]):
@@ -1226,6 +1232,8 @@ class ProcessEditors:
             extra["saved_task"] = {"id": saved["id"], "name": saved["name"], "revision": draft.revision, "step_count": len(saved["steps"]), **readiness}
             message = ("프로세스를 저장했습니다. 실행할 수 있습니다." if readiness["runnable"] else
                        "초안을 저장했습니다 · 보완할 단계 " + str(readiness["unresolved_steps"]) + "개" + (" · 녹화 경고 확인 필요" if readiness["review_required"] else "") + ". 같은 프로세스를 다시 열어 이어서 수정할 수 있습니다.")
+            if readiness["runnable"] and any("image_target" in step for step in _leaf_steps(draft.steps)):
+                message += " 저장 완료는 현재 화면에서의 재생 성공을 뜻하지 않습니다. 시작 상태에서 ‘시험 실행’으로 확인하세요. 이미지가 달라지면 실패한 단계만 다시 지정할 수 있습니다."
             with self.lock:
                 job["result"] = {"status": "saved", "editor_visible": True, **extra,
                                  "message": message}
@@ -1350,6 +1358,11 @@ class ProcessEditors:
         result = {key: copy.deepcopy(tested[key]) for key in ("status", "state", "task_verified", "run_id", "completed_steps", "total_steps", "step_index", "diagnostic", "checkpoint_id", "next_step", "visual_review", "checkpoint", "continuation", "pending_step") if key in tested}
         result["task_id"] = task["id"]
         result["input_dispatched"] = tested.get("input_dispatched")
+        last = tested.get("last_result", {})
+        diagnostic = last.get("diagnostic", {})
+        if diagnostic.get("code") in {"start_screen_not_ready", "image_not_found", "image_ambiguous"}:
+            result["diagnostic"] = copy.deepcopy(diagnostic)
+            result["repair_step_index"] = tested.get("pending_step", 0)
         result["automatic_retry"] = False
         return result
 

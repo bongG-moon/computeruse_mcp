@@ -63,9 +63,29 @@ class WindowBindingTests(unittest.TestCase):
     def test_missing_popup_reports_why_visible_candidates_did_not_bind(self):
         result = self.run_wait([row(20, class_name="WrongClass"), row(21, owner=99)])
         self.assertEqual(result["missing_reason"], "candidate_conditions_not_met")
-        self.assertEqual(result["observed_candidates"][0]["rejected_by"], ["class_mismatch"])
-        self.assertEqual(result["observed_candidates"][1]["rejected_by"], ["owner_mismatch"])
+        self.assertEqual(result["observed_candidates"][0]["rejected_by"], ["owner_mismatch"])
+        self.assertEqual(result["observed_candidates"][0]["owner_window_id"], 99)
+        self.assertEqual(result["observed_candidates"][1]["rejected_by"], ["class_mismatch"])
         self.assertEqual(self.run_wait([])["missing_reason"], "no_same_process_popup_observed")
+
+    def test_hosted_child_owner_missing_from_top_level_inventory(self):
+        probe = Probe([row(20, owner=30)])
+        path = [{"window_id": 20}, {"window_id": 30}, {"window_id": 10}]
+        probe.ownership_path = mock.Mock(return_value=path)
+        result = execute_window_wait(Runtime(probe), step(), {("editor", "main"): {"pid":42,"window_id":10}})
+        self.assertTrue(result["task_verified"])
+        self.assertFalse(result["input_dispatched"])
+        self.assertEqual(result["observed_candidates"][0]["relationship_path"], path)
+        probe.ownership_path.assert_called_once_with(20, 10)
+
+    def test_unrelated_same_process_popup_is_not_allowed_and_diagnostic_survives_noise(self):
+        probe = Probe([*[row(i, class_name="Noise") for i in range(100, 115)], row(20, owner=30)])
+        probe.ownership_path = mock.Mock(return_value=[])
+        result = execute_window_wait(Runtime(probe), step(), {("editor", "main"): {"pid":42,"window_id":10}})
+        self.assertFalse(result["task_verified"])
+        self.assertEqual(result["observed_candidates"][0]["window_id"], 20)
+        self.assertEqual(result["observed_candidates"][0]["expected_owner_window_id"], 10)
+        probe.ownership_path.assert_called_once_with(20, 10)
 
     def run_wait(self, windows, **extra):
         probe = Probe(windows, **extra); runtime = Runtime(probe)
@@ -164,6 +184,27 @@ class RecordingDraftWindowTests(unittest.TestCase):
     def test_same_popup_wait_inserted_once(self):
         self.draft.recorded([self.event("popup_1"), self.event("popup_1")], windows=[self.window])
         self.assertEqual(sum(s["operation"] == "wait_for_window" for s in self.draft.steps), 1)
+
+    def test_nested_popup_keeps_actual_business_window_as_owner(self):
+        nested = {**self.window, "window_ref":"popup_2", "owner_ref":"popup_1",
+                  "window_id":self.window["window_id"]+1,
+                  "owner_window_id":self.window["window_id"], "closed":True}
+        self.draft.recorded([self.event("main"),self.event("popup_1"),self.event("popup_2"),self.event("popup_1")],
+                            windows=[self.window,nested])
+        waits=[s for s in self.draft.steps if s["operation"]=="wait_for_window"]
+        self.assertEqual([(s["window_ref"],s["owner_ref"]) for s in waits],[("popup_1","main"),("popup_2","popup_1")])
+        returns=[s for s in self.draft.steps if s.get("return_from")=="popup_2"]
+        self.assertEqual(returns[0]["window_ref"],"popup_1")
+        self.draft.validate()
+
+    def test_nested_popup_does_not_allow_forward_owner_or_foreign_pid(self):
+        nested = {**self.window, "window_ref":"popup_2", "owner_ref":"popup_1",
+                  "window_id":self.window["window_id"]+1, "owner_window_id":self.window["window_id"]}
+        for windows in ([nested,self.window], [self.window,{**nested,"pid":self.window["pid"]+1}],
+                        [self.window,{**nested,"owner_ref":"popup_2"}]):
+            with self.subTest(windows=windows), self.assertRaises(OperationError):
+                self.draft.recorded([self.event("popup_2")], windows=windows)
+            self.assertEqual(self.draft.steps, [])
 
     def test_closed_popup_last_click_checks_the_owner_without_claiming_business_success(self):
         self.draft.recorded([self.event("main"), self.event("popup_1"), self.event("popup_1"), self.event("main")],

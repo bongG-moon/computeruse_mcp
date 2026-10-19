@@ -113,6 +113,8 @@ class WorkflowVisualTargets:
             if observed.get('isError') or not data.get('frame_id') or len(images) != 1:
                 raise OperationError('현재 대상을 확인할 화면을 읽지 못했습니다.', 'target_recovery_capture_failed')
             saved = validate_image_target(step['image_target'])
+            comparison = failure.get('diagnostic', {}).get('image_match', {})
+            same_frame = comparison.get('frame_sha256') == hashlib.sha256(images[0]['data'].encode('ascii')).hexdigest()
             identity = 'target-'+uuid.uuid4().hex
             public = {**context, 'recovery_id': identity, 'window_ref': binding['window_ref'],
                 'observation_id': data['observation_id'], 'frame_id': data['frame_id'],
@@ -124,6 +126,11 @@ class WorkflowVisualTargets:
                 'coordinate_space': 'current_window_image_pixels',
                 'target_point_policy': 'center_of_target_region',
                 'evidence_level': 'visual_assessed_target', 'task_modified': False}
+            public['comparison'] = {key:copy.deepcopy(comparison[key]) for key in
+                ('score','threshold','score_gap','capture_window','screenshot','frame_comparison') if key in comparison}
+            public['review_candidates'] = copy.deepcopy(comparison.get('review_candidates', [])) if same_frame else []
+            public['candidate_policy'] = 'review_only_not_click_coordinates'
+            public['candidate_frame_matches_current'] = same_frame
             with self.lock:
                 self._prune(context)
                 self.jobs[identity] = {'engine': engine, 'runtime': runtime, 'context': context,

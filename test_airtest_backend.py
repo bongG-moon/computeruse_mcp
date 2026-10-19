@@ -136,6 +136,45 @@ class AirtestBackendTests(unittest.TestCase):
         self.assertEqual(result["status"], "matched")
         self.assertEqual((result["x"], result["y"]), (176, 89))
 
+    def test_small_border_change_preserves_source_pixels_and_anchor(self):
+        screen = self.screen[1:-1,1:-1].copy()
+        result = validate_match(self.match(screen),self.target,self.encoded(screen))
+        self.assertEqual(result["status"],"matched")
+        self.assertEqual((result["x"],result["y"]),(175,88))
+        self.assertEqual(result["frame_comparison"]["size_relation"],"small_border_difference")
+        self.assertFalse(result["frame_comparison"]["dpi_change_proven"])
+
+    def test_changed_highlight_is_review_candidate_not_automatic_click(self):
+        changed = self.template.copy()
+        background = self.np.all(changed == (40,80,145), axis=2)
+        changed[background] = (130,170,220)
+        self.screen[80:110,120:190] = changed
+        result = validate_match(self.match(),self.target,self.encoded(self.screen))
+        self.assertEqual(result["status"],"not_found")
+        self.assertNotIn("x",result)
+        self.assertNotIn("rect",result)
+        self.assertTrue(any(item["rect"]["x"]==120 and item["rect"]["y"]==80 for item in result["review_candidates"]))
+        self.assertTrue(all(item["review_only"] for item in result["review_candidates"]))
+        self.screen[180:210,20:90] = changed
+        duplicate = self.match()
+        self.assertEqual(duplicate["status"],"not_found")
+        self.assertGreaterEqual(len(duplicate["review_candidates"]),2)
+        self.assertNotIn("rect",duplicate)
+
+    def test_changed_field_value_retains_surrounding_context_for_review(self):
+        template=self.np.full((90,220,3),235,self.np.uint8)
+        self.cv2.putText(template,'Family',(8,22),self.cv2.FONT_HERSHEY_SIMPLEX,.6,(20,20,20),1)
+        self.cv2.rectangle(template,(7,34),(208,80),(40,40,40),2)
+        self.cv2.putText(template,'W',(20,67),self.cv2.FONT_HERSHEY_SIMPLEX,.7,(20,20,20),2)
+        changed=template.copy(); changed[40:77,12:60]=235
+        self.cv2.putText(changed,'N',(20,67),self.cv2.FONT_HERSHEY_SIMPLEX,.7,(20,20,20),2)
+        screen=self.np.full((250,400,3),25,self.np.uint8);screen[80:170,100:320]=changed
+        target={**self.target,'width':220,'height':90,'template_png':self.encoded(template),'min_score':.999}
+        result=self.match(screen,target)
+        self.assertEqual(result['status'],'not_found')
+        self.assertTrue(any(abs(c['rect']['x']-100)<=1 and abs(c['rect']['y']-80)<=1 for c in result['review_candidates']))
+        self.assertNotIn('rect',result)
+
     def test_duplicate_at_a_distant_location_is_ambiguous(self):
         self.screen[180:210, 20:90] = self.template
         result = self.match()

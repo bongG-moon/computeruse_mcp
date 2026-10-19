@@ -101,6 +101,20 @@ def image_target_summary(value):
     return {"recognition": "image", "width": target["width"], "height": target["height"], "min_score": target["min_score"]}
 
 
+def match_failure_message(details):
+    """Explain evidence, not an unproven diagnosis that the screen is wrong."""
+    message = "저장 이미지와 현재 대상의 일치를 확인하지 못했습니다."
+    if all(type(details.get(k)) in (int,float) for k in ("score","threshold")):
+        message += f" 유사도 {details['score']:.3f} / 기준 {details['threshold']:.3f}."
+    capture, current = details.get("capture_window",{}), details.get("screenshot",{})
+    if all(k in capture and k in current for k in ("width","height")):
+        message += f" 캡처 크기 {capture['width']}×{capture['height']} → {current['width']}×{current['height']}."
+    message += " 화면이 다르거나 DPI가 바뀌었다고 확정한 것은 아닙니다."
+    if details.get("review_candidates"):
+        message += " 주변 윤곽이 비슷한 확인용 후보가 있습니다. 후보는 자동 클릭하지 않습니다."
+    return message + " 현재 대상 확인 또는 편집창에서 이 단계만 다시 지정하세요. 전체 재녹화는 필요하지 않습니다."
+
+
 def validate_match(answer, image_target, screenshot_png):
     target = validate_image_target(image_target)
     width, height = png_dimensions(screenshot_png)
@@ -108,6 +122,11 @@ def validate_match(answer, image_target, screenshot_png):
         raise OperationError("이미지 비교 결과를 확인하지 못했습니다.", "image_match_failed")
     details = {"screenshot": {"width": width, "height": height}, "capture_window": copy.deepcopy(target["capture_window"]),
                "threshold": target["min_score"], "ambiguity_margin": target["ambiguity_margin"]}
+    dx, dy = width-target["capture_window"]["width"], height-target["capture_window"]["height"]
+    details["frame_comparison"] = {"width_delta":dx, "height_delta":dy,
+        "size_relation":"same_size" if dx == dy == 0 else "small_border_difference" if max(abs(dx),abs(dy))<=4 else "size_changed",
+        "dpi_change_proven":False, "screen_change_proven":False}
+    details["frame_sha256"] = hashlib.sha256(screenshot_png.encode("ascii")).hexdigest()
     for field in ("score", "second_score"):
         value = answer.get(field)
         if type(value) in {int, float} and math.isfinite(value) and 0 <= value <= 1:
@@ -127,6 +146,21 @@ def validate_match(answer, image_target, screenshot_png):
         details.update(search_diagnostic="candidate_budget_exceeded", search_complete=False,
                        candidate_evaluations=evaluations, candidate_budget=budget)
     if answer["status"] != "matched":
+        if "score" in details:
+            details["score_gap"] = round(max(0,target["min_score"]-details["score"]),6)
+        suggestions = answer.get("review_candidates", [])
+        if answer["status"] == "not_found" and isinstance(suggestions,list):
+            safe=[]
+            for item in suggestions[:3]:
+                if not isinstance(item,dict) or item.get("review_only") is not True: continue
+                rect=item.get("rect")
+                if (not isinstance(rect,dict) or set(rect)!={"x","y","width","height"}
+                        or any(type(v) is not int for v in rect.values())
+                        or min(rect["x"],rect["y"])<0 or min(rect["width"],rect["height"])<8
+                        or rect["x"]+rect["width"]>width or rect["y"]+rect["height"]>height): continue
+                if any(type(item.get(key)) not in (int,float) or not math.isfinite(item[key]) or not 0<=item[key]<=1 for key in ("score","structure_score")): continue
+                safe.append({"rect":dict(rect),"score":round(item["score"],6),"structure_score":round(item["structure_score"],6),"review_only":True})
+            details["review_candidates"]=safe
         return {"status": answer["status"], "code": "image_ambiguous" if answer["status"] == "ambiguous" else
                 "image_template_low_detail" if details.get("low_detail") else "image_not_found", **details}
     rect, screenshot, score = answer.get("rect"), answer.get("screenshot"), answer.get("score")

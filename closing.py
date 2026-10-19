@@ -124,6 +124,49 @@ class NativeClosureProbe:
             raise ProbeError("window_changed_during_read")
         return row
 
+    def ownership_path(self, hwnd, ancestor):
+        """Read owner + parent edges, including child HWNDs absent from EnumWindows.
+
+        Only a same-process path to the exact bound window is accepted. Re-read
+        the selected path before returning so a disappearing/reparented child
+        is not silently accepted. This method never activates or sends input.
+        """
+        def read(handle):
+            if not self.user.IsWindow(handle) or self._window_pid(handle) != self.pid:
+                raise ProbeError("window_changed_during_read")
+            owner = int(self.user.GetWindow(handle, 4) or 0)
+            parent = int(self.user.GetAncestor(handle, 1) or 0)  # GA_PARENT, not GetParent's owner alias
+            thread_pid = wintypes.DWORD()
+            thread = int(self.user.GetWindowThreadProcessId(handle, ctypes.byref(thread_pid)))
+            if not thread or thread_pid.value != self.pid:
+                raise ProbeError("window_changed_during_read")
+            return {"window_id": int(handle), "pid": self.pid, "thread_id": thread,
+                    "owner_window_id": owner, "parent_window_id": parent}
+
+        with self._lock:
+            pending, seen = [(hwnd, [])], set()
+            while pending and len(seen) < 64:
+                handle, path = pending.pop(0)
+                if not handle or handle in seen:
+                    continue
+                seen.add(handle)
+                try:
+                    node = read(handle)
+                except ProbeError:
+                    continue
+                chain = path + [node]
+                if handle == ancestor:
+                    try:
+                        if all(read(item["window_id"]) == item for item in chain):
+                            return chain
+                    except ProbeError:
+                        pass
+                    return []
+                for edge in (node["owner_window_id"], node["parent_window_id"]):
+                    if edge and edge not in seen:
+                        pending.append((edge, chain))
+            return []
+
     def capture(self):
         with self._lock:
             if self.handle is not None:

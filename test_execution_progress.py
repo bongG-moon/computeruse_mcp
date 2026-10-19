@@ -11,6 +11,21 @@ import test_server as fixtures
 
 
 class ProgressStateTests(unittest.TestCase):
+    def test_current_window_context_changes_and_never_retains_old_handle_while_binding(self):
+        progress = ExecutionProgress(); token = progress.start("computer_run_task")
+        progress.update(token, "running_step", step_index=1, step_total=3, program_id="editor", window_ref="main",
+                        window_kind="registered", operation="click", target_pid=42, target_window_id=10)
+        self.assertEqual(progress.snapshot()["target_window_id"], 10)
+        progress.update(token, "waiting", step_index=2, window_ref="popup_1", window_kind="related", operation="wait_for_window")
+        self.assertNotIn("target_window_id", progress.snapshot())
+        progress.update(token, "transition", window_ref="popup_1", window_kind="related", target_pid=42, target_window_id=20)
+        progress.update(token, "observing", selector="secret", value="secret")
+        result=progress.snapshot()
+        self.assertEqual(result["target_window_id"],20)
+        self.assertNotIn("secret", json.dumps(result))
+        progress.update(token, "running_step", step_index=3, window_ref="main", window_kind="registered", operation="set_value", target_window_id=10)
+        self.assertEqual(progress.snapshot()["target_window_id"],10)
+
     def test_late_old_updates_do_not_change_new_operation_or_leak_content(self):
         now=[10.0]
         progress=ExecutionProgress(clock=lambda:now[0])

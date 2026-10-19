@@ -36,6 +36,23 @@ class WorkflowWindowTests(unittest.TestCase):
         self.assertTrue(answer["task_verified"])
         self.assertEqual([call[1] for call in engine.calls], [{"pid": 42, "window_id": 20}, {"pid": 42, "window_id": 10}])
 
+    def test_recreated_automatic_popup_binding_tracks_current_window_for_each_step(self):
+        self.task["steps"].insert(2, copy.deepcopy(self.task["steps"][1]))
+        original_execute = ScriptedOperations.execute
+        fixture = self
+        class RecreatingOperations(ScriptedOperations):
+            def execute(self, spec, target, **kwargs):
+                answer = original_execute(self, spec, target, **kwargs)
+                if target["window_id"] == 20: fixture.windows = [row(21)]
+                return answer
+        updates=[]
+        self.runtime.report_progress = lambda phase, **fields: updates.append((phase,fields))
+        engine = RecreatingOperations()
+        answer = self.run_task(engine)
+        self.assertTrue(answer["task_verified"])
+        self.assertEqual([call[1]["window_id"] for call in engine.calls], [20,21,10])
+        self.assertTrue(any(fields.get("target_window_id")==21 and fields.get("window_kind")=="related" for _,fields in updates))
+
     def test_named_main_binding_is_resolved_before_owned_window_wait(self):
         self.targets = [{"program_id": "editor", "pid": 42, "window_title": "Parent"}]
         self.runtime.call = lambda *args: {"structuredContent": {"windows": [{"pid": 42, "window_id": 10, "title": "Parent"}]}}
@@ -218,6 +235,24 @@ class WorkflowWindowTests(unittest.TestCase):
         resumed = self.run_task(ScriptedOperations(), resume_run_id=first["run_id"])
         self.assertEqual(resumed["pending_step"], 2)
         self.assertTrue(resumed["checkpoint"]["capture_available"])
+        self.assertEqual(self.runtime.image_action.call_count, 1)
+
+    def test_owner_mismatch_resume_uses_hosted_chain_without_repeating_click(self):
+        self.task["steps"] = self.opened_popup_steps()
+        self.windows = [row(20, owner=30)]
+        self.runtime.image_action = mock.Mock(return_value={"task_verified": False, "input_dispatched": True, "verification_deferred": True})
+        self.runtime.capture_checkpoint = mock.Mock(return_value={"content": [{"type":"image", "mimeType":"image/png", "data":png()}]})
+        first = self.run_task(ScriptedOperations())
+        self.assertEqual(first["pending_step"], 1)
+        def resolved(target):
+            probe = Probe(copy.deepcopy(self.windows))
+            probe.ownership_path = lambda hwnd, ancestor: [{"window_id":20}, {"window_id":30}, {"window_id":10}]
+            return probe
+        self.runtime.create_transition_probe = resolved
+        resumed = self.run_task(ScriptedOperations(), resume_run_id=first["run_id"])
+        self.assertEqual(resumed["pending_step"], 2)
+        done = self.run_task(ScriptedOperations(), resume_run_id=first["run_id"], acknowledge_checkpoint=resumed["checkpoint"]["id"])
+        self.assertTrue(done["task_verified"])
         self.assertEqual(self.runtime.image_action.call_count, 1)
 
     def test_opened_popup_checkpoint_requires_exact_adjacent_owner_binding(self):

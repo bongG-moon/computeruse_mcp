@@ -552,6 +552,7 @@ class WorkflowRunner:
             if executable is not None and executable not in allowed:
                 raise WorkflowError("지정한 창의 프로그램이 작업에 저장된 프로그램과 다릅니다.")
             bindings[key] = {k: item[k] for k in ("pid", "window_id", "window_title") if k in item}
+        explicit_bindings = {key: dict(value) for key, value in bindings.items()}
         dynamic_keys = dynamic_window_keys([window_step(s) for s in steps])
         dynamic_definitions = {target_key(step): step for step in steps if step["operation"] == "wait_for_window"}
         all_keys = {target_key(step) for step in steps} | {(step["program_id"], step["owner_ref"])
@@ -571,8 +572,13 @@ class WorkflowRunner:
                 if answer.get("task_verified") is not True:
                     raise BindingError("저장한 소유 관계와 제목·종류에 맞는 팝업을 확인하지 못했습니다. 현재 창을 다시 지정하세요.")
                 dynamic_target = answer["target"]
-                if binding is None:
+                # Automatically discovered HWNDs are transient observations.
+                # A recreated popup must be resolved again, not pinned forever.
+                # Explicit caller bindings remain constraints, never overwritten.
+                if target_key(item) not in explicit_bindings:
                     binding = bindings[target_key(item)] = dynamic_target
+                else:
+                    binding = explicit_bindings[target_key(item)]
             if binding is None:
                 raise BindingError("이 팝업의 현재 창이 아직 연결되지 않았습니다. 현재 창을 다시 지정하세요.")
             app = apps[item["program_id"]]
@@ -758,11 +764,16 @@ class WorkflowRunner:
                     "diagnostic": {"code": reason, "automatic_replay": False},
                     "next_tool": "computer_run_task", "next_arguments": {"task_id": task["id"], "resume_run_id": run_id},
                     "next_step": "완료한 단계는 저장했습니다. 같은 resume_run_id로 이어가면 현재 결과를 확인한 뒤 다음 단계부터 진행합니다. 완료한 입력은 반복하지 않습니다."}
-            def progress_event(phase, index=None, operation=None):
+            def progress_event(phase, index=None, operation=None, target=None):
                 report = getattr(runtime, "report_progress", None)
                 if callable(report):
+                    item = steps[index] if index is not None and index < len(steps) else {}
                     report(phase, run_id=run_id, step_index=(index + 1 if index is not None else record["completed_steps"] + 1),
-                        step_total=len(steps), **({"operation": operation} if operation else {}))
+                        step_total=len(steps), **({"operation": operation} if operation else {}),
+                        program_id=item.get("program_id"), window_ref=item.get("window_ref", "main"),
+                        window_kind="related" if item and target_key(item) in dynamic_definitions else "registered" if item else None,
+                        target_pid=target.get("pid") if target else None,
+                        target_window_id=target.get("window_id") if target else None)
             def save_image_state(index, state):
                 record["image_verification"] = {"step_index": index, "state": state}
                 save("running")
@@ -909,6 +920,8 @@ class WorkflowRunner:
                 save("needs_review")
                 if not image_delivery_enabled:
                     return {**record, "state": "needs_input", "input_dispatched": False, "last_result": latest,
+                        "repair_guidance": {"tool":"computer_process_editor", "task_id":task["id"], "step_number":index+1,
+                            "action":"이 단계만 다시 지정", "other_steps_preserved":True, "threshold_change_required":False},
                         "can_resume_pending_input": True, "target_review_available": False,
                         "next_step": "저장한 이미지와 현재 대상을 연결하지 못했습니다. 이미지 사용이 가능한 연결에서 같은 실행을 이어가거나 편집창에서 이 단계만 다시 지정하세요. 완료한 앞 동작은 반복하지 않습니다."}
                 try:
@@ -1026,6 +1039,8 @@ class WorkflowRunner:
                     progress_event("running_step", index, item["operation"])
                     stage = "window_binding"
                     target = resolve(item) if item["operation"] != "wait_for_window" else None
+                    if target is not None:
+                        progress_event("running_step", index, item["operation"], target)
                     record["pending_step"] = index
                     recovery_reason = record.get("target_recovery", {}).get("reason")
                     record.pop("target_recovery", None)
@@ -1047,7 +1062,7 @@ class WorkflowRunner:
                         latest = execute_window_wait(runtime, window_step(item), bindings)
                         if latest.get("task_verified") is True:
                             bindings[target_key(item)] = latest["target"]
-                            resolve(item)
+                            progress_event("transition", index, item["operation"], resolve(item))
                         engine = Operations(runtime)
                     elif item["operation"] in IMAGE_OPERATIONS:
                         if recovered_ticket is not None:
@@ -1077,8 +1092,8 @@ class WorkflowRunner:
                         if source.get("code") in {"image_not_found", "image_ambiguous", "element_not_found"}:
                             latest = {**latest, "diagnostic": {**source, "code": "start_screen_not_ready",
                                 "cause": source["code"], "automatic_replay": False,
-                                "message": "녹화한 첫 동작의 대상을 현재 화면에서 확인하지 못했습니다. "
-                                    "해당 업무 화면을 연 뒤 같은 실행에서 이어가세요. 아직 업무 입력을 보내지 않았으며 재녹화는 필요하지 않습니다."}}
+                                "message": (source.get("message") or "녹화한 첫 동작의 대상을 현재 화면에서 확인하지 못했습니다.") +
+                                    " 첫 단계 입력은 전송하지 않았습니다. 시작 화면이 다르다고 단정하지 말고 이미지 비교 정보를 확인하세요."}}
                     adopt_transition(item, latest)
                     # Foreground activation can consume the final authorized
                     # action before the actual input. An explicit non-delivery

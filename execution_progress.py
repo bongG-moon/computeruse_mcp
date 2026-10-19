@@ -5,6 +5,7 @@ import copy
 import threading
 import time
 import uuid
+import re
 
 
 STAGES = {
@@ -13,6 +14,10 @@ STAGES = {
     "transition": "다음 창 확인 중", "running_step": "저장된 단계 실행 중",
     "needs_review": "화면 확인 필요", "finished": "도구 실행 종료", "failed": "도구 오류",
 }
+OPERATIONS = {"click", "double_click", "right_click", "image_click", "image_double_click", "image_right_click",
+              "type_text", "set_value", "select_option", "select_item", "set_checked", "press_key", "hotkey",
+              "scroll", "image_scroll", "assert", "checkpoint", "wait_for_window", "delay", "read_text", "wait_for_element"}
+CONTEXT_FIELDS = ("program_id", "window_ref", "window_kind", "target_pid", "target_window_id", "operation")
 
 
 class ExecutionProgress:
@@ -43,6 +48,18 @@ class ExecutionProgress:
             if not row or row["operation_id"] != operation_id or not row["active"]:
                 return
             row.update(stage=stage, updated_at_monotonic=self.clock(), sequence=row["sequence"] + 1)
+            # New step / binding attempt clears the prior HWND. A background
+            # read update with no context keeps the current step context.
+            if "window_ref" in fields or fields.get("step_index", row.get("step_index")) != row.get("step_index"):
+                for key in CONTEXT_FIELDS: row.pop(key, None)
+            for key in ("program_id", "window_ref"):
+                value = fields.get(key)
+                if isinstance(value, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", value): row[key] = value
+            for key in ("target_pid", "target_window_id"):
+                value = fields.get(key)
+                if type(value) is int and value > 0: row[key] = value
+            if isinstance(fields.get("window_kind"), str) and fields["window_kind"] in {"registered", "related"}: row["window_kind"] = fields["window_kind"]
+            if isinstance(fields.get("operation"), str) and fields["operation"] in OPERATIONS: row["operation"] = fields["operation"]
             for key in ("step_index", "step_total"):
                 value = fields.get(key)
                 if type(value) is int and 0 <= value <= 10000:
@@ -97,6 +114,10 @@ class ExecutionProgress:
                       task_verified=False, poll_after_ms=500 if row["active"] else None)
         if "step_index" in row and "step_total" in row:
             result["message"] = f'{row["step_index"]}/{row["step_total"]} 단계 · {result["message"]}'
+        if "window_kind" in row:
+            kind = "관련 업무 창·팝업" if row["window_kind"] == "related" else "등록한 작업 창"
+            result["message"] += " · " + kind + (" #" + str(row["target_window_id"]) if "target_window_id" in row else " 식별 중")
+        if "operation" in row: result["message"] += " · " + row["operation"]
         return result
 
     def snapshot(self):

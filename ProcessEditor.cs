@@ -77,6 +77,10 @@ internal static class ProcessEditor
         string reason = Str(Map(tested, "continuation"), "reason", "");
         if (reason == "workflow_chunk_complete") return "여기까지 " + Num(tested, "completed_steps", 0).ToString() + "단계를 확인했습니다. 채팅에서 이어서 실행하면 다음 단계부터 계속합니다.";
         if (reason == "session_budget_exhausted") return "이 연결의 실행 범위가 끝났습니다. 초안은 유지했습니다. 처음부터 다시 시험하지 말고 채팅의 안내를 확인하세요.";
+        var diagnostic = Map(tested, "diagnostic"); string code = Str(diagnostic, "code", "");
+        if (code == "start_screen_not_ready" || code == "image_not_found" || code == "image_ambiguous")
+            return (Num(tested, "repair_step_index", 0) + 1).ToString() + "단계 대상 확인이 필요합니다. " + Str(diagnostic, "message", "")
+                + " 실행 순서에서 해당 단계를 두 번 클릭하고 ‘이 단계만 다시 지정’을 선택하세요. 다른 단계는 유지됩니다.";
         return "시험 실행 상태: " + Str(tested, "status", "확인 필요") + ". 채팅의 결과를 확인하세요.";
     }
     internal static IEnumerable List(Dictionary<string, object> data, string key)
