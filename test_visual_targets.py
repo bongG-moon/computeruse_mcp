@@ -5,7 +5,7 @@ import unittest
 from unittest import mock
 
 import test_interaction as fixtures
-from image_pixels import decode_png, encode_png
+from image_pixels import decode_png, encode_png, crop_regions, pixel_digest
 from operations import OperationError
 from test_image_steps import image_target, png
 from visual_targets import WorkflowVisualTargets
@@ -134,7 +134,33 @@ class WorkflowVisualTargetTests(unittest.TestCase):
     def test_changes_outside_selected_region_invalidate_prior_scene_proof(self):
         submitted = self.submission(self.open())
         self.changed_frame()  # Outside target AND scope: previous step may differ.
-        with self.assertRaisesRegex(OperationError, '화면 내용'): self.verify(submitted)
+        with self.assertRaises(OperationError) as caught: self.verify(submitted)
+        self.assertEqual(caught.exception.code, 'target_recovery_context_changed')
+        self.assertEqual(self.mutations(), [])
+
+    def test_clock_only_change_with_retained_condition_and_unique_scope(self):
+        opened = self.open()
+        job = self.manager.jobs[opened['target_review']['recovery_id']]
+        frame = self.manager._frame(job)
+        conditions = [{'x':70,'y':10,'width':20,'height':12}]
+        job['condition_proof'] = {'expires':self.now+120, 'geometry':frame['geometry'],
+            'regions':conditions, 'digests':[pixel_digest(png) for png in crop_regions(frame['png'],conditions,runtime=self.runtime)]}
+        self.changed_frame()  # isolated outside clock fixture pixel
+        with mock.patch('visual_targets.match_image', return_value={'status':'matched','rect':self.scope}):
+            result = self.verify(self.submission(opened))
+        self.assertEqual(result['state'],'target_review_ready')
+        self.assertEqual(self.mutations(), [])
+
+    def test_changed_prior_condition_is_rejected_even_with_unchanged_target(self):
+        opened = self.open()
+        job = self.manager.jobs[opened['target_review']['recovery_id']]
+        frame = self.manager._frame(job)
+        region = {'x':70,'y':10,'width':20,'height':12}
+        job['condition_proof'] = {'expires':self.now+120,'geometry':frame['geometry'],
+            'regions':[region], 'digests':[pixel_digest(png) for png in crop_regions(frame['png'],[region],runtime=self.runtime)]}
+        self.changed_frame(75,15)
+        with self.assertRaises(OperationError) as caught: self.verify(self.submission(opened))
+        self.assertEqual(caught.exception.code,'target_recovery_context_changed')
         self.assertEqual(self.mutations(), [])
 
     def test_no_scope_requires_global_unique_match_at_the_observed_location(self):
@@ -168,7 +194,7 @@ class WorkflowVisualTargetTests(unittest.TestCase):
         self.changed_frame(25, 35)
         result = self.execute(verified['recovery_id'])
         self.assertFalse(result['input_dispatched'])
-        self.assertEqual(result['diagnostic']['code'], 'target_recovery_observation_changed')
+        self.assertEqual(result['diagnostic']['code'], 'target_recovery_target_changed')
         self.assertEqual(self.mutations(), [])
         self.assertEqual(self.execute(verified['recovery_id'])['diagnostic']['code'], 'target_recovery_expired')
 

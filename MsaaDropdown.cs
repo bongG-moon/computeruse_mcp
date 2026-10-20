@@ -44,11 +44,13 @@ class MsaaDropdown {
         }
     }
     [STAThread] static int Main() {
+        IntPtr requested = IntPtr.Zero; int requestedPid = 0;
         try {
             SetProcessDpiAwarenessContext(new IntPtr(-4));
             Console.InputEncoding=System.Text.Encoding.UTF8; Console.OutputEncoding=new System.Text.UTF8Encoding(false);
             var request=Json.Deserialize<Dictionary<string,object>>(Console.ReadLine());
             int pid=Convert.ToInt32(request["pid"]); var hwnd=new IntPtr(Convert.ToInt64(request["window_id"]));
+            requested = hwnd; requestedPid = pid;
             Check(hwnd,pid);
             if(!IsWindowVisible(hwnd)) throw new Exception("msaa_target_hidden");
             Rect outer,frame; if(!GetWindowRect(hwnd,out outer)) throw new Exception("msaa_geometry_unavailable");
@@ -63,6 +65,13 @@ class MsaaDropdown {
             Console.WriteLine(Json.Serialize(new {ok=true,pid=pid,window_id=hwnd.ToInt64(),lists=lists,
                 frames=new object[]{Box(frame.left,frame.top,frame.right-frame.left,frame.bottom-frame.top),Box(outer.left,outer.top,outer.right-outer.left,outer.bottom-outer.top)},
                 complete=true,read_only=true,visited=visited})); return 0;
-        } catch(Exception error) {Console.WriteLine(Json.Serialize(new {ok=false,code=error.Message})); return 1;}
+        } catch(Exception error) {
+            string code = error.Message.StartsWith("msaa_") ? error.Message :
+                error is COMException ? "msaa_provider_error" :
+                error is ArgumentException || error is IndexOutOfRangeException ? "msaa_provider_range" : "msaa_read_failed";
+            if (requested != IntPtr.Zero) { try { Check(requested, requestedPid); }
+                catch { code = "msaa_target_changed"; } }
+            Console.WriteLine(Json.Serialize(new {ok=false,code=code,hresult=error.HResult,read_only=true})); return 1;
+        }
     }
 }

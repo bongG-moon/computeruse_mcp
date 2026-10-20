@@ -61,11 +61,12 @@ APP_FILES = (
     "scoped_controls.py", "repeat_profiles.py", "result_files.py", 
     "window_transitions.py", "program_registration.py",
     "execution_progress.py", "image_delivery.py", 
-    "recording_windows.py",
+    "recording_windows.py", "transient_popup.py",
     "replay_preflight.py", "checkpoint_review.py", 
 )
 OPTIONAL_APP_FILES = ()
 SOURCE_SUPPORT_FILES = (
+    "test_transient_popup.py", "test_hover_matching.py", "test_loaded_code_identity.py", "fixtures/PopupExportFixture.cs",
     "MsaaDropdown.cs", "test_msaa_dropdown.py", "fixtures/MsaaListFixture.cs", "tools/test_msaa_native.py",
     "test_semantic_targets.py",
     "test_artifact_lifecycle.py", "test_artifact_integration.py", "test_capture_temp_scope.py",

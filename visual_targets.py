@@ -13,7 +13,7 @@ import threading
 import time
 import uuid
 
-from image_pixels import crop_regions, target_from_region, validate_region
+from image_pixels import crop_regions, target_from_region, validate_region, pixel_digest
 from image_steps import IMAGE_MUTATIONS, execute_image_step, validate_image_step
 from image_targets import match_image, png_dimensions, validate_image_target
 from interaction import InteractionEngine, _same_pixels
@@ -22,7 +22,9 @@ from operations import OperationError
 
 RECOVERABLE_CODES = frozenset({'image_not_found', 'image_ambiguous'})
 REFRESH_CODES = frozenset({'target_recovery_expired', 'target_recovery_observation_changed',
-                           'target_recovery_window_changed'})
+                           'target_recovery_window_changed', 'target_recovery_geometry_changed',
+                           'target_recovery_target_changed', 'target_recovery_scope_changed',
+                           'target_recovery_context_changed', 'target_recovery_ambiguous'})
 _REFERENCE_KEYS = ('recovery_id', 'run_id', 'step_index', 'step_id', 'iteration_id',
                    'observation_id', 'frame_id')
 
@@ -136,6 +138,11 @@ class WorkflowVisualTargets:
                 self.jobs[identity] = {'engine': engine, 'runtime': runtime, 'context': context,
                     'target': dict(target), 'public': public, 'expires': self.clock()+self.ttl,
                     'window_ref': binding['window_ref'], 'verified': False}
+            proof = getattr(runtime, '_workflow_visual_evidence', {}).get(record['run_id'])
+            if (proof and proof['step_index'] == context['step_index']-1
+                    and proof['target'] == target and proof['expires'] >= self.clock()
+                    and proof['identity'] == engine.windows[binding['window_ref']]['identity']):
+                self.jobs[identity]['condition_proof'] = copy.deepcopy(proof)
             return {'state': 'needs_target_review', 'task_verified': False, 'input_dispatched': False,
                 'target_review': copy.deepcopy(public), 'image_content': [
                     {'type': 'image', 'mimeType': 'image/png', 'data': saved['template_png']}, *copy.deepcopy(images)],
@@ -177,23 +184,33 @@ class WorkflowVisualTargets:
         target = self._window(job)
         if (runtime.guard.image_geometry_resolver(target['window_id']) != frame['geometry']
                 or png_dimensions(current_png) != tuple(frame['image_size'][key] for key in ('width', 'height'))):
-            raise OperationError('관찰 뒤 창의 위치·배율·크기가 달라졌습니다.', 'target_recovery_observation_changed')
-        # The workflow has checked preceding steps before issuing this exact
-        # challenge. Preserve that scene as well as the selected control; a
-        # changed condition elsewhere must not bypass the prior-step check.
-        if not _same_pixels(frame['png'], current_png):
-            raise OperationError('관찰 뒤 화면 내용이 달라졌습니다. 현재 화면을 다시 확인하세요.',
-                                 'target_recovery_observation_changed')
+            raise OperationError('관찰 뒤 창의 위치·배율·크기가 달라졌습니다.', 'target_recovery_geometry_changed')
         region, scope = job['region'], job['scope']
         selected = [scope, region] if scope is not None else [region]
         before, after = crop_regions(frame['png'], selected, runtime=runtime), crop_regions(current_png, selected, runtime=runtime)
-        if any(not _same_pixels(left, right) for left, right in zip(before, after)):
-            raise OperationError('관찰 뒤 선택한 그림 또는 주변 문구가 바뀌었습니다.', 'target_recovery_observation_changed')
-        if scope is None:
-            matched = match_image(runtime, job['image_target'], current_png)
-            if matched.get('status') != 'matched' or matched.get('rect') != region:
+        if not _same_pixels(before[-1], after[-1]):
+            raise OperationError('관찰 뒤 클릭할 대상 그림이 바뀌었습니다.', 'target_recovery_target_changed')
+        if scope is not None and not _same_pixels(before[0], after[0]):
+            raise OperationError('관찰 뒤 대상을 구별할 주변 문구가 바뀌었습니다.', 'target_recovery_scope_changed')
+        proof = job.get('condition_proof')
+        if proof:
+            if (self.clock() > proof['expires'] or proof['geometry'] != frame['geometry']
+                    or [pixel_digest(png) for png in crop_regions(current_png, proof['regions'], runtime=runtime)] != proof['digests']):
+                raise OperationError('이전 단계에서 확인한 업무 조건 영역이 바뀌거나 만료됐습니다.',
+                                     'target_recovery_context_changed')
+        # Scope alone does not authorize ignoring prior business conditions.
+        # Require the immediately preceding checkpoint's retained evidence.
+        if not _same_pixels(frame['png'], current_png):
+            if proof is None or scope is None:
+                raise OperationError('대상 밖 화면이 바뀌었고 이전 업무 조건의 영역 증명이 없습니다. 해당 조건을 포함한 화면 확인이 필요합니다.',
+                                     'target_recovery_context_changed')
+        if scope is None or proof is not None:
+            match_target = job['scope_target'] if scope is not None else job['image_target']
+            expected = scope if scope is not None else region
+            matched = match_image(runtime, match_target, current_png)
+            if matched.get('status') != 'matched' or matched.get('rect') != expected:
                 raise OperationError('현재 화면에서 같은 대상을 유일하게 구분하지 못했습니다. 주변 문구를 포함해 다시 확인하세요.',
-                                     'target_recovery_observation_changed')
+                                     'target_recovery_ambiguous')
         self._window(job)
         if runtime.guard.image_geometry_resolver(target['window_id']) != frame['geometry']:
             raise OperationError('대상 확인 중 창 위치가 바뀌었습니다.', 'target_recovery_observation_changed')
@@ -229,6 +246,11 @@ class WorkflowVisualTargets:
                         or scope['y']+scope['height'] < region['y']+region['height']):
                     raise OperationError('scope_region에는 대상과 구별할 주변 문구가 함께 포함되어야 합니다.', 'invalid_target_recovery')
             job.update(region=region, scope=scope, image_target=target_from_region(frame['png'], region, runtime=runtime))
+            if scope is not None and job.get('condition_proof'):
+                if max(scope['width'], scope['height']) <= 512:
+                    job['scope_target'] = target_from_region(frame['png'], scope, runtime=runtime)
+                else:
+                    job.pop('condition_proof', None)  # retain strict full-frame check
             fresh = runtime.capture_checkpoint(target)
             self._window(job)
             images = [item for item in fresh.get('content', []) if item.get('type') == 'image']

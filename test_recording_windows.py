@@ -39,6 +39,32 @@ class Runtime:
 
 
 class WindowBindingTests(unittest.TestCase):
+    def test_same_class_candidates_require_unique_image_and_unchanged_identity(self):
+        for scores, expected in (([.99, .80], True), ([.99, .98], False), ([.99, .99], False)):
+            probe = Probe([row(20, thread_id=8), row(21, thread_id=8)])
+            runtime = Runtime(probe)
+            runtime.capture_checkpoint = mock.Mock(return_value={'content': [
+                {'type': 'image', 'mimeType': 'image/png', 'data': 'fixture'}]})
+            answers = [{'status': 'matched' if score >= .94 else 'not_found', 'score': score} for score in scores]
+            with mock.patch('image_targets.match_image', side_effect=answers):
+                result = execute_window_wait(runtime, step(), {('editor', 'main'): {'pid': 42, 'window_id': 10}},
+                    image_hint={'ambiguity_margin': .03})
+            self.assertEqual(result['task_verified'], expected)
+            self.assertFalse(result['input_dispatched'])
+
+    def test_candidate_replacement_during_image_comparison_is_rejected(self):
+        probe = Probe([row(20, thread_id=8), row(21, thread_id=8)])
+        runtime = Runtime(probe)
+        def capture(target):
+            probe.state['windows'][1]['thread_id'] = 99
+            return {'content': [{'type': 'image', 'mimeType': 'image/png', 'data': 'fixture'}]}
+        runtime.capture_checkpoint = capture
+        with mock.patch('image_targets.match_image', side_effect=[
+                {'status': 'matched', 'score': .99}, {'status': 'not_found', 'score': .5}]):
+            result = execute_window_wait(runtime, step(), {('editor', 'main'): {'pid': 42, 'window_id': 10}},
+                image_hint={'ambiguity_margin': .03})
+        self.assertEqual(result['diagnostic']['code'], 'recording_window_changed')
+        self.assertFalse(result['input_dispatched'])
     def test_transition_inventory_finds_child_dropdown_without_repeating_click(self):
         probe = Probe([])
         state = probe.snapshot()
@@ -235,6 +261,16 @@ class RecordingDraftWindowTests(unittest.TestCase):
         self.assertEqual(popup_checks[0]["window_ref"], "main")
         self.assertEqual(popup_checks[0]["return_from"], "popup_1")
         self.assertEqual(self.draft.steps[4]["window_ref"], "popup_1")  # Earlier popup checkpoint stays there.
+        self.draft.validate()
+
+    def test_sibling_submenu_replaces_false_main_return(self):
+        sibling = {**self.window, 'window_ref': 'popup_2',
+                   'window_id': self.window['window_id'] + 1, 'closed': True}
+        self.draft.recorded([self.event('main'), self.event('popup_1'), self.event('popup_2')],
+            windows=[{**self.window, 'closed': True}, sibling])
+        opening = next(s for s in self.draft.steps if s.get('opened_from') == 'popup_1')
+        self.assertEqual(opening['window_ref'], 'popup_2')
+        self.assertFalse(any(s.get('return_from') == 'popup_1' for s in self.draft.steps))
         self.draft.validate()
 
     def test_same_native_handle_reopened_as_two_episodes_has_two_owner_checkpoints(self):

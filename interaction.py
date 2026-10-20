@@ -97,21 +97,25 @@ class InteractionEngine:
         return dict(binding['target'])
 
     def observe(self, window_ref, *, goal='', search='', observation='auto', within=None,
-                image_delivery_enabled=False, max_controls=80, max_depth=12, max_elements=600):
+                image_delivery_enabled=False, max_controls=80, max_depth=12, max_elements=600,
+                preserve_foreground=False):
         target = self.target(window_ref)
-        if type(image_delivery_enabled) is not bool:
+        if type(image_delivery_enabled) is not bool or type(preserve_foreground) is not bool:
             raise OperationError('이미지 전달 프로필을 확인하세요.', 'invalid_image_profile')
         # Text clients keep all local image recording/replay facilities. This
         # facade does not silently send screenshots to a text-only connection.
         wants_image = image_delivery_enabled and observation != 'uia'
         focus = None
-        if wants_image:
+        if wants_image and not preserve_foreground:
             focus = prepare_image_foreground(self.runtime, target)
             if focus is not None:
                 return _answer({**focus, **self._binding(window_ref), 'state': 'blocked', 'dispatch': 'not_sent'})
         geometry = validate_geometry(self.runtime.guard.image_geometry_resolver(target['window_id'])) if wants_image else None
+        from transient_popup import proven_popup
+        popup_visual = wants_image and preserve_foreground and proven_popup(target)
         answer = inspect_window(self.runtime, target, max_controls=max_controls, max_depth=max_depth,
-            max_elements=max_elements, search=search, within=within, observation='both' if wants_image else 'uia',
+            max_elements=max_elements, search=search, within=within,
+            observation='visual' if popup_visual else 'both' if wants_image else 'uia',
             requested_goal=goal)
         if answer.get('isError'):
             return answer

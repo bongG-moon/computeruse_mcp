@@ -103,6 +103,67 @@ def combo_list_owned_by(owner_id, list_id, pid):
     return related
 
 
+def _disambiguate_windows(runtime, probe, owner, candidates, image_hint):
+    """Read-only image tie-break after native scope checks, never first-match."""
+    if not image_hint or not 2 <= len(candidates) <= 4:
+        return None
+    from image_targets import match_image
+    snapshot = getattr(probe, "transition_snapshot", probe.snapshot)
+    before = snapshot()
+    keys = ("pid", "window_id", "class_name", "thread_id", "owner_window_id",
+            "root_owner_window_id", "visible")
+    ids = {owner["window_id"], *(row["window_id"] for row in candidates)}
+    def identities(state):
+        rows = {row["window_id"]: row for row in state.get("windows", [])}
+        if (state.get("process_exited") is not False or state.get("target_present") is not True
+                or not ids <= rows.keys()
+                or any(not rows[hwnd].get("thread_id") for hwnd in ids)):
+            raise OperationError("후보 창의 수명을 확인하지 못했습니다.", "recording_window_changed")
+        paths = {}
+        for hwnd in ids - {owner["window_id"]}:
+            if callable(getattr(probe, "ownership_path", None)):
+                path = probe.ownership_path(hwnd, owner["window_id"])
+                if not path:
+                    raise OperationError("후보 팝업의 소유 경로가 바뀌었습니다.", "recording_window_changed")
+                paths[hwnd] = path
+            elif not owned_by(rows[hwnd], owner["window_id"], list(rows.values())):
+                raise OperationError("후보 팝업의 소유 경로가 바뀌었습니다.", "recording_window_changed")
+        return (state.get("creation_time"), state.get("executable"),
+                {hwnd: tuple(rows[hwnd].get(key) for key in keys) for hwnd in ids}, paths)
+    original = identities(before)
+    if any(tuple(row.get(key) for key in keys) != original[2][row["window_id"]] for row in candidates):
+        raise OperationError("후보를 읽기 전에 창 정보가 바뀌었습니다.", "recording_window_changed")
+    matched, scores = [], []
+    started = time.monotonic()
+    for row in candidates:
+        runtime.check_active()
+        if time.monotonic() - started > 15:
+            return None
+        from transient_popup import register_popup
+        candidate_target = {key: row[key] for key in ("pid", "window_id")}
+        register_popup(candidate_target, owner)
+        capture = runtime.capture_checkpoint(candidate_target)
+        images = [item for item in capture.get("content", []) if item.get("type") == "image"]
+        if capture.get("isError") or len(images) != 1 or images[0].get("mimeType") != "image/png":
+            return None
+        compared = match_image(runtime, image_hint, images[0]["data"])
+        if compared.get("status") not in {"matched", "not_found"} or type(compared.get("score")) not in (int, float):
+            return None
+        scores.append((row, compared["score"]))
+        if compared["status"] == "matched":
+            matched.append(row)
+    runtime.check_active()
+    if identities(snapshot()) != original:
+        raise OperationError("이미지 비교 중 후보 창이 교체되었습니다.", "recording_window_changed")
+    if len(matched) != 1:
+        return None
+    chosen = matched[0]
+    score = next(score for row, score in scores if row is chosen)
+    if score - max(score for row, score in scores if row is not chosen) < image_hint.get("ambiguity_margin", .03):
+        return None
+    return chosen
+
+
 def execute_window_wait(runtime, step, bindings, *, image_hint=None):
     validate_window_wait(step)
     began = time.monotonic()
@@ -166,10 +227,16 @@ def execute_window_wait(runtime, step, bindings, *, image_hint=None):
             }
             result["candidates"] = [{key: row.get(key) for key in ("pid", "window_id", "title", "class_name")} for row in matches[:10]]
             if len(matches) > 1:
-                raise OperationError("같은 조건의 관련 팝업이 여러 개라 선택하지 않았습니다.", "recording_window_ambiguous")
+                selected = _disambiguate_windows(runtime, probe, owner, matches, image_hint)
+                if selected is None:
+                    raise OperationError("같은 조건의 관련 팝업을 저장 이미지로 유일하게 구분하지 못했습니다.", "recording_window_ambiguous")
+                matches = [selected]
+                result["disambiguation"] = "saved_image_unique"
             if len(matches) == 1:
                 target = {key: matches[0][key] for key in ("pid", "window_id")}
                 runtime.check_active()
+                from transient_popup import register_popup
+                register_popup(target, owner)
                 result.update(status="verified", task_verified=True, target=target,
                               class_match="exact" if matches[0]["class_name"] == step["class_name"] else "winforms_runtime_suffix",
                               verification_scope="owned_window_presence_only", business_result_verified=False)

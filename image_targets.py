@@ -194,10 +194,17 @@ def validate_match(answer, image_target, screenshot_png):
             raise OperationError('이미지 테두리 보정의 크기와 범위를 확인하지 못했습니다.', 'image_match_invalid')
         for dimension, origin, start, end, extent in (('width', 'x', 'left', 'right', width), ('height', 'y', 'top', 'bottom', height)):
             removed = clip[start]+clip[end]
+            partial_edge = (original[dimension] < extent and 0 <= rect[origin] <= 1
+                            and clip[end] == 0 and 0 < target['capture_window'][dimension]-extent <= 4
+                            and clip[start]-rect[origin] == (target['capture_window'][dimension]-extent)//2)
+            far_gap = extent-rect[origin]-rect[dimension]
+            partial_edge = partial_edge or (original[dimension] < extent and 0 <= far_gap <= 1
+                            and clip[start] == 0 and 0 < target['capture_window'][dimension]-extent <= 4
+                            and clip[end]-far_gap == (target['capture_window'][dimension]-extent)//2)
             if removed and (removed > 4 or original[dimension] != target['capture_window'][dimension]
                     or rect[dimension] != extent or rect[origin] != 0
                     or removed != target['capture_window'][dimension]-extent
-                    or clip[start] != removed//2 or clip[end] != removed-removed//2):
+                    or clip[start] != removed//2 or clip[end] != removed-removed//2) and not partial_edge:
                 raise OperationError('이미지 테두리 밖의 영역을 잘라낼 수 없습니다.', 'image_match_invalid')
         # Preserve the recorded point in original source pixels. Rescaling the
         # retained crop would shift off-center clicks; clipping must never clamp
@@ -343,7 +350,10 @@ def match_image(runtime, image_target, screenshot_png):
             answer = _native_match(runtime, target, screenshot_png, helper, deadline)
             candidate = validate_match(answer, target, screenshot_png)
         runtime.check_active()
-        validated = {**candidate, "backend": "airtest-template-rgb" if backend == "airtest" else "native-rgb"}
+        validated = {**candidate, "backend": answer.get("backend", "airtest-template-rgb") if backend == "airtest" else "native-rgb"}
+        if answer.get("appearance_verified") is True:
+            validated["appearance_verified"] = True
+            validated["original_score"] = answer.get("original_score")
         # Uniqueness and detail rejection are final, never a reason to try a
         # more permissive engine. Only a genuinely absent target may fall back.
         if candidate["status"] != "not_found" or candidate.get("low_detail"):

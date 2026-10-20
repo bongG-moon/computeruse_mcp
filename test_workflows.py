@@ -169,6 +169,21 @@ class WorkflowTests(unittest.TestCase):
     def checkpoint(self, run_id):
         return self.runner.progress(run_id)
 
+    def test_refresh_counters_survive_durable_run_reload(self):
+        answer = self.run_recipe(ScriptedOperations())
+        path = self.runner._path(answer["run_id"])
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record["target_review_refreshes"] = {"0:image_not_found": 4}
+        record["visual_review_refreshes"] = {"1:review_observation_changed": 3}
+        path.write_text(json.dumps(record), encoding="utf-8")
+        self.assertEqual(self.checkpoint(answer["run_id"]), record)
+        for bad in ({"2:image_not_found": 1}, {"0:image_not_found": True}, {"0:image_not_found": 5},
+                    {"-1:image_not_found": 1}, {"0:unknown/path": 1}):
+            record["target_review_refreshes"] = bad
+            path.write_text(json.dumps(record), encoding="utf-8")
+            with self.assertRaises(WorkflowError):
+                self.checkpoint(answer["run_id"])
+
     def test_hosted_frame_uses_exact_logical_app_and_never_authorizes_host_exe(self):
         self.runtime.guard.process_resolver = mock.Mock(return_value=r"C:\Windows\System32\ApplicationFrameHost.exe")
         self.runtime.guard.target_executable = mock.Mock(return_value=self.runtime.programs[0]["exe"])

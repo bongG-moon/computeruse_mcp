@@ -2,6 +2,7 @@
 import copy
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 import test_interaction as fixtures
 from operations import OperationError
@@ -94,6 +95,22 @@ class WorkflowVisualReviewTests(unittest.TestCase):
         with self.assertRaises(OperationError):
             self.verify({**self.submission(opened), 'task_verified': True})
         self.assertEqual(self.mutations(), [])
+
+    def test_checkpoint_capture_never_activates_main_window(self):
+        with mock.patch('interaction.prepare_image_foreground') as activate:
+            self.open()
+        activate.assert_not_called()
+
+    def test_full_template_round_trip_and_changed_metadata(self):
+        opened = self.open()
+        submitted = {**opened['observation_review_template'], 'verdict': 'pass',
+                     'evidence': 'The first row shows Running'}
+        for key, value in [('image_size', {'width': 1, 'height': 1}),
+                           ('expires_in_seconds', 1), ('expected_condition', 'different'),
+                           ('step_index', 2.0)]:
+            with self.subTest(key=key), self.assertRaises(OperationError):
+                self.verify({**submitted, key: value})
+        self.assertTrue(self.verify(submitted)['task_verified'])
 
 
 if __name__ == '__main__': unittest.main()

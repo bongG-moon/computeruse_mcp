@@ -58,7 +58,8 @@ class WorkflowVisualReviews:
             binding = engine.bind(target)
             request = engine.request_review(binding['window_ref'], step['message'])
             observed = engine.observe(binding['window_ref'], goal=step['message'],
-                image_delivery_enabled=True, max_controls=30, max_depth=2, max_elements=100)
+                image_delivery_enabled=True, max_controls=30, max_depth=2, max_elements=100,
+                preserve_foreground=True)
             data = observed.get('structuredContent', {})
             images = [item for item in observed.get('content', []) if item.get('type') == 'image']
             if observed.get('isError') or not data.get('frame_id') or len(images) != 1:
@@ -72,7 +73,9 @@ class WorkflowVisualReviews:
                 'target': dict(target), 'public': public, 'request': request,
                 'expires': self.clock()+self.ttl, 'window_ref': binding['window_ref']}
             return {'state': 'needs_observation_review', 'task_verified': False, 'input_dispatched': False,
-                'visual_review': copy.deepcopy(public), 'image_content': copy.deepcopy(images),
+                'visual_review': copy.deepcopy(public),
+                'observation_review_template': copy.deepcopy(public),
+                'image_content': copy.deepcopy(images),
                 'next_step': '현재 이미지를 보고 명시된 완료 조건만 판정하세요. 같은 run_id로 observation_review와 함께 이어가며 입력은 반복하지 않습니다.'}
         except Exception:
             engine.close()
@@ -83,7 +86,9 @@ class WorkflowVisualReviews:
             raise OperationError('시각 확인 요청의 식별자와 관찰 근거가 필요합니다.', 'invalid_visual_review')
         required = {'review_id', 'run_id', 'step_index', 'step_id', 'iteration_id', 'expected_condition_id',
                     'observation_id', 'frame_id', 'verdict', 'evidence'}
-        if not required <= set(submission) or set(submission)-required-{'evidence_regions', 'session_id', 'window_ref'}:
+        metadata = {'session_id', 'window_ref', 'expected_condition', 'expires_in_seconds',
+                    'image_size', 'evidence_level'}
+        if not required <= set(submission) or set(submission)-required-metadata-{'evidence_regions'}:
             raise OperationError('시각 확인 응답의 실행·단계·화면 정보를 모두 전달하세요.', 'invalid_visual_review')
         context = _context(runtime, record, step)
         job = self.jobs.get(submission['review_id'])
@@ -92,14 +97,30 @@ class WorkflowVisualReviews:
         if context != job['context'] or target != job['target']:
             raise OperationError('시각 확인의 실행·반복 회차·대상 창이 달라졌습니다.', 'visual_review_context_mismatch')
         for key in required-{'verdict', 'evidence'}:
-            if submission[key] != job['public'][key]:
+            if type(submission[key]) is not type(job['public'][key]) or submission[key] != job['public'][key]:
                 raise OperationError('다른 실행·단계·완료 조건·화면의 판정입니다.', 'visual_review_context_mismatch')
-        for key in ('session_id', 'window_ref'):
-            if key in submission and submission[key] != job['public'][key]:
+        for key in metadata:
+            if key in submission and (type(submission[key]) is not type(job['public'][key])
+                                      or submission[key] != job['public'][key]):
                 raise OperationError('확인 요청의 연결 정보가 다릅니다.', 'visual_review_context_mismatch')
         result = job['engine'].review(job['window_ref'], action_id=job['request']['action_id'],
             observation_id=submission['observation_id'], frame_id=submission['frame_id'],
             verdict=submission['verdict'], evidence=submission['evidence'], evidence_regions=submission.get('evidence_regions'))
+        # Retain only condition-region hashes, never a full persisted screen.
+        # This is usable by the immediately following step of this exact run.
+        if result.get('task_verified') is True and submission.get('evidence_regions'):
+            from image_pixels import crop_regions, pixel_digest
+            frame = job['engine'].observations[submission['observation_id']]['frame']
+            regions = copy.deepcopy(submission['evidence_regions'])
+            proofs = dict(getattr(runtime, '_workflow_visual_evidence', {}))
+            proofs[record['run_id']] = {
+                'step_index': context['step_index'], 'target': dict(target),
+                'identity': copy.deepcopy(job['engine'].windows[job['window_ref']]['identity']),
+                'geometry': frame['geometry'], 'regions': regions,
+                'digests': [pixel_digest(png) for png in crop_regions(frame['png'], regions, runtime=runtime)],
+                'expires': self.clock() + self.ttl}
+            while len(proofs) > 16: proofs.pop(next(iter(proofs)))
+            runtime._workflow_visual_evidence = proofs
         job['engine'].close(); self.jobs.pop(submission['review_id'])
         return {**result, 'visual_review': {**context, 'review_id': submission['review_id'],
                 'verdict': submission['verdict'], 'evidence': submission['evidence'],

@@ -162,6 +162,26 @@ class WorkflowWindowTests(unittest.TestCase):
             {"program_id": "editor", "window_ref": "popup_1", "operation": "checkpoint",
              "opened_from": "main", "message": "Confirm the opened popup"}]
 
+    def test_dispatched_focus_failure_resumes_at_popup_review_without_reclick(self):
+        self.task["steps"] = self.opened_popup_steps()
+        self.runtime.image_action = mock.Mock(return_value={
+            "task_verified":False,"input_dispatched":True,"verification_deferred":False,
+            "diagnostic":{"code":"image_input_unconfirmed"}})
+        self.runtime.capture_checkpoint = mock.Mock(return_value={
+            "content":[{"type":"image","mimeType":"image/png","data":png()}]})
+        first = self.run_task(ScriptedOperations())
+        self.assertEqual(first["completed_steps"],0)
+        resumed = self.run_task(ScriptedOperations(),resume_run_id=first["run_id"])
+        self.assertEqual(resumed["completed_steps"],2)
+        self.assertFalse(resumed["task_verified"])
+        self.assertTrue(resumed["checkpoint"]["capture_available"])
+        self.assertEqual(resumed["step_receipts"][0]["status"],"awaiting_verification")
+        self.runtime.image_action.assert_called_once()
+        done = self.run_task(ScriptedOperations(),resume_run_id=first["run_id"],
+                             acknowledge_checkpoint=resumed["checkpoint"]["id"])
+        self.assertTrue(done["task_verified"])
+        self.runtime.image_action.assert_called_once()
+
     def test_opened_popup_checkpoint_captures_popup_instead_of_modal_owner(self):
         self.task["steps"] = self.opened_popup_steps()
         self.runtime.image_action = mock.Mock(return_value={"task_verified": False, "input_dispatched": True, "verification_deferred": True})

@@ -1533,7 +1533,8 @@ class Guard:
             validate_arguments("get_window_state", target, policy, self.process_resolver, self.window_resolver)
             executable = self.target_executable(target)
             def require_ready():
-                if self.checkpoint_ready_resolver(target["window_id"]) is not True:
+                from transient_popup import proven_popup
+                if self.checkpoint_ready_resolver(target["window_id"]) is not True and not proven_popup(target):
                     raise CheckpointRequiresForeground("화면 확인 대상 창을 최소화하지 않은 상태로 맨 앞으로 가져오세요. "
                         "다른 창의 화면 노출을 막기 위해 캡처를 중지했습니다. 창을 표시한 뒤 승인 ID 없이 이어가기로 다시 확인하세요.")
             require_ready()
@@ -1601,12 +1602,14 @@ class Guard:
         coordinate_contract = None
         focus_diagnostic = None
         capture_size = None
+        input_backend = "cua-driver"
         point = None
         self.observed_targets.clear()
         def result(code, message, *, verified=False, deferred=False):
             return {"operation": step["operation"], "status": "verified" if verified else "needs_review",
                     "task_verified": verified, "input_dispatched": may_have_dispatched,
                     "verification_deferred": deferred,
+                    "input_backend": input_backend,
                     "diagnostic": {"code": code, "message": message, "automatic_replay": False,
                         **({"image_match": copy.deepcopy(match_diagnostic)} if match_diagnostic else {}),
                         **({"driver_failure": copy.deepcopy(driver_failure)} if driver_failure else {}),
@@ -1636,7 +1639,8 @@ class Guard:
                 nonlocal focus_diagnostic
                 check_active()
                 self.check_stop()
-                if self.checkpoint_ready_resolver(target["window_id"]) is not True:
+                from transient_popup import proven_popup
+                if self.checkpoint_ready_resolver(target["window_id"]) is not True and not proven_popup(target):
                     raise OperationError("이미지 작업 대상 창을 최소화하지 않은 상태로 맨 앞으로 가져오세요.", "image_requires_foreground")
                 if (self.window_resolver(target["window_id"]) != target["pid"]
                         or self.target_executable(target) != executable
@@ -1660,6 +1664,9 @@ class Guard:
                            image_coordinate_resolver=self.image_coordinate_resolver,
                            image_focus_bounds_resolver=self.image_focus_bounds_resolver)
             visual.action_count = self.action_count
+            # Internal capability only; public click coordinates cannot opt in.
+            visual._popup_image_click = step["operation"] == "image_click"
+            visual._popup_check_active = ready
             def approve(name, args, call_id, *, request_deadline=None):
                 self.approve(name, args, call_id,
                     **({"request_deadline": request_deadline} if request_deadline is not None else {}))
@@ -1710,7 +1717,7 @@ class Guard:
                 return result("image_appeared", "현재 창에서 저장한 이미지를 하나로 확인했습니다.", verified=True)
             operation = step["operation"][6:]
             def dispatch(name, args, *, require_same_window_after=True):
-                nonlocal may_have_dispatched, driver_failure
+                nonlocal may_have_dispatched, driver_failure, input_backend
                 ready()
                 previously_dispatched = may_have_dispatched
                 dispatch_count = visual.action_count
@@ -1728,6 +1735,8 @@ class Guard:
                         except (ValueError, TypeError):
                             pass
                 sources = [row for row in sources if isinstance(row, dict)]
+                if any(row.get("backend") == "owned-popup-messages" for row in sources):
+                    input_backend = "owned-popup-messages"
                 # A count is an attempted call, not proof of delivered input.
                 # Only explicit, non-contradictory Driver non-delivery can
                 # restore the earlier state. Never clear an earlier focus click.
@@ -1877,6 +1886,23 @@ class Guard:
                     # Suppress pixels/tree if the package inside a shared frame
                     # was replaced while the Driver performed its read.
                     self.target_executable(args)
+                from transient_popup import exact_missing, capture as capture_popup, click as click_popup
+                if exact_missing(raw, args.get("window_id")):
+                    if name == "get_window_state" and self.policy["mode"] == "visual":
+                        try:
+                            raw = capture_popup({key: args[key] for key in ("pid", "window_id")},
+                                                self.image_geometry_resolver(args["window_id"]))
+                        except (RuntimeError, OSError, ValueError) as error:
+                            self.log("popup_capture_unavailable", request_id=call_id, tool=name,
+                                     summary=str(error), success=False,
+                                     diagnostic_code=getattr(error, "code", "popup_capture_failed"))
+                    elif name == "click" and getattr(self, "_popup_image_click", False):
+                        check = self._popup_check_active
+                        check()
+                        args = validate_arguments(name, args, self.policy, self.process_resolver, self.window_resolver)
+                        raw = click_popup({key: args[key] for key in ("pid", "window_id")},
+                                          {key: args[key] for key in ("x", "y")},
+                                          self.image_geometry_resolver(args["window_id"]), check)
                 result = action_guidance(filter_result(name, raw, self.policy, self.process_resolver), name)
                 result = observation_guidance(result, name, args, self.policy["mode"])
                 if name == "get_window_state" and not result.get("isError"):

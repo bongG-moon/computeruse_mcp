@@ -122,7 +122,8 @@ def prepare_image_foreground(runtime, target):
     focused = False
     try:
         runtime.check_active()
-        if ready(target["window_id"]) is True:
+        from transient_popup import proven_popup
+        if ready(target["window_id"]) is True or proven_popup(target):
             return None
         observed = runtime.call("get_window_state", {**target, "max_depth": 1, "max_elements": 50})
         if observed.get("isError"):

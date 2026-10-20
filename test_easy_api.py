@@ -64,6 +64,16 @@ class EasyApiTests(unittest.TestCase):
         return self.manager.tasks.save({'id': 'demo', 'name': 'Demo', 'instructions': 'Read current app',
             'expected': 'Done', 'program_ids': ['editor'], 'steps': [{'operation': 'delay', 'duration_ms': 0, 'program_id': 'editor'}]})
 
+    def test_run_main_binding_survives_popup_and_explicit_override(self):
+        opened = self.open()
+        api = self.manager.easy
+        api._remember_run('run', [{'program_id': 'editor', 'pid': 100, 'window_id': 200}])
+        cached = api._run_refs('run', {})
+        self.assertEqual(api._engine().target(cached['editor']), opened['target'])
+        self.assertEqual(api._run_refs('run', {'editor': 'explicit'})['editor'], 'explicit')
+        api.close()
+        self.assertEqual(api.run_bindings, {})
+
     def test_saved_draft_is_listed_and_blocked_before_app_attach_or_launch(self):
         task = self.manager.tasks.save({'id': 'unfinished', 'name': 'Draft', 'instructions': 'Repair first',
             'expected': 'Done', 'program_ids': ['editor'],

@@ -355,6 +355,16 @@ class ProcessDraft:
         connected = {(step["program_id"], step.get("window_ref", "main")) for step in proposed if step["operation"] == "wait_for_window"}
         last_event = {(event.get("program_id"), event.get("window_ref", "main")): index for index, event in enumerate(events) if isinstance(event, dict)}
         closed = {(row["program_id"], row["window_ref"]): row["owner_ref"] for row in windows if row.get("closed") is True}
+        owner_graph = {(row["program_id"], row["window_ref"]): row["owner_ref"] for row in windows}
+        def recorded_owner(source, owner):
+            seen = set()
+            while source not in seen:
+                if source == owner: return True
+                seen.add(source)
+                parent = owner_graph.get(source)
+                if parent is None: return False
+                source = (source[0], parent)
+            return False
         final_values, terminal_checks = {}, []
         for index, event in enumerate(events):
             if isinstance(event, dict) and self._event_evidence(event):
@@ -380,10 +390,13 @@ class ProcessDraft:
             if binding_key in discovered and binding_key not in connected:
                 binding_step = discovered[binding_key][1]
                 owner_key = (target["program_id"], binding_step["owner_ref"])
+                opening_source = (proposed[-2]["program_id"], proposed[-2].get("window_ref", "main")) if len(proposed) >= 2 else None
                 opening = (len(proposed) >= 2 and proposed[-1]["operation"] == "checkpoint"
-                           and not proposed[-1].get("return_from") and not proposed[-1].get("opened_from")
+                           and not proposed[-1].get("opened_from")
                            and (proposed[-2]["operation"].startswith("image_") or proposed[-2].get("completion_mode") == "human") and not proposed[-2].get("expect")
-                           and all((item["program_id"], item.get("window_ref", "main")) == owner_key for item in proposed[-2:]))
+                           and recorded_owner(opening_source, owner_key)
+                           and (proposed[-1].get("return_from") == opening_source[1]
+                                or (proposed[-1]["program_id"], proposed[-1].get("window_ref", "main")) == opening_source))
                 if opening:
                     # A modal popup owns foreground now. Review that proven
                     # popup, not an inaccessible screenshot of its parent.
@@ -391,7 +404,7 @@ class ProcessDraft:
                 proposed.append(binding_step); labels.append(target["label"]); connected.add(binding_key)
                 if opening:
                     check = self.checkpoint(target)
-                    check.update(opened_from=binding_step["owner_ref"], message="관련 팝업 화면에서 앞선 동작의 결과를 확인한 뒤 계속하세요.")
+                    check.update(opened_from=opening_source[1], message="관련 팝업 화면에서 앞선 동작의 결과를 확인한 뒤 계속하세요.")
                     proposed.append(check); labels.append("열린 팝업 확인")
             kind = event.get("operation")
             if kind not in {*IMAGE_ACTIONS, "manual_entry", "select_option", "set_checked"}:

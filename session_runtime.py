@@ -10,6 +10,10 @@ import subprocess
 import threading
 import time
 import uuid
+import hashlib
+import marshal
+import sys
+import types
 
 from settings import VERSION
 from closing import ClosureManager
@@ -23,6 +27,34 @@ ACTION_LABELS = {"click": "선택한 버튼 또는 위치 누르기", "double_cl
                  "right_click": "오른쪽 버튼 메뉴 열기", "type_text": "글자 입력", "set_value": "입력칸 값 변경",
                  "press_key": "키보드 키 누르기", "hotkey": "단축키 누르기", "scroll": "화면 스크롤",
                  "drag": "선택한 위치 끌기", "bring_to_front": "선택한 창 앞으로 가져오기", "invoke_menu": "프로그램 메뉴 실행"}
+
+def loaded_code_identity():
+    """Hash loaded function code, not potentially newer source files on disk."""
+    root = Path(__file__).resolve().parent
+    found = {}
+    for name, module in list(sys.modules.items()):
+        path = getattr(module, "__file__", None)
+        if not path or Path(path).resolve().parent != root:
+            continue
+        functions = []
+        for key, value in vars(module).copy().items():
+            if isinstance(value, types.FunctionType) and value.__module__ == name:
+                functions.append((key, value.__code__))
+            elif isinstance(value, type) and value.__module__ == name:
+                for member, method in vars(value).items():
+                    if isinstance(method, (staticmethod, classmethod)): method = method.__func__
+                    if isinstance(method, types.FunctionType):
+                        functions.append((key + "." + member, method.__code__))
+        if functions:
+            digest = hashlib.sha256()
+            for key, code in sorted(functions):
+                digest.update(key.encode("utf-8"))
+                digest.update(marshal.dumps(code))
+            found[name] = digest.hexdigest()
+    return {"scope": "loaded_local_function_code_at_session_start",
+            "sha256": hashlib.sha256(json.dumps(found, sort_keys=True).encode()).hexdigest(),
+            "modules": found, "pid": os.getpid(),
+            "note": "Excludes later lazy imports, module constants and native helper processes."}
 
 
 class SessionError(RuntimeError):
@@ -139,6 +171,7 @@ class SessionRuntime:
         self.programs = copy.deepcopy(programs)
         self.mode = mode
         self.task = copy.deepcopy(task)
+        self.code_identity = loaded_code_identity()
         self.minutes = max_minutes if max_minutes is not None else config["max_minutes"]
         self.max_actions = max_actions if max_actions is not None else config["max_actions"]
         self.id = uuid.uuid4().hex
@@ -495,6 +528,7 @@ class SessionRuntime:
     def status(self):
         from artifact_lifecycle import storage_status
         return {"session_id": self.id, "state": self.state, "reason": self.reason, "mode": self.mode,
+                "loaded_code": copy.deepcopy(self.code_identity),
                 "program_ids": [p["id"] for p in self.programs], "approval": self.config["approval"],
                 "approval_description": ("MCP 클라이언트의 승인에 의존합니다. 서버의 별도 승인 창은 생략합니다."
                                          if self.config["approval"] == "client" else

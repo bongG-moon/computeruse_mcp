@@ -19,6 +19,25 @@ def data(*rects):
 
 
 class MsaaTests(unittest.TestCase):
+    def test_transient_provider_retry_is_read_only_and_bounded(self):
+        runtime = Runtime(Probe([]))
+        with mock.patch.object(msaa, '_read_once', side_effect=[
+                OperationError('provider range', 'msaa_provider_range'), {'lists':[]}]) as read:
+            result = msaa.read_lists(runtime, {'pid':42,'window_id':10})
+        self.assertEqual(result['read_attempts'], 2)
+        self.assertEqual(read.call_count, 2)
+        self.assertTrue(runtime.probe.closed)
+
+    def test_changed_hwnd_never_retries_provider(self):
+        runtime = Runtime(Probe([]))
+        def read(*args, **kwargs):
+            runtime.probe.state['creation_time'] = 99
+            raise OperationError('provider', 'msaa_provider_error')
+        with mock.patch.object(msaa, '_read_once', side_effect=read) as call:
+            with self.assertRaises(OperationError) as caught:
+                msaa.read_lists(runtime, {'pid':42,'window_id':10})
+        self.assertEqual(caught.exception.code, 'msaa_target_changed')
+        self.assertEqual(call.call_count, 1)
     def test_geometry_dpi_and_multiple_frame_contracts(self):
         d=data({'x':110,'y':60,'width':30,'height':30})
         self.assertEqual(msaa.regions(d,(100,100)),[{'x':10,'y':10,'width':30,'height':30}])

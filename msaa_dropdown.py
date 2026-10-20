@@ -12,7 +12,7 @@ from image_pixels import crop_png
 HELPER = 'Computer Use MCP MSAA 목록.exe'
 
 
-def read_lists(runtime, target, timeout=2):
+def _read_once(runtime, target, timeout=2):
     from vendor.guard import validate_arguments
     runtime.check_active()
     guard = runtime.guard
@@ -37,7 +37,9 @@ def read_lists(runtime, target, timeout=2):
                 payload = None
         data = json.loads(output)
         if process.returncode or data.get('ok') is not True:
-            raise OperationError('MSAA 목록 속성을 읽지 못했습니다.', data.get('code', 'msaa_read_failed'))
+            code = data.get('code', 'msaa_read_failed')
+            if not isinstance(code, str) or not code.startswith('msaa_'): code = 'msaa_read_failed'
+            raise OperationError('MSAA 목록 읽기 실패: ' + code + ' (입력하지 않았습니다).', code)
         if (any(data.get(k) != v for k,v in target.items()) or data.get('complete') is not True
                 or data.get('read_only') is not True or not isinstance(data.get('lists'), list)
                 or len(data['lists']) > 32):
@@ -49,6 +51,36 @@ def read_lists(runtime, target, timeout=2):
         if process.poll() is None:
             process.kill()
         process.communicate()
+
+
+def read_lists(runtime, target, timeout=2):
+    """One bounded read retry, only for transient provider failures on same HWND."""
+    from interaction import _identity
+    probe = runtime.create_transition_probe(dict(target))
+    started = time.monotonic()
+    try:
+        before = _identity(probe.capture(), target['window_id'])
+        for attempt in range(2):
+            runtime.check_active()
+            if _identity(probe.snapshot(), target['window_id']) != before:
+                raise OperationError('MSAA 대상 HWND가 교체됐습니다.', 'msaa_target_changed')
+            remaining = timeout - (time.monotonic()-started)
+            if remaining <= 0: raise OperationError('MSAA 읽기 시간이 초과됐습니다.', 'msaa_timeout')
+            try:
+                data = _read_once(runtime, target, timeout=remaining)
+            except OperationError as error:
+                if _identity(probe.snapshot(), target['window_id']) != before:
+                    raise OperationError('접근성 읽기 중 대상 HWND가 바뀌었습니다.', 'msaa_target_changed') from error
+                if attempt == 0 and error.code in {'msaa_provider_error', 'msaa_provider_range',
+                        'msaa_incomplete_tree', 'msaa_invalid_child'}:
+                    continue
+                raise
+            if _identity(probe.snapshot(), target['window_id']) != before:
+                raise OperationError('접근성 읽기 후 대상 HWND가 바뀌었습니다.', 'msaa_target_changed')
+            data['read_attempts'] = attempt + 1
+            return data
+    finally:
+        probe.close()
 
 
 def regions(data, size):

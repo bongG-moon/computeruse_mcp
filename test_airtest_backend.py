@@ -144,6 +144,27 @@ class AirtestBackendTests(unittest.TestCase):
         self.assertEqual(result["frame_comparison"]["size_relation"],"small_border_difference")
         self.assertFalse(result["frame_comparison"]["dpi_change_proven"])
 
+    def test_partial_edge_template_survives_one_pixel_window_inset(self):
+        self.screen[:30,:70] = self.template
+        self.screen[80:110,120:190] = 25
+        shot = self.screen[1:-1,1:-1].copy()
+        answer = validate_match(self.match(shot),self.target,self.encoded(shot))
+        self.assertEqual(answer["status"],"matched")
+        self.assertEqual((answer["x"],answer["y"]),(55,8))
+        forged = self.match(shot)
+        forged["rect"]["x"] += 20
+        with self.assertRaises(OperationError):
+            validate_match(forged,self.target,self.encoded(shot))
+
+    def test_partial_right_edge_preserves_anchor_without_rescaling(self):
+        self.screen[:30,-70:] = self.template
+        self.screen[80:110,120:190] = 25
+        shot=self.screen[1:-1,1:-1].copy()
+        answer=validate_match(self.match(shot),self.target,self.encoded(shot))
+        self.assertEqual(answer["status"],"matched")
+        self.assertEqual((answer["x"],answer["y"]),(385,8))
+        self.assertGreater(answer["template_clip"]["right"],0)
+
     def test_changed_highlight_is_review_candidate_not_automatic_click(self):
         changed = self.template.copy()
         background = self.np.all(changed == (40,80,145), axis=2)

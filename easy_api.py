@@ -77,6 +77,7 @@ class EasyApi:
         self.bindings = {}
         self.pending_launches = {}
         self.editor_reviews = {}
+        self.run_bindings = {}
 
     def close(self):
         if self.engine: self.engine.close()
@@ -84,6 +85,7 @@ class EasyApi:
         self.bindings.clear()
         self.pending_launches.clear()
         self.editor_reviews.clear()
+        self.run_bindings.clear()
 
     def _engine(self):
         from interaction import InteractionEngine
@@ -252,6 +254,26 @@ class EasyApi:
             targets.append({"program_id": program, **target})
         return targets, None
 
+    def _run_refs(self, run_id, explicit):
+        """A resumed run retains its main windows, never the latest popup."""
+        if not isinstance(explicit, dict):
+            raise SessionError("window_refs는 프로그램별 창 참조로 지정하세요.")
+        self._engine()  # discards all cached references on a session change
+        cached = self.run_bindings.get(run_id, {})
+        return {**cached, **explicit}
+
+    def _remember_run(self, run_id, targets):
+        if not run_id:
+            return
+        refs = {}
+        for row in targets:
+            bound = self._engine().bind({key: row[key] for key in ("pid", "window_id")})
+            self.bindings[bound["window_ref"]] = row["program_id"]
+            refs[row["program_id"]] = bound["window_ref"]
+        self.run_bindings[run_id] = refs
+        while len(self.run_bindings) > 32:
+            self.run_bindings.pop(next(iter(self.run_bindings)))
+
     def call(self, name, args, cancel_event=None):
         response = self._call(name, args, cancel_event)
         return self.normalize_response(name, args, response)
@@ -404,7 +426,10 @@ class EasyApi:
                 if not ids: raise SessionError("program_ids로 가르칠 프로그램을 지정하거나 computer_open으로 먼저 연결하세요.")
                 self._session(ids, task["instructions"] if task else "사용자가 프로세스를 녹화하고 편집합니다.", cancel_event, renewal=renewal)
                 with m.session.execution_lock:
-                    targets, pending = self._targets(ids, args.get("window_refs", {}), cancel_event)
+                    refs = args.get("window_refs", {})
+                    if name == "computer_run_task":
+                        refs = self._run_refs(args.get("resume_run_id"), refs)
+                    targets, pending = self._targets(ids, refs, cancel_event)
                     if pending: return result(pending)
                     if name == "computer_process_editor":
                         return result(m.process_editors.start(m.session, {"targets": targets, **{k:args[k] for k in ("name", "task_id", "timeout_seconds") if k in args}}, cancel_event))
@@ -414,6 +439,12 @@ class EasyApi:
                         if review.get("human_reviewed") is not True: return result({"status":"needs_review", "task_verified":False, "local_review":review})
                     kwargs = {k:args[k] for k in ("resume_run_id", "acknowledge_checkpoint", "execution_mode", "observation_review", "target_review") if k in args}
                     answer = m.workflows.run(m.session, task, args.get("inputs", {}), targets, delivery_mode="foreground", image_delivery_enabled=m.image_delivery.status()["delivery_mode"] == "vision", **kwargs)
+                    # Do not let an expired binding erase an already dispatched
+                    # action receipt. Recovery still requires fresh discovery.
+                    try:
+                        self._remember_run(answer.get("run_id"), targets)
+                    except (OperationError, SessionError, OSError):
+                        pass
                     content = answer.pop("checkpoint_content", [])
                     content.extend(answer.pop("observation_content", []))
                     # Vision delivery does not invoke filter_response's local

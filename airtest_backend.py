@@ -112,9 +112,21 @@ def _scales(target, width, height):
             continue
         seen.add((w, h))
         yield w, h, factor*source_scale, max(0, w-width)//2, max(0, h-height)//2
+        # WGC includes the outer frame pixel that DWM screenshots omit.
+        # An edge-anchored partial template can extend just outside the new
+        # frame too, even though its overall size is smaller than the window.
+        if near_border and factor == 1:
+            cx = (capture["width"]-width)//2 if 0 < capture["width"]-width <= 4 and w < width else 0
+            cy = (capture["height"]-height)//2 if 0 < capture["height"]-height <= 4 and h < height else 0
+            for dx, dy in ((cx, 0), (0, cy), (cx, cy),
+                           (cx+1 if cx else 0, cy), (cx, cy+1 if cy else 0),
+                           (cx+1 if cx else 0, cy+1 if cy else 0)):
+                if (dx or dy) and (w,h,dx,dy) not in seen:
+                    seen.add((w,h,dx,dy))
+                    yield w,h,factor*source_scale,dx,dy
 
 
-def match_candidates(image_target, screenshot_png, *, deadline=None, check_active=None):
+def _rgb_candidates(image_target, screenshot_png, *, deadline=None, check_active=None):
     """Return a native-compatible result; ambiguity never returns coordinates.
 
     Airtest supplies NCC candidate maps, but NCC is not an interchangeable
@@ -213,7 +225,7 @@ def match_candidates(image_target, screenshot_png, *, deadline=None, check_activ
         full_w, full_h, scale, clip_x, clip_y = spec
         active()
         resized = raster(spec)
-        w, h = min(width, full_w), min(height, full_h)
+        h, w = resized.shape[:2]
         # Call the actual reviewed Airtest implementation, not a reimplementation
         # labelled Airtest. Its public best-only matcher lacks duplicate checks.
         correlations = TemplateMatching(resized, screen, threshold=.75, rgb=False)._get_template_result_matrix()
@@ -230,7 +242,10 @@ def match_candidates(image_target, screenshot_png, *, deadline=None, check_activ
             x, y = point
             score = exact_rgb(resized, point)
             highest_evaluated = score if highest_evaluated is None else max(highest_evaluated, score)
-            if score >= target["min_score"]-target["ambiguity_margin"]:
+            edge_valid = not (
+                (clip_x and full_w < width and x != clip_x-(target["capture_window"]["width"]-width)//2)
+                or (clip_y and full_h < height and y != clip_y-(target["capture_window"]["height"]-height)//2))
+            if edge_valid and score >= target["min_score"]-target["ambiguity_margin"]:
                 candidate = {"rect": {"x": x, "y": y, "width": w, "height": h}, "score": score, "scale": scale,
                              "correlation": float(correlations[y, x])}
                 if full_w != w or full_h != h:
@@ -271,6 +286,105 @@ def match_candidates(image_target, screenshot_png, *, deadline=None, check_activ
     if not math.isfinite(best[0]["correlation"]) or best[0]["correlation"] < .75:
         return result
     return {**result, **best[0], "status": "matched"}
+
+
+def _appearance_frame(frame):
+    """Normalize only a dominant, light row background; retain foreground ink."""
+    _, np, _ = _load()
+    result = frame.copy()
+    backgrounds = np.zeros(frame.shape[:2], dtype=bool)
+    for y, row in enumerate(frame):
+        colors, counts = np.unique(row, axis=0, return_counts=True)
+        index = int(counts.argmax())
+        bg = colors[index]
+        if counts[index] < len(row)*.55 or int(bg.min()) < 145:
+            continue
+        mask = np.max(np.abs(row.astype(np.int16)-bg.astype(np.int16)), axis=1) <= 8
+        backgrounds[y] = mask
+        result[y, mask] = 255
+    return result, backgrounds
+
+
+def _appearance_png(encoded):
+    cv2, np, _ = _load()
+    frame = cv2.imdecode(np.frombuffer(base64.b64decode(encoded), dtype=np.uint8), cv2.IMREAD_COLOR)
+    normalized, _ = _appearance_frame(frame)
+    ok, data = cv2.imencode(".png", normalized)
+    if not ok: raise ValueError("PNG normalization failed")
+    return base64.b64encode(data).decode("ascii")
+
+
+def _ink_agrees(pattern, current, anchor_y):
+    _, np, _ = _load()
+    a, _ = _appearance_frame(pattern); b, _ = _appearance_frame(current)
+    ia = (255-a.astype(np.float32).mean(axis=2))
+    ib = (255-b.astype(np.float32).mean(axis=2))
+    # Strong strokes cannot appear/disappear. Background normalization must
+    # never turn changed text, a tooltip or disabled grey text into a match.
+    strong_a, strong_b = ia >= 80, ib >= 80
+    if np.count_nonzero(strong_a) < 16 or not np.array_equal(strong_a, strong_b):
+        return False
+    center = min(a.shape[0]-1, max(0, int(anchor_y*a.shape[0])))
+    for left, right, minimum in ((ia, ib, .98),
+            (ia[max(0,center-8):center+9], ib[max(0,center-8):center+9], .95)):
+        total = float(np.maximum(left, right).sum())
+        if total <= 0 or float(np.minimum(left,right).sum())/total < minimum:
+            return False
+        mask = np.maximum(left,right) >= 30
+        if not mask.any() or float(np.abs(left-right)[mask].mean()) > 10:
+            return False
+    return True
+
+
+def match_candidates(image_target, screenshot_png, *, deadline=None, check_active=None):
+    end = min(deadline, time.monotonic()+15) if deadline is not None else time.monotonic()+15
+    original = _rgb_candidates(image_target, screenshot_png, deadline=end, check_active=check_active)
+    if original["status"] != "not_found" or original.get("code") == "template_low_detail":
+        return original
+    target = validate_image_target(image_target)
+    width, height = png_dimensions(screenshot_png)
+    if (0 < target["capture_window"]["width"]-width <= 4
+            and 0 < target["capture_window"]["height"]-height <= 4):
+        # Apply the same bounded edge rule to right/bottom frame templates.
+        # Reflection preserves pixels; it does not blur text or lower scores.
+        cv2, np, _ = _load()
+        def flip_png(value, axis):
+            pixels = cv2.imdecode(np.frombuffer(base64.b64decode(value),dtype=np.uint8),cv2.IMREAD_COLOR)
+            return base64.b64encode(cv2.imencode(".png",cv2.flip(pixels,axis))[1]).decode()
+        alternatives=[]
+        for axis in (1,0,-1):
+            flipped=dict(target,template_png=flip_png(target["template_png"],axis))
+            candidate=_rgb_candidates(flipped,flip_png(screenshot_png,axis),deadline=end,check_active=check_active)
+            if candidate["status"]=="ambiguous": return candidate
+            if candidate["status"]!="matched" or not candidate.get("template_clip"): continue
+            rect=candidate["rect"]; clip=candidate["template_clip"]
+            if axis in (1,-1):
+                rect["x"]=width-rect["x"]-rect["width"]
+                clip["left"],clip["right"]=clip["right"],clip["left"]
+            if axis in (0,-1):
+                rect["y"]=height-rect["y"]-rect["height"]
+                clip["top"],clip["bottom"]=clip["bottom"],clip["top"]
+            if not any(_same(candidate,old) for old in alternatives): alternatives.append(candidate)
+        if len(alternatives)>1:
+            return {**original,"status":"ambiguous","candidate_count":len(alternatives)}
+        if alternatives: return alternatives[0]
+    normalized = dict(target, template_png=_appearance_png(target["template_png"]))
+    result = _rgb_candidates(normalized, _appearance_png(screenshot_png), deadline=end, check_active=check_active)
+    if result["status"] == "ambiguous":
+        return {**result, "backend": "airtest-light-background", "original_score": original.get("score")}
+    if result["status"] != "matched" or result.get("template_clip"):
+        return original
+    cv2, np, _ = _load()
+    pattern = cv2.imdecode(np.frombuffer(base64.b64decode(target["template_png"]), dtype=np.uint8), cv2.IMREAD_COLOR)
+    screen = cv2.imdecode(np.frombuffer(base64.b64decode(screenshot_png), dtype=np.uint8), cv2.IMREAD_COLOR)
+    rect = result["rect"]; x,y,w,h = (rect[k] for k in ("x","y","width","height"))
+    if pattern.shape[:2] != (h,w):
+        pattern = cv2.resize(pattern, (w,h), interpolation=cv2.INTER_CUBIC)
+    if not _ink_agrees(pattern, screen[y:y+h,x:x+w], target["anchor"]["y"]):
+        return {**original, "appearance_rejected": "foreground_ink_changed"}
+    if check_active: check_active()
+    return {**result, "backend": "airtest-light-background", "original_score": original.get("score"),
+            "appearance_verified": True}
 
 
 def match_isolated(runtime, image_target, screenshot_png, *, deadline=None, check_active=None):

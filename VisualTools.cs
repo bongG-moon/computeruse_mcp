@@ -2360,7 +2360,6 @@ internal static class VisualTools
                 bool allowed = false; foreach (Target root in targets) if (root.Owner == null && root.Pid == (int)pid) { allowed = true; break; } if (!allowed) return;
                 popupWakePending = true;
                 try { BeginInvoke((Action)delegate { popupWakePending = false; if (recording && !Done) { IntPtr shown = GetAncestor(hwnd, 2); DiscoverPopup(shown);
-                    foreach (Target popup in targets) if (popup.Hwnd == shown && popup.Owner != null && popup.Valid() && popup.Foreground()) { try { CaptureFor(popup, false); } catch { } break; }
                     Tick(null, EventArgs.Empty);
                 } }); }
                 catch (InvalidOperationException) { popupWakePending = false; }
@@ -2406,16 +2405,19 @@ internal static class VisualTools
             foreach (Target root in owners) {
                 if (!root.Valid() || candidate == root.Hwnd || !IsWindowVisible(candidate) || !RelatedTo(candidate, root.Hwnd, root.Pid)) continue;
                 string title = WindowText(candidate), cls = WindowClass(candidate); if (cls.Length == 0 || cls == "IME" || cls == "MSCTFIME UI" || cls == "tooltips_class32") return;
-                int matches = 0; EnumWindows(delegate(IntPtr hwnd, IntPtr ignored) {
-                    if (IsWindowVisible(hwnd) && WindowText(hwnd) == title && WindowClass(hwnd) == cls && RelatedTo(hwnd, root.Hwnd, root.Pid)) matches++;
-                    return true;
-                }, IntPtr.Zero);
-                if (matches != 1) { Warn("recording_window_ambiguous"); return; }
+                // SHOW / hit-test already identified this exact HWND. Sibling
+                // menus legitimately share an empty title and the same class.
+                // Ownership above, not title uniqueness, establishes scope.
                 int count = 0, active = 0; foreach (Target t in targets) if (t.Owner != null) { count++; if (!t.Retired && t.Valid() && IsWindowVisible(t.Hwnd)) active++; }
                 if (!RecordingPopupCapacity(active, count)) { Warn("recording_window_limit"); return; }
                 string reference = popupPrefix + (count + 1).ToString(); bool used;
                 do { used = false; foreach (Target t in targets) if (t.Program == root.Program && t.Window == reference) { used = true; reference = popupPrefix + (++count + 1).ToString(); break; } } while (used);
-                targets.Add(new Target(root, candidate, reference)); return;
+                Target discovered = new Target(root, candidate, reference);
+                targets.Add(discovered);
+                // Discovery runs outside the input hook. Keep a pre-input
+                // image even when a sibling menu owns the foreground.
+                if (discovered.ImageAllowed) { try { CaptureFor(discovered, false); } catch { } }
+                return;
             }
         }
         Dictionary<string, object> Event(Target t, string operation) { return new Dictionary<string, object> { { "operation", operation }, { "program_id", t.Program }, { "window_ref", t.Window }, { "verification", "manual_required" } }; }
@@ -2477,7 +2479,7 @@ internal static class VisualTools
             // eligible. No UIA reads, new-popup discovery, or capture in hook.
             IntPtr hit = WindowFromPoint(point); IntPtr root = GetAncestor(hit, 2); uint pid;
             if (root == IntPtr.Zero || GetWindowThreadProcessId(root, out pid) == 0) return null;
-            foreach (Target target in targets) if (target.Hwnd == root && target.Pid == (int)pid) {
+            foreach (Target target in targets) if (!target.Retired && target.Hwnd == root && target.Pid == (int)pid) {
                 try {
                     if (target.AcceptsWindow(hit) && RecordingPointerMatches(root.ToInt64(), (int)pid, target.Hwnd.ToInt64(), target.Pid,
                             target.Valid(), IsWindowVisible(root), IsIconic(root), target.Bounds(), new Point(point.X, point.Y))) return target;
@@ -2488,6 +2490,25 @@ internal static class VisualTools
         }
         // Hook callbacks copy only a small cached crop. PNG encoding, UIA,
         // matching and file writes run outside the low-level input callback.
+        bool UnboundPopupClick(POINT point, string operation) {
+            IntPtr hit = GetAncestor(WindowFromPoint(point), 2);
+            if (hit == IntPtr.Zero || !IsWindowVisible(hit)) return false;
+            Target owner = null;
+            foreach (Target known in targets) {
+                if (known.Retired || !known.Valid() || known.Hwnd == hit || !RelatedTo(hit, known.Hwnd, known.Pid)) continue;
+                if (owner == null || RelatedTo(known.Hwnd, owner.Hwnd, owner.Pid)) owner = known;
+                else if (!RelatedTo(owner.Hwnd, known.Hwnd, known.Pid)) return false;
+            }
+            if (owner == null) return false;
+            // The hook has no pre-input pixels for this newly shown HWND.
+            // Preserve a repairable event, never turn post-click pixels into a
+            // runnable target. Full discovery/capture remains outside the hook.
+            Queue(new Pending { Target = owner, Operation = "manual_entry",
+                RequestedOperation = operation, Reason = "image_capture_required",
+                ScreenPoint = new Point(point.X, point.Y), ClickAt = DateTime.UtcNow,
+                LastInputAt = DateTime.UtcNow, InputVersion = inputVersion + 1 });
+            return true;
+        }
         Pending CaptureClick(Target target, POINT point, string operation) {
             var item = new Pending { Target = target, Operation = operation, RequestedOperation = operation, ScreenPoint = new Point(point.X, point.Y), ClickAt = DateTime.UtcNow, LastInputAt = DateTime.UtcNow, ForegroundBeforeInput = target.AcceptsForeground(GetForegroundWindow()), InputVersion = inputVersion + 1 };
             IntPtr hit = WindowFromPoint(point); RECT hitBounds; uint hitPid;
@@ -2569,7 +2590,9 @@ internal static class VisualTools
                             Pending item = CaptureClick(target, mouse.point, kind == 0x204 ? "right_click" : kind == 0x20A ? "scroll" : "click");
                             item.Wheel = (short)(mouse.data >> 16); if (kind != 0x20A) { lastPointer = item; clickEvidence.Add(item); } Queue(item);
                             if (kind != 0x20A) { mouseDown = item; mouseStart = new Point(mouse.point.X, mouse.point.Y); }
-                        } else { InvalidateDraftInput(); if (!OwnRecorderControl(WindowFromPoint(mouse.point))) Warn("outside_target_not_recorded"); }
+                        } else { InvalidateDraftInput(); if (!OwnRecorderControl(WindowFromPoint(mouse.point))
+                                && !UnboundPopupClick(mouse.point, kind == 0x204 ? "right_click" : kind == 0x20A ? "scroll" : "click"))
+                                    Warn("outside_target_not_recorded"); }
                         InputChanged();
                     } else if ((kind == 0x202 || kind == 0x205) && mouseDown != null) {
                         if (Math.Abs(mouse.point.X - mouseStart.X) > SystemInformation.DragSize.Width || Math.Abs(mouse.point.Y - mouseStart.Y) > SystemInformation.DragSize.Height) {
