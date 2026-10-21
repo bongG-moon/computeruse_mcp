@@ -33,6 +33,29 @@ internal static class CheckpointReview
         readonly string folder, nonce, id; bool finished; readonly Timer timer = new Timer(); readonly Image picture;
         readonly DateTime expires = DateTime.UtcNow.AddMinutes(10);
         readonly bool preserveTargetFocus;
+        DateTime lastState = DateTime.MinValue;
+        [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
+        [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hwnd);
+        [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hwnd, int command);
+        [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
+        void PublishState() {
+            bool intersects = false;
+            foreach (Screen screen in Screen.AllScreens) if (screen.WorkingArea.IntersectsWith(Bounds)) intersects = true;
+            Write("state.json", new Dictionary<string,object> { {"pid", System.Diagnostics.Process.GetCurrentProcess().Id},
+                {"hwnd", Handle.ToInt64()}, {"visible", IsWindowVisible(Handle)}, {"minimized", IsIconic(Handle)},
+                {"on_monitor", intersects}, {"foreground", GetForegroundWindow()==Handle},
+                {"occlusion", "not_measured"}, {"preserve_target_focus", preserveTargetFocus} });
+            lastState = DateTime.UtcNow;
+        }
+        void Reveal() {
+            Rectangle area = Screen.FromHandle(Handle).WorkingArea;
+            int width = Math.Min(Width, area.Width), height = Math.Min(Height, area.Height);
+            ShowWindow(Handle,4);
+            SetWindowPos(Handle, TopMost ? new IntPtr(-1) : IntPtr.Zero, area.Left+(area.Width-width)/2,
+                area.Top+(area.Height-height)/2,width,height,0x0010);
+            PublishState();
+        }
         protected override bool ShowWithoutActivation { get { return preserveTargetFocus; } }
         protected override CreateParams CreateParams {
             get { var value = base.CreateParams; if (preserveTargetFocus) value.ExStyle |= 0x08000000; return value; }
@@ -73,9 +96,12 @@ internal static class CheckpointReview
             buttons.Controls.Add(Button("확인 완료", "confirmed", Color.FromArgb(37,99,235), Color.White, px));
             buttons.Controls.Add(Button("결과가 다름", "rejected", Color.White, Color.FromArgb(22,52,86), px));
             layout.Controls.Add(buttons,0,3);
-            Shown += delegate { Write("ready.json", new Dictionary<string,object> { {"visible",true} }); };
+            Shown += delegate { Write("ready.json", new Dictionary<string,object> { {"visible",true} }); PublishState(); };
             FormClosing += delegate { Finish("cancelled"); };
             timer.Interval = 200; timer.Tick += delegate {
+                string reveal = Path.Combine(folder,"reveal.flag");
+                if (File.Exists(reveal)) { File.Delete(reveal); Reveal(); }
+                if ((DateTime.UtcNow-lastState).TotalSeconds >= 1) PublishState();
                 if (DateTime.UtcNow >= expires || File.Exists(Path.Combine(folder,"cancel.flag")) ||
                     File.Exists(Path.Combine(Path.GetDirectoryName(folder),"stop.flag"))) Close();
             }; timer.Start();
@@ -89,7 +115,7 @@ internal static class CheckpointReview
         {
             value["nonce"] = nonce; value["review_id"] = id;
             string path = Path.Combine(folder,name), temporary = path + ".tmp";
-            File.WriteAllText(temporary,Json.Serialize(value),new UTF8Encoding(false)); File.Move(temporary,path);
+            File.WriteAllText(temporary,Json.Serialize(value),new UTF8Encoding(false)); if (File.Exists(path)) File.Replace(temporary,path,null); else File.Move(temporary,path);
         }
         void Finish(string state) { if (finished) return; finished = true; try { Write("result.json",new Dictionary<string,object> { {"status",state} }); } catch { } }
         protected override void Dispose(bool disposing) { if (disposing) { timer.Dispose(); picture.Dispose(); } base.Dispose(disposing); }

@@ -174,6 +174,11 @@ class InteractionEngine:
         started = self.clock()
         target = self.target(window_ref)
         original_binding = self._binding(window_ref)
+        popup_owner_ref = None
+        if isinstance(step, dict) and step.get('operation') == 'click' and image_region is not None:
+            from transient_popup import proven_popup, popup_owner
+            if proven_popup(target):
+                popup_owner_ref = self.bind(popup_owner(target))['window_ref']
         if not isinstance(step, dict):
             raise OperationError('실행할 한 단계의 동작이 필요합니다.')
         step = copy.deepcopy(step)
@@ -259,9 +264,12 @@ class InteractionEngine:
             answer = self._execute_once(lambda: self.operations.execute(step, target, delivery_mode='foreground'))
         result = self._action_result(answer, window_ref, started, original_binding)
         if (result['task_verified'] is not True and result['dispatch'] != 'not_sent' and completion
-                and result.get('binding_current') is not False):
+                and (result.get('binding_current') is not False or popup_owner_ref is not None)):
             try:
-                result = self.request_review(window_ref, completion, result)
+                review_ref = self._popup_result_ref(window_ref, popup_owner_ref, result)
+                if review_ref != window_ref:
+                    result['result_window_ref'] = review_ref
+                result = self.request_review(review_ref, completion, result)
             except Exception as exc:
                 # A dialog may close or replace itself after a successful
                 # click. Losing the review target does not erase its receipt.
@@ -275,6 +283,19 @@ class InteractionEngine:
                     automatic_replay=False)
                 if prior: result['prior_action_diagnostic'] = prior
         return result
+
+    def _popup_result_ref(self, window_ref, owner_ref, result):
+        if (owner_ref is None or result.get('input_dispatched') is not True
+                or result.get('dispatch') != 'sent'):
+            return window_ref
+        # A stale or reused HWND is not proof of closure. Only native absence
+        # permits returning to the owner bound before this confirmed input.
+        target = self.windows[window_ref]['target']
+        from transient_popup import window_exists
+        if window_exists(target['window_id']):
+            return window_ref
+        self.target(owner_ref)
+        return owner_ref
 
     def request_review(self, window_ref, condition, action_result=None):
         """Internal shared review primitive; does not claim an input was sent."""

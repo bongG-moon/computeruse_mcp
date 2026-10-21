@@ -99,6 +99,18 @@ class FacadeTests(unittest.TestCase):
         self.region = {'x': 20, 'y': 30, 'width': 16, 'height': 16}
         self.scope = {'x': 10, 'y': 20, 'width': 50, 'height': 50}
 
+    def test_popup_result_owner_requires_known_delivery_and_actual_closure(self):
+        receipt={'input_dispatched':True,'dispatch':'sent'}
+        with mock.patch('transient_popup.window_exists',return_value=True):
+            self.assertEqual(self.engine._popup_result_ref(self.ref,'owner',receipt),self.ref)
+        with mock.patch('transient_popup.window_exists',return_value=False), mock.patch.object(self.engine,'target',return_value=TARGET) as target:
+            self.assertEqual(self.engine._popup_result_ref(self.ref,'owner',receipt),'owner')
+            target.assert_called_once_with('owner')
+        with mock.patch('transient_popup.window_exists') as exists:
+            for sent in (False,None):
+                self.assertEqual(self.engine._popup_result_ref(self.ref,'owner',{'input_dispatched':sent,'dispatch':'unknown'}),self.ref)
+            exists.assert_not_called()
+
     def mutations(self):
         return [call for call in self.transport.calls if call['name'] != 'get_window_state']
 

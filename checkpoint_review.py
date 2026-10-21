@@ -90,7 +90,7 @@ class CheckpointReviews:
                         'next_step': '확인 창을 열지 못했습니다. 단계가 완료됐다고 판단하거나 승인하지 마세요. 도우미 파일과 세션 상태를 확인하세요.'}
 
     def _remove_pixels(self, job):
-        for name in ('screen.png', 'request.json', 'ready.json', 'result.json'):
+        for name in ('screen.png', 'request.json', 'ready.json', 'result.json', 'state.json', 'reveal.flag'):
             try:
                 (job['folder'] / name).unlink(missing_ok=True)
             except OSError:
@@ -146,7 +146,18 @@ class CheckpointReviews:
                 except (ValueError, OSError):
                     self._cancel(job)
             state = job['status']
-            value = {'status': state, 'review_id': identity, 'review_visible': state == 'pending',
+            current = None
+            try:
+                state_path = job['folder'] / 'state.json'
+                if state_path.is_file() and 0 <= time.time()-state_path.stat().st_mtime <= 3:
+                    observed = self._read(state_path, job)
+                    if observed and observed.get('pid') == getattr(job['process'], 'pid', None):
+                        current = observed
+            except (ValueError, OSError):
+                pass
+            value = {'status': state, 'review_id': identity, 'review_visible': bool(state == 'pending' and current and current.get('visible') and not current.get('minimized') and current.get('on_monitor')),
+                     'initial_ready': (job['folder'] / 'ready.json').is_file(),
+                     'current_window_state': current, 'visibility_observed': current is not None,
                      'run_id': job['key'][1], 'checkpoint_id': job['key'][2],
                      'human_reviewed': state == 'confirmed', 'model_image_verified': False,
                      'task_verified': False, 'input_dispatched': False, 'automatic_acknowledgement': False}
@@ -165,6 +176,16 @@ class CheckpointReviews:
             if state not in {'starting', 'pending'}:
                 self._remove_pixels(job)
             return value
+
+    def reveal(self, identity, runtime):
+        """Reposition/show only this helper; never synthesize a decision."""
+        with self.lock:
+            value = self.status(identity, runtime)
+            if value.get('status') not in {'starting', 'pending'}:
+                return value
+            (self.jobs[identity]['folder'] / 'reveal.flag').touch()
+            return {**value, 'redisplay_requested': True, 'human_reviewed': False,
+                    'message': '확인창 재표시를 요청했습니다. 창의 확인 버튼은 사용자가 직접 선택해야 합니다.'}
 
     def pending(self, runtime=None):
         """A terminal decision is not proof that its image viewer has exited."""

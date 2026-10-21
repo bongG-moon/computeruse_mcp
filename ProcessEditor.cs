@@ -426,6 +426,23 @@ internal static class ProcessEditor
         }
         void StartRecording()
         {
+            string reviewMode = null; bool autoPopup = true;
+            using (var dialog = new Form()) {
+                dialog.Text = "녹화 후 결과 확인 방법"; dialog.ClientSize = new Size(Px(570), Px(315));
+                dialog.StartPosition = FormStartPosition.CenterParent; dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
+                dialog.MaximizeBox = dialog.MinimizeBox = false; dialog.BackColor = Color.FromArgb(245,247,251); dialog.Font = Font;
+                bool vision = false;
+                foreach (object value in imageCompletion.Items) { var choice = value as Choice; if (choice != null && choice.Code == "visual") vision = true; }
+                dialog.Controls.Add(new Label { Text = vision ? "이미지 전달: 지원 · 모델이 화면을 판정할 수 있습니다." : "이미지 전달: 미확인 · 채팅에서 이미지 전달 시험을 먼저 완료하세요.", Bounds = Box(20,15,530,45) });
+                var human = new Button(); ButtonStyle(human,"ReviewHuman","사람 확인 · 로컬 창에서 직접 판정",Box(20,70,530,40),false,dialog);
+                human.Click += delegate { reviewMode="human"; dialog.DialogResult=DialogResult.OK; };
+                var visual = new Button(); ButtonStyle(visual,"ReviewVisual","모델 화면 판정 · 연결된 모델에 이미지 전달",Box(20,120,530,40),true,dialog);
+                visual.Enabled = vision; visual.Click += delegate { reviewMode="visual"; dialog.DialogResult=DialogResult.OK; };
+                dialog.Controls.Add(new Label { Text = "명시적 자동 조건: 녹화 후 편집에서 요소 값/상태 조건을 지정하세요. 조건 없는 확인은 자동 통과하지 않습니다. 기존 필수 사람 확인은 유지됩니다.", Bounds = Box(20,180,530,75) });
+                var autoCheck = new CheckBox { Text = "팝업 열림은 저장 이미지로 자동 확인 (업무 결과 확인은 유지)", Checked = true, Bounds = Box(20,265,530,35) }; dialog.Controls.Add(autoCheck);
+                if (dialog.ShowDialog(this) != DialogResult.OK || reviewMode == null) return;
+                autoPopup = autoCheck.Checked;
+            }
             string mode = "append";
             int index = steps.SelectedIndices.Count == 1 ? steps.SelectedIndices[0] : -1;
             if (stepCount > 0) {
@@ -448,7 +465,7 @@ internal static class ProcessEditor
                     mode = chosen;
                 }
             }
-            var payload = new Dictionary<string, object> { { "review_mode", CompletionMode == "visual" ? "visual" : "human" }, { "mode", mode } };
+            var payload = new Dictionary<string, object> { { "review_mode", reviewMode }, { "auto_popup", autoPopup }, { "mode", mode } };
             if (mode == "replace_selected") payload["index"] = index;
             Send("record", payload, null);
             if (busy) { hiddenForPicker=true; Hide(); }
@@ -504,6 +521,16 @@ internal static class ProcessEditor
                 TextBox content = null, keys = null, condition = null, variableLabel = null;
                 NumericUpDown timing = null; CheckBox parameter = null; ComboBox conditionBoolean = null, editedCheck = null;
                 string keyField = null;
+                ComboBox reviewChoice = null;
+                if (operation == "checkpoint") {
+                    heading("확인 방법 · 저장 시 새 revision에 반영됩니다");
+                    reviewChoice = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = Px(494), Height = Px(34) };
+                    reviewChoice.Items.Add(new Choice { Code="keep", Label="기존 확인 방식 유지 (" + Str(item,"review_mode","human") + ")" });
+                    reviewChoice.Items.Add(new Choice { Code="human", Label="사람이 직접 확인" });
+                    foreach (object value in imageCompletion.Items) { var c=value as Choice; if(c!=null && c.Code=="visual") reviewChoice.Items.Add(new Choice {Code="visual",Label="모델 화면 판정으로 변경"}); }
+                    reviewChoice.SelectedIndex=0; area.Controls.Add(reviewChoice);
+                    heading("필수 사람 확인은 유지하세요. 실행 중 승인 기록은 바뀌지 않습니다.");
+                }
                 if (editable.ContainsKey("value") || editable.ContainsKey("message")) {
                     heading("입력할 내용"); var variableSpec = Map(editable, "variable_spec");
                     content = input(variableSpec == null ? Str(editable, editable.ContainsKey("message") ? "message" : "value", "") : Str(variableSpec, "default", ""), true);
@@ -536,6 +563,7 @@ internal static class ProcessEditor
                 var accept = new Button(); ButtonStyle(accept, "ApplyStepChanges", "변경 반영", Box(310, 551, 130, 38), true, dialog);
                 var cancel = new Button(); ButtonStyle(cancel, "CancelStepChanges", "취소", Box(452, 551, 94, 38), false, dialog); cancel.DialogResult = DialogResult.Cancel; dialog.CancelButton = cancel;
                 accept.Click += delegate {
+                    if (reviewChoice != null && ((Choice)reviewChoice.SelectedItem).Code != "keep") changes["review_mode"] = ((Choice)reviewChoice.SelectedItem).Code;
                     if (content != null) changes["value"] = content.Text;
                     if (keys != null) { if (keyField == "key") changes["key"] = keys.Text.Trim(); else { var names = new List<string>(); foreach (string key in keys.Text.Split('+')) if (key.Trim().Length > 0) names.Add(key.Trim()); changes["keys"] = names; } }
                     if (timing != null) changes["seconds"] = (double)timing.Value;

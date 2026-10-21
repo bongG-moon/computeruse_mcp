@@ -39,6 +39,18 @@ class HoverTests(unittest.TestCase):
                 self.assertNotEqual(self.match(image)['status'],'matched')
         self.assertEqual(self.match(self.image(background=(240,220,200)),duplicate=True)['status'],'ambiguous')
 
+    def test_light_hover_fill_and_blue_border_without_lowering_threshold(self):
+        hovered = self.image(background=(240,220,200))
+        self.cv.rectangle(hovered,(0,0),(159,31),(215,155,95),1)
+        result = self.match(hovered)
+        self.assertEqual(result['status'],'matched')
+        self.assertTrue(result['appearance_verified'])
+
+    def test_blue_interior_content_cannot_be_erased_as_border(self):
+        hovered = self.image(background=(240,220,200))
+        self.cv.putText(hovered,'X',(110,23),self.cv.FONT_HERSHEY_SIMPLEX,.6,(215,155,95),1)
+        self.assertNotEqual(self.match(hovered)['status'],'matched')
+
     def test_dark_selection_is_not_silently_normalized(self):
         self.assertNotEqual(self.match(self.image(background=(150,70,20),ink=255))['status'],'matched')
 

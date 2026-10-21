@@ -86,7 +86,7 @@ class PopupExportFixture : Form {
     }
     [STAThread] static void Main(string[] args) {
         SetProcessDpiAwarenessContext(new IntPtr(-4));
-        Application.EnableVisualStyles();Application.Run(new PopupExportFixture(args[0]));
+        Application.EnableVisualStyles();Application.Run(new PopupExportFixture(args.Length > 0 ? args[0] : Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"fixture-output")));
     }
     sealed class MenuWindow : Form {
         readonly string[] entries; readonly Action<int> selected; int hover=-1;

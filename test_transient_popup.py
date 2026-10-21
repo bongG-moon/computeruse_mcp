@@ -29,6 +29,27 @@ class PopupContractTests(unittest.TestCase):
                        missing(message='No window exists'), {'isError':False}):
             self.assertFalse(popup.exact_missing(answer, TARGET['window_id']))
 
+    def test_failed_registration_retains_reason_and_revokes_old_proof(self):
+        owner={'pid':42,'window_id':1};target={'pid':42,'window_id':2}
+        with popup.recorded_window_scope({'steps':[]}):
+            with mock.patch.object(popup,'_snapshot',return_value={'proof':True}):
+                self.assertTrue(popup.register_popup(target,owner))
+            with mock.patch.object(popup,'_snapshot',side_effect=OperationError('focus','popup_foreground_mismatch')):
+                self.assertFalse(popup.register_popup(target,owner))
+            self.assertEqual(popup.popup_diagnostic(target)['code'],'popup_foreground_mismatch')
+            self.assertFalse(popup._scope.get()['bindings'])
+        self.assertEqual(popup.popup_diagnostic(target)['code'],'popup_scope_unverified')
+
+    def test_multiple_proven_popups_are_not_arbitrarily_selected(self):
+        owner={'pid':42,'window_id':1}
+        with popup.recorded_window_scope({'steps':[]}):
+            with mock.patch.object(popup,'_snapshot',return_value={'proof':True}):
+                popup.register_popup({'pid':42,'window_id':2},owner)
+                popup.register_popup({'pid':42,'window_id':3},owner)
+            with mock.patch.object(popup,'proven_popup',return_value=True):
+                with self.assertRaises(OperationError) as error: popup.current_popup(owner)
+                self.assertEqual(error.exception.code,'popup_observation_ambiguous')
+
     def test_scope_cleanup_and_class_style(self):
         for style in ('808', '20808'):
             self.assertTrue(popup._allowed_class(f'WindowsForms10.Window.{style}.app.0.aaa_r10_ad1', set()))

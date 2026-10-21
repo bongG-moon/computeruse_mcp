@@ -162,6 +162,71 @@ class WorkflowWindowTests(unittest.TestCase):
             {"program_id": "editor", "window_ref": "popup_1", "operation": "checkpoint",
              "opened_from": "main", "message": "Confirm the opened popup"}]
 
+    def test_automatic_popup_image_is_read_only_and_preserves_final_human_review(self):
+        steps = self.opened_popup_steps()
+        steps[2].update(review_mode='popup_image',review_origin='recording_generated',image_target=image_target())
+        steps += [{'operation':'image_click','program_id':'editor','window_ref':'popup_1','image_target':image_target()},
+                  {'operation':'checkpoint','program_id':'editor','window_ref':'popup_1','message':'Final business result'}]
+        self.task['steps']=steps
+        self.runtime.capture_checkpoint=mock.Mock(return_value={'content':[{'type':'image','mimeType':'image/png','data':png()}]})
+        calls=[]
+        def action(spec,target):
+            calls.append(spec['operation'])
+            if spec['operation']=='wait_for_image': return {'task_verified':True,'input_dispatched':False}
+            return {'task_verified':False,'input_dispatched':True,'verification_deferred':True}
+        self.runtime.image_action=action
+        result=self.run_task(ScriptedOperations())
+        self.assertEqual(result['completed_steps'],4)
+        self.assertFalse(result['task_verified'])
+        self.assertEqual(calls,['image_click','wait_for_image','image_click'])
+        self.assertTrue(result['checkpoint']['capture_available'])
+        self.assertEqual(result['step_receipts'][0]['status'],'verified')
+        self.assertEqual(result['step_receipts'][3]['status'],'awaiting_verification')
+        invalid=copy.deepcopy(steps); invalid[2]['review_origin']='explicit'
+        with self.assertRaises(ValueError): validate_recipe(invalid,{},['editor'])
+
+    def test_automatic_popup_missing_image_does_not_click_next_item(self):
+        steps=self.opened_popup_steps()
+        steps[2].update(review_mode='popup_image',review_origin='recording_generated',image_target=image_target())
+        steps += [{'operation':'image_click','program_id':'editor','window_ref':'popup_1','image_target':image_target()},
+                  {'operation':'checkpoint','program_id':'editor','window_ref':'popup_1','message':'Final result'}]
+        self.task['steps']=steps
+        calls=[]
+        def action(spec,target):
+            calls.append(spec['operation'])
+            return ({'task_verified':False,'input_dispatched':False,'diagnostic':{'code':'image_ambiguous'}}
+                if spec['operation']=='wait_for_image' else
+                {'task_verified':False,'input_dispatched':True,'verification_deferred':True})
+        self.runtime.image_action=action
+        first=self.run_task(ScriptedOperations())
+        self.assertEqual(first['completed_steps'],2)
+        self.assertEqual(calls,['image_click','wait_for_image'])
+        resumed=self.run_task(ScriptedOperations(),resume_run_id=first['run_id'])
+        self.assertFalse(resumed['task_verified'])
+        self.assertEqual(calls.count('image_click'),1)
+
+    def test_sent_focus_failure_resume_keeps_automatic_popup_policy(self):
+        steps=self.opened_popup_steps()
+        steps[2].update(review_mode='popup_image',review_origin='recording_generated',image_target=image_target())
+        steps += [{'operation':'image_click','program_id':'editor','window_ref':'popup_1','image_target':image_target()},
+                  {'operation':'checkpoint','program_id':'editor','window_ref':'popup_1','message':'Final result'}]
+        self.task['steps']=steps
+        self.runtime.capture_checkpoint=mock.Mock()
+        calls=[]
+        def action(spec,target):
+            calls.append(spec['operation'])
+            return ({'task_verified':True,'input_dispatched':False} if spec['operation']=='wait_for_image' else
+                    {'task_verified':False,'input_dispatched':True,'verification_deferred':False})
+        self.runtime.image_action=action
+        first=self.run_task(ScriptedOperations())
+        self.assertEqual(first['completed_steps'],0)
+        resumed=self.run_task(ScriptedOperations(),resume_run_id=first['run_id'])
+        self.assertEqual(resumed['completed_steps'],3)
+        self.assertFalse(resumed['task_verified'])
+        self.assertEqual(calls,['image_click','wait_for_image'])
+        self.runtime.capture_checkpoint.assert_not_called()
+        self.assertNotIn('checkpoint',resumed)
+
     def test_dispatched_focus_failure_resumes_at_popup_review_without_reclick(self):
         self.task["steps"] = self.opened_popup_steps()
         self.runtime.image_action = mock.Mock(return_value={

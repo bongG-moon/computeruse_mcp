@@ -289,20 +289,34 @@ def _rgb_candidates(image_target, screenshot_png, *, deadline=None, check_active
 
 
 def _appearance_frame(frame):
-    """Normalize only a dominant, light row background; retain foreground ink."""
-    _, np, _ = _load()
-    result = frame.copy()
+    """Normalize light menu rows; erase blue outlines only at the frame edge."""
+    cv2, np, _ = _load()
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
     backgrounds = np.zeros(frame.shape[:2], dtype=bool)
     for y, row in enumerate(frame):
         colors, counts = np.unique(row, axis=0, return_counts=True)
-        index = int(counts.argmax())
-        bg = colors[index]
-        if counts[index] < len(row)*.55 or int(bg.min()) < 145:
+        index = int(counts.argmax()); bg = colors[index]
+        if counts[index] >= len(row)*.55 and int(bg.min()) >= 145:
+            level = float(cv2.cvtColor(bg.reshape(1,1,3), cv2.COLOR_BGR2GRAY)[0,0])
+            gray[y] = np.minimum(255, gray[y]*255/level)
+            backgrounds[y] = np.max(np.abs(row.astype(np.int16)-bg.astype(np.int16)),axis=1) <= 8
+    b,g,r = (frame[:,:,i].astype(np.int16) for i in range(3))
+    blue = (b-r > 60) & (g-r > 25) & (cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)>90)
+    # Only a thin connected rectangular outline qualifies. Blue text/icons
+    # inside the menu are never erased, even when the template is cropped.
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(blue.astype(np.uint8),8)
+    for component in range(1,count):
+        x,y,w,h,area = (int(v) for v in stats[component])
+        if w < 40 or h < 10: continue
+        region = labels[y:y+h,x:x+w] == component
+        interior = region[2:-2,2:-2]
+        if interior.any(): continue
+        if min(float(region[:2,:].any(axis=0).mean()), float(region[-2:,:].any(axis=0).mean()),
+               float(region[:,:2].any(axis=1).mean()),float(region[:,-2:].any(axis=1).mean())) < .9:
             continue
-        mask = np.max(np.abs(row.astype(np.int16)-bg.astype(np.int16)), axis=1) <= 8
-        backgrounds[y] = mask
-        result[y, mask] = 255
-    return result, backgrounds
+        gray[y:y+h,x:x+w][region] = 255
+    result = np.rint(gray).astype(np.uint8)
+    return cv2.cvtColor(result,cv2.COLOR_GRAY2BGR), backgrounds
 
 
 def _appearance_png(encoded):
@@ -319,19 +333,14 @@ def _ink_agrees(pattern, current, anchor_y):
     a, _ = _appearance_frame(pattern); b, _ = _appearance_frame(current)
     ia = (255-a.astype(np.float32).mean(axis=2))
     ib = (255-b.astype(np.float32).mean(axis=2))
-    # Strong strokes cannot appear/disappear. Background normalization must
-    # never turn changed text, a tooltip or disabled grey text into a match.
-    strong_a, strong_b = ia >= 80, ib >= 80
-    if np.count_nonzero(strong_a) < 16 or not np.array_equal(strong_a, strong_b):
-        return False
     center = min(a.shape[0]-1, max(0, int(anchor_y*a.shape[0])))
     for left, right, minimum in ((ia, ib, .98),
             (ia[max(0,center-8):center+9], ib[max(0,center-8):center+9], .95)):
-        total = float(np.maximum(left, right).sum())
-        if total <= 0 or float(np.minimum(left,right).sum())/total < minimum:
+        mask = (left > 35) | (right > 35)
+        if int(mask.sum()) < 12:
             return False
-        mask = np.maximum(left,right) >= 30
-        if not mask.any() or float(np.abs(left-right)[mask].mean()) > 10:
+        dice = 2*float(np.minimum(left,right).sum())/max(1,float(left.sum()+right.sum()))
+        if dice < minimum or float(np.abs(left-right)[mask].mean()) > 10:
             return False
     return True
 

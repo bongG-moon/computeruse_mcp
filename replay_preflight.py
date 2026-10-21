@@ -143,4 +143,5 @@ def prepare_image_foreground(runtime, target):
     except (ValueError, OSError, RuntimeError) as error:
         return {"status": "needs_review", "task_verified": False, "input_dispatched": False,
                 "focus_dispatched": focused, "diagnostic": {"code": getattr(error, "code", "image_preparation_failed"),
-                    "message": str(error)[:1000], "automatic_replay": False}}
+                    "message": str(error)[:1000], "automatic_replay": False,
+                    "popup_proof": __import__("transient_popup").popup_diagnostic(target)}}

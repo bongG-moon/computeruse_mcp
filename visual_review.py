@@ -55,7 +55,9 @@ class WorkflowVisualReviews:
         self._prune(context)
         engine = self.engine_factory(runtime, clock=self.clock, observation_ttl=self.ttl)
         try:
-            binding = engine.bind(target)
+            from transient_popup import current_popup
+            capture_target = (current_popup(target, runtime) or target) if step.get('window_ref', 'main') == 'main' else target
+            binding = engine.bind(capture_target)
             request = engine.request_review(binding['window_ref'], step['message'])
             observed = engine.observe(binding['window_ref'], goal=step['message'],
                 image_delivery_enabled=True, max_controls=30, max_depth=2, max_elements=100,
@@ -70,7 +72,7 @@ class WorkflowVisualReviews:
                 'expected_condition': step['message'], 'expires_in_seconds': self.ttl,
                 'image_size': data['image_size'], 'evidence_level': 'visual_assessed'}
             self.jobs[identity] = {'engine': engine, 'runtime': runtime, 'context': context,
-                'target': dict(target), 'public': public, 'request': request,
+                'target': dict(target), 'capture_target': dict(capture_target), 'public': public, 'request': request,
                 'expires': self.clock()+self.ttl, 'window_ref': binding['window_ref']}
             return {'state': 'needs_observation_review', 'task_verified': False, 'input_dispatched': False,
                 'visual_review': copy.deepcopy(public),
@@ -103,12 +105,17 @@ class WorkflowVisualReviews:
             if key in submission and (type(submission[key]) is not type(job['public'][key])
                                       or submission[key] != job['public'][key]):
                 raise OperationError('확인 요청의 연결 정보가 다릅니다.', 'visual_review_context_mismatch')
+        if job.get('capture_target', target) != target:
+            from transient_popup import popup_owner
+            if popup_owner(job['capture_target']) != target:
+                raise OperationError('확인하던 팝업의 소유 창이 바뀌었습니다.', 'review_observation_changed')
         result = job['engine'].review(job['window_ref'], action_id=job['request']['action_id'],
             observation_id=submission['observation_id'], frame_id=submission['frame_id'],
             verdict=submission['verdict'], evidence=submission['evidence'], evidence_regions=submission.get('evidence_regions'))
         # Retain only condition-region hashes, never a full persisted screen.
         # This is usable by the immediately following step of this exact run.
-        if result.get('task_verified') is True and submission.get('evidence_regions'):
+        if (result.get('task_verified') is True and submission.get('evidence_regions')
+                and job.get('capture_target', target) == target):
             from image_pixels import crop_regions, pixel_digest
             frame = job['engine'].observations[submission['observation_id']]['frame']
             regions = copy.deepcopy(submission['evidence_regions'])

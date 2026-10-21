@@ -148,6 +148,10 @@ def _validate_expanded(steps, program_ids):
         if not isinstance(ref, str) or not WINDOW_REF.fullmatch(ref):
             raise WorkflowError("window_ref는 영문자로 시작하는 1~64자 창 이름이어야 합니다.")
         validate_workflow_step(step)
+        if step.get("review_mode") == "popup_image":
+            if (index+1 >= len(steps) or target_key(step) != target_key(steps[index+1])
+                    or step.get("image_target") != steps[index+1].get("image_target")):
+                raise WorkflowError("자동 팝업 확인의 이미지는 바로 다음 동작의 대상과 일치해야 합니다.")
         if deferred_input(step):
             direct = index+1 < len(steps) and linked_image_checkpoint(step, steps[index+1])
             opened = index+2 < len(steps) and linked_popup_checkpoint(step, steps[index+1], steps[index+2])
@@ -907,6 +911,21 @@ class WorkflowRunner:
                     checkpoint["source_step_index"] = source_index
                 record["checkpoint"] = checkpoint
                 save("running")
+                if item.get("review_mode") == "popup_image":
+                    checked = measured(execute_image_step(runtime, {"operation":"wait_for_image",
+                        "image_target":item["image_target"], "timeout_ms":0}, target))
+                    checked.update(verification_scope="declared_popup_and_unique_next_target", business_result_verified=False)
+                    record["step_delivery"] = {"step_index":index,"state":"not_sent"}
+                    if checked.get("task_verified") is not True:
+                        record.pop("checkpoint", None)
+                        save("needs_review")
+                        return {**record,"last_result":checked,"input_dispatched":False,
+                            "next_step":"같은 실행에서 자동 이미지 조건만 다시 확인하세요. 사람 확인으로 바꾸거나 입력을 반복하지 않습니다."}
+                    record["completed_steps"] = index+1
+                    record["pending_step"] = None
+                    record.pop("checkpoint", None)
+                    save("running")
+                    return continuation("popup_condition_verified")
                 prepared = None
                 if delivery_mode == "foreground" and item.get("review_mode") != "visual" and not item.get("opened_from"):
                     from replay_preflight import prepare_image_foreground
@@ -1129,10 +1148,16 @@ class WorkflowRunner:
                     stage = "checkpoint_before_input"
                     save("running")
                     stage = "operation"
-                    if item["operation"] == "checkpoint":
+                    if item["operation"] == "checkpoint" and item.get("review_mode") != "popup_image":
                         stage = "screenshot_checkpoint"
                         return capture_checkpoint(index, target)
-                    if item["operation"] == "wait_for_window":
+                    if item.get("review_mode") == "popup_image":
+                        latest = execute_image_step(runtime, {"operation":"wait_for_image",
+                            "image_target":item["image_target"], "timeout_ms":0}, target)
+                        latest["verification_scope"] = "declared_popup_and_unique_next_target"
+                        latest["business_result_verified"] = False
+                        engine = Operations(runtime)
+                    elif item["operation"] == "wait_for_window":
                         progress_event("waiting", index, item["operation"])
                         owner_item = {"program_id": item["program_id"], "window_ref": item["owner_ref"]}
                         bindings[target_key(owner_item)] = resolve(owner_item)

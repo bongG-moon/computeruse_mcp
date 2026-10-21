@@ -41,7 +41,7 @@ MANAGEMENT_TOOLS = [
     tool("computer_status", "Read server/driver configuration and current session status. No UI control.", object_schema(), True),
     tool("computer_activity", "Read live execution stage, elapsed time and workflow step while another tool is running. Bypasses the UI execution queue, never reads or acts on the screen. active=false means the tool ended, not that its task succeeded. Use the final tool result for success. No input values or screen text are included.", object_schema(), True),
     tool("computer_check_image", "Default is text-safe: no images are sent to unknown/text-only models, while local image matching and recording still work. No arguments safely reports this mode. Only when the user confirms an image-capable model, set delivery_mode=vision to opt in and return a generated image challenge. Set delivery_mode=text to disable image responses immediately. No config edits, reconnect or model routing changes. Read the six image characters and call again with challenge_id and answer; do not guess/use OCR. A pass verifies one roundtrip only.", object_schema({"delivery_mode": {"type": "string", "enum": ["text", "vision"]}, "challenge_id": STRING, "answer": {"type": "string", "minLength": 1, "maxLength": 40}}), True),
-    tool("computer_review_checkpoint", "Read the human decision from the local checkpoint image viewer in a text-only connection. Does not capture another screen or approve/replay any task. Only status=confirmed permits the returned same-run acknowledge arguments. Pending means wait for the person; rejected/cancelled means stop and inspect the result. Never infer a decision or substitute image-model support.", object_schema({"review_id": STRING}, ["review_id"]), True),
+    tool("computer_review_checkpoint", "Read the human decision from the local checkpoint image viewer in a text-only connection. Does not capture another screen or approve/replay any task. Only status=confirmed permits the returned same-run acknowledge arguments. Pending means wait for the person; rejected/cancelled means stop and inspect the result. Never infer a decision or substitute image-model support.", object_schema({"review_id": STRING, "redisplay": {"type":"boolean"}}, ["review_id"]), True),
     tool("computer_programs", "List registered programs. To add an app at the user's request use computer_register_program, or computer_program_candidates if its path is unknown. No config-file search or shell editing is needed.", object_schema(), True),
     tool("computer_program_candidates", "Read visible top-level window titles and executable paths for this Windows user and login session, without screenshots/UIA or input. For an explicitly requested app registration use the matching candidate_id with computer_register_program. Duplicate app names must be distinguished by window title; never select an arbitrary candidate. References expire after five minutes and are revalidated when registered.", object_schema(), True),
     tool("computer_register_program", "Register a program only when the user asks to add it. Supply its exact exe path or a candidate_id from computer_program_candidates. A launch_uri alone safely returns open-window choices plus read-only protocol association metadata: select the actual business window then resubmit candidate_id with that URI. For a local ClickOnce Application Reference, pass launch_appref with its .appref-ms path; alone returns parsed reference metadata and open-window choices without network access. Bind the actual business window using candidate_id or its exact exe, never the reference filename or dfsvc/rundll32 handler. Never assume the URI handler/launcher is the controlled program. Optional name defaults to executable name; arguments are individual EXE arguments, working_directory is its start folder. Saves just this addition and makes it available for the next computer_begin without reconnecting. Does not launch an app or expand an active session. Existing differing registrations are not overwritten. Do not search or edit config files; follow next_tool.",
@@ -183,6 +183,8 @@ recipe_step_schema["properties"].update({
     "image_target": {"type": "object", "description": "Validated computer-image-target/v1 from the human image picker. Includes template_png, dimensions, capture_window, anchor and matching thresholds. Never invent an image or coordinates."},
     "return_from": {"type": "string", "description": "Checkpoint only: recorded owned popup window_ref that just closed. Checkpoint targets that popup's exact recorded owner; never skip human review or claim closure from this field alone."},
     "opened_from": {"type": "string", "description": "Checkpoint only: recorded owner window_ref that opened this popup. Must immediately follow its matching image action and read-only wait_for_window. Pause for human review in the uniquely verified owned popup; never infer permission or completion from the new window alone."},
+    "review_mode": {"type":"string","enum":["human","visual","popup_image"]},
+    "review_origin": {"type":"string","enum":["explicit","recording_generated"]},
     "replace_all": {"type": "boolean"}, "keys": {"type": "array", "minItems": 1, "maxItems": 8, "items": STRING},
     "direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
     "amount": {"type": "integer", "minimum": 1, "maximum": 20},
@@ -190,6 +192,8 @@ recipe_step_schema["properties"].update({
     "class_name": {"type": "string", "minLength": 1, "maxLength": 256}})
 MANAGEMENT["computer_save_task"]["inputSchema"]["properties"]["steps"]["items"] = recipe_step_schema
 MANAGEMENT["computer_run_task"]["inputSchema"]["properties"]["acknowledge_checkpoint"] = STRING
+MANAGEMENT["computer_run_task"]["inputSchema"]["properties"]["observation_review"] = {"type":"object"}
+MANAGEMENT["computer_run_task"]["inputSchema"]["properties"]["target_review"] = {"type":"object"}
 MANAGEMENT["computer_run_task"]["description"] += (
     " delay uses duration_ms; wait_for_element uses selector/timeout_ms; wait_for_state uses expect/timeout_ms and optional poll_interval_ms. "
     "Use require_change:true on an action's completion condition to reject unchanged pre-existing results; a baseline must come from that action. checkpoint uses message and shows a local review window for text-safe clients or returns an image for opted-in vision clients, "
@@ -502,7 +506,8 @@ class ComputerManager:
         self.easy = EasyApi(self)
         self.process_editors.test_runner = lambda runtime, task, targets, **kwargs: self.workflows.run(
             runtime, task, {}, targets, delivery_mode="foreground", image_delivery_enabled=self.image_delivery.status()["delivery_mode"] == "vision", **kwargs)
-        self.process_editors.visual_review_enabled = lambda runtime: self.image_delivery.status()["delivery_mode"] == "vision"
+        self.process_editors.visual_review_enabled = lambda runtime: (self.image_delivery.status()["delivery_mode"] == "vision"
+            and self.image_delivery.status()["last_roundtrip"] == "passed")
         self.storage_cleanup = None
         self._cleanup_storage()
 
@@ -764,7 +769,7 @@ class ComputerManager:
         if name in {"computer_activity", "computer_task_progress", "computer_check_image", "computer_review_checkpoint"}:
             validate_management(name, args)
             if name == 'computer_review_checkpoint':
-                return result(self.checkpoint_reviews.status(args['review_id'], self.session))
+                return result((self.checkpoint_reviews.reveal if args.get('redisplay') else self.checkpoint_reviews.status)(args['review_id'], self.session))
             if name == "computer_activity":
                 return result(self.activity.snapshot())
             if name == "computer_check_image":
@@ -941,8 +946,10 @@ class ComputerManager:
                                                                for step in task.get('steps', [])) else 'background'
                         answer = self.workflows.run(self.session, task, args.get("inputs", {}), args["targets"],
                                                     resume_run_id=args.get("resume_run_id"), delivery_mode=args.get("delivery_mode", default_delivery),
-                                                    acknowledge_checkpoint=args.get("acknowledge_checkpoint"), execution_mode=args.get("execution_mode", "auto"))
-                    checkpoint_content = answer.pop("checkpoint_content", [])
+                                                    acknowledge_checkpoint=args.get("acknowledge_checkpoint"), execution_mode=args.get("execution_mode", "auto"),
+                                                    image_delivery_enabled=self.image_delivery.status()["delivery_mode"] == "vision",
+                                                    observation_review=args.get("observation_review"), target_review=args.get("target_review"))
+                    checkpoint_content = answer.pop("checkpoint_content", []) + answer.pop("observation_content", [])
                     response = result(answer, error=answer.get("task_verified") is not True and not bool(checkpoint_content))
                     response["content"].extend(checkpoint_content)
                     return response

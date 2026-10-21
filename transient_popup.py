@@ -27,7 +27,7 @@ def recorded_window_scope(task):
             if isinstance(step.get("steps"), list):
                 collect(step["steps"])
     collect(task.get("steps", []))
-    token = _scope.set({"classes": classes, "bindings": {}})
+    token = _scope.set({"classes": classes, "bindings": {}, "failures": {}})
     try:
         yield
     finally:
@@ -45,7 +45,7 @@ def proven_popup(target):
     try:
         _binding(target)
         return True
-    except OperationError:
+    except (OperationError, OSError, RuntimeError):
         return False
 
 
@@ -122,9 +122,12 @@ def _physical_snapshot(target, owner, declarations):
         related_foreground = foreground in (target["window_id"], owner["window_id"])
         if not related_foreground:
             related_foreground = bool(probe.ownership_path(foreground, owner["window_id"]))
-        if (not path or not row["visible"] or not row["enabled"] or row["minimized"]
-                or not related_foreground or not _allowed_class(row["class_name"], declarations)):
-            raise OperationError("현재 팝업의 표시·소유 관계·전경을 확인하지 못했습니다.", "popup_scope_unverified")
+        for failed, code in ((not path, "popup_owner_mismatch"),
+                (not row["visible"], "popup_not_visible"), (not row["enabled"], "popup_disabled"),
+                (row["minimized"], "popup_minimized"), (not related_foreground, "popup_foreground_mismatch"),
+                (not _allowed_class(row["class_name"], declarations), "popup_class_unsupported")):
+            if failed:
+                raise OperationError("팝업 증명을 완료하지 못했습니다: " + code, code)
         rect = W.RECT()
         if not user.GetWindowRect(target["window_id"], ctypes.byref(rect)):
             raise OperationError("팝업 크기를 확인하지 못했습니다.", "popup_geometry_unavailable")
@@ -142,10 +145,14 @@ def register_popup(target, owner):
     if scope is None: return
     try:
         proof = _snapshot(target, owner, scope["classes"])
-    except (OperationError, OSError, RuntimeError):
+    except (OperationError, OSError, RuntimeError) as error:
+        scope["failures"][(target["pid"], target["window_id"])] = {
+            "code": getattr(error, "code", "popup_native_probe_failed"), "message": str(error)[:500]}
+        scope["bindings"].pop((target["pid"], target["window_id"]), None)
         # Driver-supported windows still work. Missing native proof only
         # disables this optional fallback, never weakens its validation.
         return False
+    scope["failures"].pop((target["pid"], target["window_id"]), None)
     scope["bindings"][(target["pid"], target["window_id"])] = {
         "target": dict(target), "owner": dict(owner), "proof": proof}
     return True
@@ -299,3 +306,55 @@ def click(target, point, geometry, check):
         finally: probe.close()
     finally:
         if previous: user.SetThreadDpiAwarenessContext(previous)
+
+
+def popup_diagnostic(target):
+    """Report native proof separately from a Driver discovery error."""
+    scope = _scope.get()
+    key = (target["pid"], target["window_id"])
+    if scope and key in scope["failures"]:
+        return dict(scope["failures"][key])
+    try:
+        _binding(target)
+        return {"code": "popup_proven"}
+    except (OperationError, OSError, RuntimeError) as error:
+        return {"code": getattr(error, "code", "popup_native_probe_failed"), "message": str(error)[:500]}
+
+
+def popup_owner(target):
+    binding, _ = _binding(target)
+    return dict(binding["owner"])
+
+
+def current_popup(owner, runtime=None):
+    scope = _scope.get()
+    candidates = []
+    factory = getattr(runtime, "create_transition_probe", None)
+    if scope is not None and callable(factory):
+        probe = factory(dict(owner))
+        try:
+            state = probe.capture()
+            for row in state.get("windows", []):
+                if (row.get("pid") != owner["pid"] or row.get("window_id") == owner["window_id"]
+                        or row.get("visible") is not True or not _allowed_class(row.get("class_name", ""), scope["classes"])):
+                    continue
+                if not probe.ownership_path(row["window_id"], owner["window_id"]): continue
+                candidate = {"pid":owner["pid"],"window_id":row["window_id"]}
+                if not register_popup(candidate, owner):
+                    cause = popup_diagnostic(candidate)
+                    raise OperationError(cause.get("message", "팝업 관찰 증명이 실패했습니다."), cause["code"])
+        finally:
+            probe.close()
+    for binding in list((scope or {}).get("bindings", {}).values()):
+        if binding["owner"] == owner and proven_popup(binding["target"]):
+            candidates.append(dict(binding["target"]))
+    if len(candidates) > 1:
+        raise OperationError("관련 팝업이 여러 개입니다. 창 참조를 지정하세요.", "popup_observation_ambiguous")
+    return candidates[0] if candidates else None
+
+
+def window_exists(hwnd):
+    user = _user()
+    user.IsWindow.argtypes = [W.HWND]
+    user.IsWindow.restype = W.BOOL
+    return bool(user.IsWindow(hwnd))

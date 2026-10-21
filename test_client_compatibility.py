@@ -25,6 +25,16 @@ class ClientCompatibilityTests(unittest.TestCase):
         self.manager = ComputerManager(config_at(self.tmp.name))
         self.image = {'type': 'image', 'mimeType': 'image/png', 'data': base64.b64encode(image_png('ABCDEF')).decode()}
 
+    def test_recording_visual_choice_requires_verified_connection(self):
+        self.assertFalse(self.manager.process_editors.visual_review_enabled(None))
+        self.manager.image_delivery.configure('vision')
+        self.assertFalse(self.manager.process_editors.visual_review_enabled(None))
+        # Capability transition only; not a workflow or human approval.
+        self.manager.image_delivery.last_status='passed'
+        self.assertTrue(self.manager.process_editors.visual_review_enabled(None))
+        self.manager.image_delivery.configure('text')
+        self.assertFalse(self.manager.process_editors.visual_review_enabled(None))
+
     def test_unknown_model_check_does_not_send_image_or_start_driver(self):
         answer = self.manager.call('computer_check_image', {})
         self.assertEqual(answer['structuredContent']['status'], 'text_safe')
@@ -107,6 +117,18 @@ class ClientCompatibilityTests(unittest.TestCase):
             self.manager.call('computer_run_task', {**args, 'delivery_mode': 'background'})
             self.assertEqual(run.call_args.kwargs['delivery_mode'], 'background')
 
+    def test_legacy_run_passes_connection_capability_and_visual_response(self):
+        self.manager.session=SimpleNamespace(id='s',state='active')
+        self.manager.image_delivery.configure('vision')
+        args={'task_id':'demo','targets':[{'program_id':'editor','pid':10,'window_id':20}],
+              'observation_review':{'review_id':'test-review'}}
+        with patch.object(self.manager.tasks,'get',return_value={'steps':[]}), patch.object(self.manager.workflows,'run',return_value={
+                'task_verified':False,'state':'needs_observation_review','observation_content':[self.image]}) as run:
+            response=self.manager.call('computer_run_task',args)
+        self.assertTrue(run.call_args.kwargs['image_delivery_enabled'])
+        self.assertEqual(run.call_args.kwargs['observation_review'],args['observation_review'])
+        self.assertTrue(any(item['type']=='image' for item in response['content']))
+
     def test_text_checkpoint_cannot_be_acknowledged_without_native_confirmation(self):
         self.manager.session = SimpleNamespace(id='s', state='active')
         args = {'task_id': 'demo', 'targets': [{'program_id': 'editor', 'pid': 10, 'window_id': 20}],
@@ -157,6 +179,24 @@ class CheckpointReviewTests(unittest.TestCase):
     def decision(self, identity, state, **changes):
         job = self.reviews.jobs[identity]
         atomic_json(job['folder'] / 'result.json', {'review_id': identity, 'nonce': job['nonce'], 'status': state, **changes})
+
+    def test_visibility_is_live_and_redisplay_does_not_approve(self):
+        started=self.start(); identity=started['review_id']; job=self.reviews.jobs[identity]
+        self.assertTrue(started['initial_ready'])
+        self.assertFalse(started['visibility_observed'])
+        self.assertFalse(started['review_visible'])
+        self.child.pid=1234
+        state={'nonce':job['nonce'],'review_id':identity,'pid':1234,'hwnd':99,
+               'visible':True,'minimized':False,'on_monitor':True,'occlusion':'not_measured'}
+        atomic_json(job['folder']/'state.json',state)
+        self.assertTrue(self.reviews.status(identity,self.runtime)['review_visible'])
+        atomic_json(job['folder']/'state.json',{**state,'minimized':True})
+        self.assertFalse(self.reviews.status(identity,self.runtime)['review_visible'])
+        result=self.reviews.reveal(identity,self.runtime)
+        self.assertTrue(result['redisplay_requested'])
+        self.assertFalse(result['human_reviewed'])
+        self.assertTrue((job['folder']/'reveal.flag').exists())
+        self.assertFalse((job['folder']/'result.json').exists())
 
     def test_confirmation_is_bound_to_exact_session_run_checkpoint_and_does_not_replay(self):
         started = self.start()

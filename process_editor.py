@@ -339,7 +339,7 @@ class ProcessDraft:
                 and set(proof) == {"source", "operation", "before_input"}
                 and proof == {"source": "native_mouse_hook", "operation": "click", "before_input": True})
 
-    def recorded(self, events, *, snapshots=None, warning_codes=(), windows=(), review_mode="human"):
+    def recorded(self, events, *, snapshots=None, warning_codes=(), windows=(), review_mode="human", auto_popup=False):
         from image_targets import validate_image_target
         if not isinstance(events, list) or not events or len(events) > MAX_RECORDING_EVENTS:
             raise OperationError("기록한 동작이 없습니다. [기록 시작] 후 실제로 클릭·입력해야 합니다. 마우스를 올려 요소를 모으는 것은 동작 녹화가 아닙니다." if not events else "기록한 동작이 너무 많습니다.", "recording_invalid_events")
@@ -500,9 +500,19 @@ class ProcessDraft:
             else:
                 proposed.append(self.checkpoint(target)); labels.append("현재 창")
         if review_mode not in {"human", "visual"}: raise OperationError("화면 확인 방법을 선택하세요.")
-        if review_mode == "visual":
-            for item in proposed[len(self.steps):]:
-                if item.get("operation") == "checkpoint": item["review_mode"] = "visual"
+        for item in proposed[len(self.steps):]:
+            if item.get("operation") == "checkpoint":
+                item["review_mode"] = review_mode
+                item["review_origin"] = "recording_generated"
+        if auto_popup:
+            for index in range(len(self.steps), len(proposed)-1):
+                item, following = proposed[index], proposed[index+1]
+                if (item.get("review_origin") == "recording_generated" and item.get("opened_from")
+                        and following.get("image_target") and following.get("operation") != "manual_entry"
+                        and (item.get("program_id"), item.get("window_ref")) ==
+                            (following.get("program_id"), following.get("window_ref"))):
+                    item.update(review_mode="popup_image", image_target=copy.deepcopy(following["image_target"]),
+                        message="관련 팝업 안에서 다음 녹화 대상 이미지가 유일하게 보이는지 확인합니다. 업무 결과 성공 판정은 아닙니다.")
         self.validate(proposed, allow_pending=True)
         self.steps, self.labels = proposed, labels
         for key in connected:
@@ -621,12 +631,17 @@ class ProcessDraft:
     def edit(self, payload):
         """Edit one authored step; image bytes and untouched fields never round-trip through the UI."""
         index = payload.get("index")
-        allowed = {"index", "value", "key", "keys", "seconds", "expected", "variable", "variable_label", "checked"}
+        allowed = {"index", "value", "key", "keys", "seconds", "expected", "variable", "variable_label", "checked", "review_mode"}
         if set(payload) - allowed or type(index) is not int or not 0 <= index < len(self.steps):
             raise OperationError("수정할 단계를 선택하세요.")
         proposed, variables = copy.deepcopy(self.steps), copy.deepcopy(self.variables)
         step = proposed[index]
         operation = step["operation"]
+        if "review_mode" in payload:
+            if operation != "checkpoint" or payload["review_mode"] not in {"human", "visual"}:
+                raise OperationError("사람 확인 또는 모델 판정을 선택하세요.")
+            step["review_mode"] = payload["review_mode"]
+            step.pop("image_target", None)
         if operation == "manual_entry":
             if set(payload) != {"index", "value"}: raise OperationError("먼저 확인되지 않은 입력 내용을 지정하세요.")
             return self.resolve_input(payload)
@@ -703,7 +718,7 @@ class ProcessDraft:
         proposed[index] = step
         if was_deferred and index + 1 < len(proposed):
             following = proposed[index + 1]
-            if (following.get("operation") == "checkpoint" and not any(k in following for k in ("opened_from", "return_from"))
+            if (following.get("operation") == "checkpoint" and following.get("review_origin") == "recording_generated" and not any(k in following for k in ("opened_from", "return_from"))
                     and (following["program_id"], following.get("window_ref", "main")) == (step["program_id"], step.get("window_ref", "main"))):
                 proposed.pop(index + 1); labels.pop(index + 1)
         self.validate(proposed, allow_pending=True)
@@ -771,6 +786,7 @@ class ProcessDraft:
         additions, labels = [step], [label]
         if (step["operation"].startswith("image_") or step.get("completion_mode") == "human") and not step.get("expect"):
             check = self.checkpoint(target)
+            check["review_origin"] = "recording_generated"
             if completion == "visual": check["review_mode"] = "visual"
             additions.append(check); labels.append("현재 창")
         proposed = [*self.steps, *additions]
@@ -964,6 +980,8 @@ class ProcessEditors:
             if "image_target" in step:
                 preview["thumbnail_png"] = step["image_target"]["template_png"]
                 preview["preview_anchor"] = copy.deepcopy(step["image_target"]["anchor"])
+            preview["review_mode"] = step.get("review_mode", "human")
+            preview["review_origin"] = step.get("review_origin", "explicit")
             preview["editable"] = {key: copy.deepcopy(step[key]) for key in ("value", "message", "key", "keys", "duration_ms", "timeout_ms", "checked") if key in step}
             if len(step.get("expect", [])) == 1:
                 preview["editable"]["expected"] = copy.deepcopy(step["expect"][0]["equals"])
@@ -1078,8 +1096,10 @@ class ProcessEditors:
                     job["result"].pop("last_recognition", None)
         elif action == "record":
             from replay_preflight import image_replay_preflight, prepare_image_foreground
-            if set(payload) - {"review_mode", "mode", "index"} or payload.get("review_mode", "human") not in {"human", "visual"}:
+            if set(payload) - {"review_mode", "mode", "index", "auto_popup"} or payload.get("review_mode", "human") not in {"human", "visual"}:
                 raise OperationError("녹화 범위는 편집 창에 연결한 프로그램으로 고정됩니다.")
+            if type(payload.get("auto_popup", False)) is not bool:
+                raise OperationError("팝업 자동 확인 선택을 확인하세요.")
             record_mode = payload.get("mode", "append")
             if record_mode not in {"append", "replace_selected", "replace_all"}:
                 raise OperationError("뒤에 추가·선택 단계 교체·전체 다시 녹화 중 하나를 선택하세요.")
@@ -1146,6 +1166,7 @@ class ProcessEditors:
             if receipt is None or receipt["data"] != recorded:
                 receipt = self._retain_recording(job, recorded)
             receipt["review_mode"] = payload.get("review_mode", "human")
+            receipt["auto_popup"] = payload.get("auto_popup", False)
             receipt["mode"] = record_mode
             receipt["replace_index"] = payload.get("index")
             draft = self._import_recording(job, receipt)
@@ -1172,6 +1193,8 @@ class ProcessEditors:
         elif action == "resolve_input":
             draft.resolve_input(payload)
         elif action == "edit_step":
+            if payload.get("review_mode") == "visual" and not job.get("visual_review_enabled"):
+                raise OperationError("이미지 전달이 확인되지 않은 연결에서는 모델 판정을 저장할 수 없습니다.", "vision_client_required")
             draft.edit(payload)
             message = "선택한 단계의 설정만 반영했습니다. 다른 단계와 저장 이미지는 유지했습니다."
         elif action == "set_completion":
@@ -1329,7 +1352,7 @@ class ProcessEditors:
                 except OperationError:
                     self._check(job)
         draft.recorded(recorded_events, snapshots=snapshots, warning_codes=recorded.get("warnings", []),
-                       windows=recorded.get("windows", []), review_mode=receipt["review_mode"])
+                       windows=recorded.get("windows", []), review_mode=receipt["review_mode"], auto_popup=receipt.get("auto_popup", False))
         if receipt.get("mode") == "replace_selected":
             prior = copy.deepcopy(receipt["before"])
             for step in prior.steps: step.setdefault("step_id", uuid.uuid4().hex)
