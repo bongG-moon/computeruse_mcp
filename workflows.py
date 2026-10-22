@@ -91,6 +91,27 @@ def deferred_input(step):
         step.get("operation") in {"click", "double_click", "right_click"} and step.get("completion_mode") == "human")
 
 
+def _sent_postclick_focus_failure(step, result, target):
+    """A precise Driver post-click report permits observation, never another click."""
+    if (step.get("operation") != "image_click" or not deferred_input(step)
+            or result.get("input_dispatched") is not True
+            or result.get("verification_deferred") is not False
+            or result.get("input_backend") != "cua-driver"):
+        return False
+    diagnostic = result.get("diagnostic", {})
+    failure = diagnostic.get("driver_failure", {})
+    if (diagnostic.get("code") != "image_input_unconfirmed"
+            or failure.get("code") != "tool_invocation_failed"
+            or failure.get("diagnostic_code") != "target_denied"):
+        return False
+    message = failure.get("message")
+    match = re.fullmatch(
+        r"foreground_unavailable: exact target HWND (0x[0-9a-fA-F]+) or a verified "
+        r"same-process post-action window was not foreground after the click "
+        r"\(actual foreground HWND 0x[0-9a-fA-F]+\)", message if isinstance(message, str) else "")
+    return match is not None and int(match.group(1), 16) == target.get("window_id")
+
+
 def _session_budget_exhausted(runtime):
     """Only identify policy exhaustion, never turn a user stop into continuation."""
     deadline = getattr(runtime, "deadline", None)
@@ -879,6 +900,28 @@ class WorkflowRunner:
                 if completed_receipt:
                     assertion = prior_assertion(index, assertion, target)
                 return measured(engine.execute(assertion, target, delivery_mode=delivery_mode))
+            def recover_sent_transition(index):
+                # The frozen recipe must explicitly connect this input to the
+                # next owned window and its review. A visible HWND alone cannot
+                # confirm the input's business outcome or replace that review.
+                if (record.get("step_delivery") != {"step_index": index, "state": "sent"}
+                        or not deferred_input(steps[index]) or index+2 >= len(steps)):
+                    return None
+                source, wait, checkpoint = steps[index:index+3]
+                if (wait["operation"] != "wait_for_window" or checkpoint["operation"] != "checkpoint"
+                        or not (source["program_id"] == wait["program_id"] == checkpoint["program_id"])
+                        or checkpoint.get("opened_from") != source.get("window_ref", "main")
+                        or "return_from" in checkpoint or target_key(checkpoint) != target_key(wait)):
+                    return None
+                runtime.check_active()
+                transition = check_step(index+1)
+                runtime.check_active()
+                if transition.get("task_verified") is True:
+                    record["completed_steps"] = index+2
+                    record["pending_step"] = index+2
+                    record.pop("step_delivery", None)
+                    save("running")
+                return transition
             def check_prior(index):
                 for candidate in range(index-1, -1, -1):
                     # A successfully delivered image mutation intentionally
@@ -1076,18 +1119,9 @@ class WorkflowRunner:
                         # sibling menu actually opened. Inspect the declared
                         # transition; never send the click again or infer task
                         # success merely from the new HWND.
-                        if (proof == {"step_index": pending, "state": "sent"}
-                                and deferred_input(steps[pending]) and pending+2 < len(steps)
-                                and steps[pending+1]["operation"] == "wait_for_window"
-                                and steps[pending+2]["operation"] == "checkpoint"
-                                and steps[pending+2].get("opened_from") == steps[pending].get("window_ref", "main")
-                                and target_key(steps[pending+2]) == target_key(steps[pending+1])):
-                            transition = check_step(pending+1)
-                            if transition.get("task_verified") is True:
-                                record["completed_steps"] = pending+2
-                                record["pending_step"] = pending+2
-                                record.pop("step_delivery", None)
-                                return capture_checkpoint(pending+2, resolve(steps[pending+2]))
+                        transition = recover_sent_transition(pending)
+                        if transition is not None and transition.get("task_verified") is True:
+                            return capture_checkpoint(pending+2, resolve(steps[pending+2]))
                         not_sent = (not special and proof.get("step_index") == pending
                                     and proof.get("state") == "not_sent")
                         # Only a durable, explicit non-delivery result permits
@@ -1132,6 +1166,11 @@ class WorkflowRunner:
                             save("needs_review")
                             return {**record, "last_result": latest, "next_step": "마지막 확인 지점의 현재 화면이 달라 이어가기를 중지했습니다."}
                 for index in range(record["completed_steps"], len(steps)):
+                    # A sent input may have already opened the declared next
+                    # menu. Recovery consumes only its read-only window wait;
+                    # the stored checkpoint still runs through its own policy.
+                    if index < record["completed_steps"]:
+                        continue
                     stage = "session_check"
                     sync_receipts()
                     if not awaiting_receipts and _session_budget_exhausted(runtime):
@@ -1216,6 +1255,16 @@ class WorkflowRunner:
                         return continuation("session_budget_exhausted")
                     if latest.get("task_verified") is not True and not (deferred_input(item)
                             and latest.get("verification_deferred") is True and latest.get("input_dispatched") is True):
+                        if _sent_postclick_focus_failure(item, latest, target):
+                            # Commit delivery BEFORE discovery. Cancellation,
+                            # crash or a failed probe must not make it retryable.
+                            stage = "post_input_transition"
+                            save("running")
+                            transition = recover_sent_transition(index)
+                            if transition is not None:
+                                latest = {**latest, "transition_observation": transition}
+                                if transition.get("task_verified") is True:
+                                    continue
                         progress_event("needs_review", index, item["operation"])
                         failure = image_failure(latest)
                         refresh_prior = (failure is None and sent is False and recovery_reason in {"image_not_found", "image_ambiguous"}

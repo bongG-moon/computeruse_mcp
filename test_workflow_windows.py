@@ -1,5 +1,6 @@
 """Recorded popup bindings integrate with workflow execution and safe resume."""
 import copy
+import json
 import tempfile
 import threading
 import unittest
@@ -161,6 +162,202 @@ class WorkflowWindowTests(unittest.TestCase):
         return [{"program_id": "editor", "operation": "image_click", "image_target": image_target()}, step(),
             {"program_id": "editor", "window_ref": "popup_1", "operation": "checkpoint",
              "opened_from": "main", "message": "Confirm the opened popup"}]
+
+    def postclick_focus_failure(self):
+        return {"task_verified":False, "input_dispatched":True, "verification_deferred":False,
+            "input_backend":"cua-driver", "diagnostic":{"code":"image_input_unconfirmed",
+                "driver_failure":{"diagnostic_code":"target_denied", "code":"tool_invocation_failed",
+                    "message":"foreground_unavailable: exact target HWND 0xa or a verified same-process "
+                              "post-action window was not foreground after the click (actual foreground HWND 0x14)"}}}
+
+    def test_sent_postclick_failure_immediately_reaches_required_human_review(self):
+        self.task["steps"] = self.opened_popup_steps()
+        self.task["steps"][2].update(review_mode="human", review_origin="explicit")
+        original = copy.deepcopy(self.task)
+        self.runtime.image_action = mock.Mock(return_value=self.postclick_focus_failure())
+        self.runtime.capture_checkpoint = mock.Mock(return_value={"content":[
+            {"type":"image", "mimeType":"image/png", "data":png()}]})
+        probe = self.runtime.create_transition_probe
+        durable = []
+        def inspect(target):
+            files = [p for p in self.runner.root.glob("*.json") if ".snapshot." not in p.name]
+            records = [json.loads(p.read_text(encoding="utf-8")) for p in files]
+            durable.append(next(r for r in records if r.get("format") == "computer-workflow/v1"))
+            return probe(target)
+        self.runtime.create_transition_probe = inspect
+        first = self.run_task(ScriptedOperations())
+        self.assertEqual(first["completed_steps"], 2)
+        self.assertEqual(first["pending_step"], 2)
+        self.assertTrue(first["checkpoint"]["human_review_required"])
+        self.assertFalse(first["task_verified"])
+        self.assertEqual(first["step_receipts"][0]["status"], "awaiting_verification")
+        self.assertEqual(durable[0]["step_delivery"], {"step_index":0, "state":"sent"})
+        self.assertEqual(durable[0]["pending_step"], 0)
+        self.runtime.image_action.assert_called_once()
+        self.assertEqual(self.task, original)
+        # Merely resuming cannot bypass the explicit human checkpoint.
+        pending = self.run_task(ScriptedOperations(), resume_run_id=first["run_id"])
+        self.assertFalse(pending["task_verified"])
+        done = self.run_task(ScriptedOperations(), resume_run_id=first["run_id"],
+            acknowledge_checkpoint=pending["checkpoint"]["id"])
+        self.assertTrue(done["task_verified"])
+        self.runtime.image_action.assert_called_once()
+
+    def test_sent_postclick_failure_automatic_popup_condition_continues_same_call(self):
+        steps = self.opened_popup_steps()
+        steps[2].update(review_mode="popup_image", review_origin="recording_generated", image_target=image_target())
+        steps += [{"operation":"image_click", "program_id":"editor", "window_ref":"popup_1", "image_target":image_target()},
+            {"operation":"checkpoint", "program_id":"editor", "window_ref":"popup_1", "message":"Final result",
+             "review_mode":"human", "review_origin":"explicit"}]
+        self.task["steps"] = steps
+        calls = []
+        def action(spec, target):
+            calls.append((spec["operation"], target["window_id"]))
+            if len(calls) == 1: return self.postclick_focus_failure()
+            if spec["operation"] == "wait_for_image":
+                return {"task_verified":True, "input_dispatched":False}
+            return {"task_verified":False, "input_dispatched":True, "verification_deferred":True}
+        self.runtime.image_action = action
+        self.runtime.capture_checkpoint = mock.Mock(return_value={"content":[
+            {"type":"image", "mimeType":"image/png", "data":png()}]})
+        first = self.run_task(ScriptedOperations())
+        self.assertEqual(calls, [("image_click",10), ("wait_for_image",20), ("image_click",20)])
+        self.assertEqual(first["completed_steps"], 4)
+        self.assertTrue(first["checkpoint"]["human_review_required"])
+        self.assertFalse(first["task_verified"])
+        self.assertEqual(first["step_receipts"][3]["status"], "awaiting_verification")
+        self.runtime.capture_checkpoint.assert_called_once()
+
+    def test_sent_postclick_failure_requires_unique_related_live_popup(self):
+        self.task["steps"] = self.opened_popup_steps()
+        for rows in ([], [row(20),row(21)], [row(20,owner=99)]):
+            with self.subTest(rows=rows):
+                self.windows = rows
+                self.runtime.image_action = mock.Mock(return_value=self.postclick_focus_failure())
+                self.runtime.capture_checkpoint = mock.Mock()
+                first = self.run_task(ScriptedOperations())
+                self.assertEqual(first["completed_steps"], 0)
+                self.assertEqual(first["pending_step"], 0)
+                self.assertFalse(first["task_verified"])
+                self.assertEqual(first["step_delivery"]["state"], "sent")
+                self.assertFalse(first["last_result"]["transition_observation"]["task_verified"])
+                self.runtime.capture_checkpoint.assert_not_called()
+                self.runtime.image_action.assert_called_once()
+
+    def test_sent_postclick_failure_preserves_visual_review_and_required_evidence(self):
+        self.task["steps"] = self.opened_popup_steps()
+        self.task["steps"][2]["review_mode"] = "visual"
+        self.runtime.image_action = mock.Mock(return_value=self.postclick_focus_failure())
+        self.runner.visual_reviews = mock.Mock()
+        self.runner.visual_reviews.open.return_value = {"state":"needs_observation_review", "task_verified":False,
+            "visual_review":{"review_id":"review-"+"a"*32}, "image_content":[
+                {"type":"image", "mimeType":"image/png", "data":png()}]}
+        first = self.run_task(ScriptedOperations(), image_delivery_enabled=True)
+        self.assertEqual(first["completed_steps"], 2)
+        self.assertEqual(first["state"], "needs_observation_review")
+        self.assertFalse(first["task_verified"])
+        self.assertEqual(len(first["observation_content"]), 1)
+        self.runner.visual_reviews.verify.assert_not_called()
+        self.assertEqual(self.runner.visual_reviews.open.call_args.args[-1], {"pid":42,"window_id":20})
+        self.runtime.image_action.assert_called_once()
+
+    def test_sent_postclick_failure_binds_sibling_menu_without_repeating_parent_click(self):
+        self.task["steps"] = [step(),
+            {"program_id":"editor", "window_ref":"popup_1", "operation":"image_click", "image_target":image_target()},
+            step(window_ref="popup_2", title="Export options"),
+            {"program_id":"editor", "window_ref":"popup_2", "operation":"checkpoint",
+             "opened_from":"popup_1", "message":"Check the submenu"}]
+        self.windows = [row(20),row(21,title="Export options")]
+        failure = self.postclick_focus_failure()
+        failure["diagnostic"]["driver_failure"]["message"] = (
+            "foreground_unavailable: exact target HWND 0x14 or a verified same-process "
+            "post-action window was not foreground after the click (actual foreground HWND 0x15)")
+        self.runtime.image_action = mock.Mock(return_value=failure)
+        self.runtime.capture_checkpoint = mock.Mock(return_value={"content":[
+            {"type":"image", "mimeType":"image/png", "data":png()}]})
+        first = self.run_task(ScriptedOperations())
+        self.assertEqual(first["completed_steps"], 3)
+        self.assertFalse(first["task_verified"])
+        self.assertEqual(self.runtime.image_action.call_args.args[-1], {"pid":42,"window_id":20})
+        self.runtime.image_action.assert_called_once()
+        self.runtime.capture_checkpoint.assert_called_once_with({"pid":42,"window_id":21})
+
+    def test_sent_postclick_failure_does_not_bypass_automatic_popup_image_rejection(self):
+        steps = self.opened_popup_steps()
+        steps[2].update(review_mode="popup_image", review_origin="recording_generated", image_target=image_target())
+        steps += [{"operation":"image_click", "program_id":"editor", "window_ref":"popup_1", "image_target":image_target()},
+            {"operation":"checkpoint", "program_id":"editor", "window_ref":"popup_1", "message":"Final result"}]
+        self.task["steps"] = steps
+        for reason in ("image_not_found", "image_ambiguous"):
+            with self.subTest(reason=reason):
+                self.runtime.image_action = mock.Mock(side_effect=[self.postclick_focus_failure(),
+                    {"task_verified":False, "input_dispatched":False, "diagnostic":{"code":reason}}])
+                self.runtime.capture_checkpoint = mock.Mock()
+                first = self.run_task(ScriptedOperations())
+                self.assertEqual(first["completed_steps"], 2)
+                self.assertEqual(first["pending_step"], 2)
+                self.assertFalse(first["task_verified"])
+                self.assertEqual([c.args[0]["operation"] for c in self.runtime.image_action.call_args_list],
+                    ["image_click", "wait_for_image"])
+                self.runtime.capture_checkpoint.assert_not_called()
+
+    def test_other_failures_do_not_use_immediate_transition_recovery(self):
+        self.task["steps"] = self.opened_popup_steps()
+        denied = self.postclick_focus_failure()
+        denied["diagnostic"]["driver_failure"]["message"] = "permission denied"
+        stale = self.postclick_focus_failure()
+        stale["diagnostic"]["driver_failure"]["diagnostic_code"] = "stale_observation"
+        wrong_hwnd = self.postclick_focus_failure()
+        wrong_hwnd["diagnostic"]["driver_failure"]["message"] = wrong_hwnd["diagnostic"]["driver_failure"]["message"].replace("HWND 0xa ", "HWND 0xb ")
+        missing = self.postclick_focus_failure()
+        missing["diagnostic"].pop("driver_failure")
+        for result in (denied, stale, wrong_hwnd, missing,
+                       {**self.postclick_focus_failure(),"input_dispatched":None},
+                       {**self.postclick_focus_failure(),"input_dispatched":False}):
+            with self.subTest(result=result):
+                self.runtime.image_action = mock.Mock(return_value=result)
+                self.runtime.create_transition_probe = mock.Mock(side_effect=AssertionError("No transition probe"))
+                self.runtime.capture_checkpoint = mock.Mock()
+                first = self.run_task(ScriptedOperations())
+                self.assertEqual(first["completed_steps"], 0)
+                self.assertFalse(first["task_verified"])
+                self.runtime.create_transition_probe.assert_not_called()
+                self.runtime.capture_checkpoint.assert_not_called()
+                self.runtime.image_action.assert_called_once()
+
+    def test_sent_postclick_recovery_cancellation_keeps_durable_input_without_review(self):
+        self.task["steps"] = self.opened_popup_steps()
+        self.runtime.image_action = mock.Mock(return_value=self.postclick_focus_failure())
+        self.runtime.capture_checkpoint = mock.Mock()
+        probe = self.runtime.create_transition_probe
+        def cancel(target):
+            self.runtime.active = False
+            return probe(target)
+        self.runtime.create_transition_probe = cancel
+        first = self.run_task(ScriptedOperations())
+        self.assertEqual(first["status"], "interrupted")
+        self.assertEqual(first["completed_steps"], 0)
+        self.assertEqual(first["pending_step"], 0)
+        self.assertEqual(first["step_delivery"], {"step_index":0,"state":"sent"})
+        self.runtime.capture_checkpoint.assert_not_called()
+        self.runtime.image_action.assert_called_once()
+
+    def test_sent_postclick_recovery_rejects_popup_replaced_during_discovery(self):
+        self.task["steps"] = self.opened_popup_steps()
+        self.runtime.image_action = mock.Mock(return_value=self.postclick_focus_failure())
+        self.runtime.capture_checkpoint = mock.Mock()
+        probe = self.runtime.create_transition_probe
+        def replace(target):
+            result = probe(target)
+            self.runtime.guard.window_resolver = lambda hwnd: 42 if hwnd == 10 else 99
+            return result
+        self.runtime.create_transition_probe = replace
+        first = self.run_task(ScriptedOperations())
+        self.assertEqual(first["status"], "needs_binding")
+        self.assertEqual(first["completed_steps"], 0)
+        self.assertEqual(first["step_delivery"], {"step_index":0,"state":"sent"})
+        self.runtime.capture_checkpoint.assert_not_called()
+        self.runtime.image_action.assert_called_once()
 
     def test_automatic_popup_image_is_read_only_and_preserves_final_human_review(self):
         steps = self.opened_popup_steps()

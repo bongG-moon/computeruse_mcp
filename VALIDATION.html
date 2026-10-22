@@ -1,10 +1,9 @@
-<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font:17px/1.7 system-ui;max-width:940px;margin:50px auto;padding:24px;color:#24344b}h1{color:#184d87}li{margin:12px 0}a{color:#165eb0}</style><title>0.18.7 검증 범위</title><h1>0.18.7 검증 범위</h1>
-<p>팝업·확인 정책·녹화·시각 복구·MSAA·결과 파일 관련 <strong>25개 모듈의 710개 테스트</strong>가 통과했습니다. 실패·오류·건너뜀은 0개입니다. 네이티브 도구를 다시 빌드하고 실제 이미지 backend 및 모듈 로드를 검사했습니다.</p><ul>
-<li>실제 이미지 비교기로 반복 빈 셀의 모호성 거부와 고유 행 문맥의 유일한 일치를 확인했습니다.</li>
-<li>렌더링한 시험 화면에서 시계만 변한 경우와 MES·Family 업무 조건이 변한 경우를 구분했습니다. 작은 시계 예외의 범위·겹침·증거 누락도 검사했습니다.</li>
-<li>실제 offscreen HWND 시험에서 동명 메뉴, 중첩 owner, 같은 HWND의 숨김·재표시, 빠른 클릭 보완 기록을 확인했습니다. 사용자 입력 hook을 통한 전체 녹화·재생 시험과는 다릅니다.</li>
-<li>Guard 보조 입력의 권한·범위·전송 불명·이미지 재검증은 모의 OS/Driver 계약 시험으로 확인했습니다. 실제 운영 팝업 메시지 입력의 성공을 뜻하지 않습니다.</li>
-<li>별도 화면 제어 도구로 시험 앱에서 N·Hybrid 선택 → 조회 → 우클릭 → Export to excel → Active sheet를 수행했고 새 XLSX의 5개 데이터 행을 확인했습니다. <strong>이번 제품 MCP 수정본의 신규 녹화→저장→재생으로 생성한 결과는 아닙니다.</strong></li></ul>
-<h2>남은 제한</h2><p>운영 SmartFX 전체 재생, 제공되지 않은 원본 호버 이미지, 간헐적 MSAA 실패의 실제 원인은 아직 직접 검증하지 못했습니다. 진한 선택색·다크 테마·가려진 글자와 확인창의 다른 창에 의한 가림은 추가 실측이 필요합니다.</p>
-<p>직전 확인 증거는 그 조건만 증명합니다. 모든 과거 업무 조건을 자동 추적하는 기능은 없으며, 필요한 조건들을 완료 조건과 근거에 함께 포함해야 합니다. 시험 실행 시간은 운영 업무의 성능 측정 결과가 아닙니다.</p>
-<p>0.18.6의 22단계 녹화·재생 결과는 이전 버전 이력입니다. 이를 0.18.7의 새 전체 재생 성공 증거로 사용하지 않았습니다. 기존 녹화·revision·업무 데이터·승인 기록은 유지합니다.</p><p><a href="CHANGES.html">변경 안내</a> · <a href="INSTALL.md">설치 안내</a></p></html>
+<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font:17px/1.7 system-ui;max-width:940px;margin:50px auto;padding:24px;color:#24344b}h1{color:#184d87}li{margin:12px 0}a{color:#165eb0}</style><title>0.18.8 검증 범위</title><h1>0.18.8 검증 범위</h1>
+<p>이번 수정과 관련된 <strong>회귀 테스트 131개가 통과</strong>했습니다. 배포 관련 테스트는 31개 중 30개가 통과했으며, 실행 환경에서 지원하지 않는 심볼릭 링크 시험 1개를 건너뛰었습니다.</p>
+<h2>기존 작업의 실제 재생</h2><p>이번 수정 소스와 번들 Python을 사용해 제품 MCP 도구로 시험 앱의 <strong>기존 22단계 작업을 두 차례 끝까지 재생</strong>했습니다. 작업 원본과 revision 1은 그대로 유지했으며, 두 번째 실행은 시험 앱을 새 프로세스로 다시 시작한 뒤 진행했습니다.</p><ul>
+<li>N·Hybrid 선택 → 조회 → 우클릭 → Export to excel → Active sheet를 수행했습니다. 두 실행 모두 조회 1회·내보내기 1회였으며, 생성된 각 XLSX에서 N·Hybrid 조건의 데이터 5행을 확인했습니다.</li>
+<li>중첩 하위 메뉴를 여는 요청 안에서 기존 팝업 화면 확인 단계까지 이어졌습니다. 별도의 복구 호출이나 클릭 반복은 없었습니다.</li>
+<li>매 실행에서 기존 9개 화면 확인을 모두 유지하고, 모델이 현재 이미지를 보고 판정한 뒤 진행했습니다. 확인을 생략하거나 일괄 승인하지 않았습니다.</li>
+<li>최종 기록은 두 실행 모두 22/22단계 완료와 <code>task_verified: true</code>였습니다. 실제 XLSX 파일의 내용도 별도로 검사했습니다.</li></ul>
+<h2>검증 범위와 남은 제한</h2><p>이번 결과는 시험 앱에서 기존 저장 작업을 재생한 검증입니다. 운영 SmartFX와 사람이 새로 녹화→저장하는 전체 과정은 이번에 시험하지 않았습니다. Excel 앱은 실행하지 않았으며, 생성된 XLSX 파일의 구조와 데이터 행을 검사했습니다.</p>
+<p>화면 판정은 저장된 완료 조건에 대한 모델 판단입니다. 모든 과거 업무 조건을 자동 추적하거나 모든 화면 픽셀의 동일성을 증명하지는 않습니다. 기존 필수 사람 확인도 자동 승인하지 않습니다. 실제 업무 환경의 테마·가림·응답 시간은 별도 확인이 필요합니다.</p><p><a href="CHANGES.html">변경 안내</a> · <a href="INSTALL.md">설치 안내</a></p></html>
