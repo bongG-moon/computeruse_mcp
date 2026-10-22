@@ -55,9 +55,11 @@ class WorkflowVisualReviews:
         self._prune(context)
         engine = self.engine_factory(runtime, clock=self.clock, observation_ttl=self.ttl)
         try:
-            from transient_popup import current_popup
+            from transient_popup import current_popup, popup_proof
+            owner_binding = engine.bind(target)
             capture_target = (current_popup(target, runtime) or target) if step.get('window_ref', 'main') == 'main' else target
             binding = engine.bind(capture_target)
+            capture_proof = popup_proof(capture_target) if capture_target != target else None
             request = engine.request_review(binding['window_ref'], step['message'])
             observed = engine.observe(binding['window_ref'], goal=step['message'],
                 image_delivery_enabled=True, max_controls=30, max_depth=2, max_elements=100,
@@ -73,6 +75,7 @@ class WorkflowVisualReviews:
                 'image_size': data['image_size'], 'evidence_level': 'visual_assessed'}
             self.jobs[identity] = {'engine': engine, 'runtime': runtime, 'context': context,
                 'target': dict(target), 'capture_target': dict(capture_target), 'public': public, 'request': request,
+                'owner_window_ref': owner_binding['window_ref'], 'capture_proof': capture_proof,
                 'expires': self.clock()+self.ttl, 'window_ref': binding['window_ref']}
             return {'state': 'needs_observation_review', 'task_verified': False, 'input_dispatched': False,
                 'visual_review': copy.deepcopy(public),
@@ -106,9 +109,15 @@ class WorkflowVisualReviews:
                                       or submission[key] != job['public'][key]):
                 raise OperationError('확인 요청의 연결 정보가 다릅니다.', 'visual_review_context_mismatch')
         if job.get('capture_target', target) != target:
-            from transient_popup import popup_owner
-            if popup_owner(job['capture_target']) != target:
-                raise OperationError('확인하던 팝업의 소유 창이 바뀌었습니다.', 'review_observation_changed')
+            from transient_popup import register_popup, popup_diagnostic
+            # Each same-run request creates a fresh native-popup scope. Rebuild
+            # its authority from current native evidence, accepting only the
+            # identity/owner path captured for this exact review challenge.
+            job['engine'].target(job['owner_window_ref'])
+            job['engine'].target(job['window_ref'])
+            if not register_popup(job['capture_target'], target, expected_proof=job['capture_proof']):
+                cause = popup_diagnostic(job['capture_target'])
+                raise OperationError('확인하던 팝업을 다시 증명하지 못했습니다: '+cause['code'], 'review_observation_changed')
         result = job['engine'].review(job['window_ref'], action_id=job['request']['action_id'],
             observation_id=submission['observation_id'], frame_id=submission['frame_id'],
             verdict=submission['verdict'], evidence=submission['evidence'], evidence_regions=submission.get('evidence_regions'))

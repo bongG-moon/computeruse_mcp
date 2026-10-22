@@ -307,7 +307,7 @@ def _appearance_frame(frame):
     count, labels, stats, _ = cv2.connectedComponentsWithStats(blue.astype(np.uint8),8)
     for component in range(1,count):
         x,y,w,h,area = (int(v) for v in stats[component])
-        if w < 40 or h < 10: continue
+        if w < 40 or h < 10 or x > 2 or x+w < frame.shape[1]-2: continue
         region = labels[y:y+h,x:x+w] == component
         interior = region[2:-2,2:-2]
         if interior.any(): continue
@@ -329,10 +329,19 @@ def _appearance_png(encoded):
 
 
 def _ink_agrees(pattern, current, anchor_y):
-    _, np, _ = _load()
+    cv2, np, _ = _load()
     a, _ = _appearance_frame(pattern); b, _ = _appearance_frame(current)
     ia = (255-a.astype(np.float32).mean(axis=2))
     ib = (255-b.astype(np.float32).mean(axis=2))
+    # A small changed glyph (e.g. an added decimal point) can disappear in
+    # the aggregate Dice score. Preserve strong ink topology while allowing
+    # one-pixel antialias fringes around the same strokes.
+    core_a, core_b = ia >= 127, ib >= 127
+    kernel = np.ones((3,3), dtype=np.uint8)
+    near_a = cv2.dilate(core_a.astype(np.uint8), kernel) != 0
+    near_b = cv2.dilate(core_b.astype(np.uint8), kernel) != 0
+    if int(((core_a & ~near_b) | (core_b & ~near_a)).sum()) >= 2:
+        return False
     center = min(a.shape[0]-1, max(0, int(anchor_y*a.shape[0])))
     for left, right, minimum in ((ia, ib, .98),
             (ia[max(0,center-8):center+9], ib[max(0,center-8):center+9], .95)):

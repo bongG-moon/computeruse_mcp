@@ -1935,7 +1935,7 @@ internal static class VisualTools
         Dictionary<string, object> startDiagnostic; bool startActivationReturned, startActivationRequested, startToolbarMinimized;
         readonly string popupPrefix = "popup_" + Guid.NewGuid().ToString("N").Substring(0, 8) + "_";
         readonly Label info = new Label(); readonly ListBox list = new ListBox(); readonly Button start = Button("기록 시작"), pause = Button("일시정지"), stop = Button("기록 마치고 검토");
-        Hook mouseProc, keyProc; WindowEvent windowProc; IntPtr mouseHook, keyHook, windowHook; bool recording, textBusy, outside, popupWakePending, ticking; int generation, injected, sampleVersion, activeWorkers;
+        Hook mouseProc, keyProc; WindowEvent windowProc; IntPtr mouseHook, keyHook, windowHook; bool recording, textBusy, outside, ticking; int generation, injected, sampleVersion, activeWorkers;
         readonly Dictionary<Target, DateTime> sampleRetryAt = new Dictionary<Target, DateTime>();
         readonly Dictionary<Target, int> sampleWorkers = new Dictionary<Target, int>(); Target samplingTarget;
         bool compact, recorderSizing; double normalClientWidth = 650; TableLayoutPanel recorderLayout; FlowLayoutPanel recorderButtons;
@@ -2355,19 +2355,24 @@ internal static class VisualTools
         }
         void InstallHooks() { if (mouseHook != IntPtr.Zero) return; mouseProc = MouseHook; keyProc = KeyHook; IntPtr module = GetModuleHandle(null); mouseHook = SetWindowsHookEx(14, mouseProc, module, 0); keyHook = SetWindowsHookEx(13, keyProc, module, 0); if (mouseHook == IntPtr.Zero || keyHook == IntPtr.Zero) { UninstallHooks(); throw new InvalidOperationException("recording_hook_unavailable"); }
             windowProc = delegate(IntPtr hook, uint eventType, IntPtr hwnd, int objectId, int childId, uint thread, uint time) {
-                if (!recording || Done || IsDisposed || popupWakePending || objectId != 0 || hwnd == IntPtr.Zero) return;
+                if (!recording || Done || IsDisposed || objectId != 0 || hwnd == IntPtr.Zero) return;
                 uint pid; if (GetWindowThreadProcessId(hwnd, out pid) == 0) return;
                 bool allowed = false; foreach (Target root in targets) if (root.Owner == null && root.Pid == (int)pid) { allowed = true; break; } if (!allowed) return;
-                popupWakePending = true;
-                try { BeginInvoke((Action)delegate { popupWakePending = false; if (recording && !Done) { IntPtr shown = GetAncestor(hwnd, 2); DiscoverPopup(shown);
+                // HIDE is an observed episode boundary even if the HWND has
+                // already been shown again by the next timer tick. Child-control
+                // hides must never retire their containing menu or main window.
+                if (eventType == 0x8003) { RetirePopupEpisode(hwnd); return; }
+                if (eventType != 0x8002) return;
+                // Do not coalesce different SHOW HWNDs: sibling and nested menus
+                // can share both title and class and appear in the same tick.
+                try { BeginInvoke((Action)delegate { if (recording && !Done) {
+                    IntPtr shown = GetAncestor(hwnd, 2); DiscoverPopup(shown);
                     Tick(null, EventArgs.Empty);
-                } }); }
-                catch (InvalidOperationException) { popupWakePending = false; }
+                } }); } catch (InvalidOperationException) { }
             };
-            // SHOW notifications wake capture before the usual 80ms timer.
-            // They never inject input and are restricted again by exact owner
-            // or ComboLBox relationship at binding, not process ID alone.
-            windowHook = SetWinEventHook(0x8002, 0x8002, IntPtr.Zero, windowProc, 0, 0, 2);
+            // Exact SHOW/HIDE notifications preserve visibility episodes.
+            // They never inject input; discovery rechecks owner/parent scope.
+            windowHook = SetWinEventHook(0x8002, 0x8003, IntPtr.Zero, windowProc, 0, 0, 2);
         }
         void UninstallHooks() { recording = false; if (mouseHook != IntPtr.Zero) UnhookWindowsHookEx(mouseHook); if (keyHook != IntPtr.Zero) UnhookWindowsHookEx(keyHook); if (windowHook != IntPtr.Zero) UnhookWinEvent(windowHook); mouseHook = keyHook = windowHook = IntPtr.Zero; }
         Target Current() {
@@ -2378,6 +2383,9 @@ internal static class VisualTools
             POINT cursor; if (GetCursorPos(out cursor)) foreach (Target t in targets) if (t.Contains(cursor) && t.Foreground()) return t;
             IntPtr foreground = GetForegroundWindow();
             foreach (Target t in targets) if ((t.Hwnd == foreground || t.HostedHwnd != IntPtr.Zero && t.AcceptsForeground(foreground)) && t.Foreground()) return t; return null;
+        }
+        void RetirePopupEpisode(IntPtr hidden) {
+            foreach (Target target in targets) if (target.Owner != null && target.Hwnd == hidden) target.Retired = true;
         }
         void RetireHiddenPopups() { foreach (Target t in targets) if (t.Owner != null && !IsWindowVisible(t.Hwnd)) t.Retired = true; }
         void DiscoverPopup() { DiscoverPopup(IntPtr.Zero); }
@@ -2491,7 +2499,9 @@ internal static class VisualTools
         // Hook callbacks copy only a small cached crop. PNG encoding, UIA,
         // matching and file writes run outside the low-level input callback.
         bool UnboundPopupClick(POINT point, string operation) {
-            IntPtr hit = GetAncestor(WindowFromPoint(point), 2);
+            return UnboundPopupClickFor(GetAncestor(WindowFromPoint(point), 2), point, operation);
+        }
+        bool UnboundPopupClickFor(IntPtr hit, POINT point, string operation) {
             if (hit == IntPtr.Zero || !IsWindowVisible(hit)) return false;
             Target owner = null;
             foreach (Target known in targets) {

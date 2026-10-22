@@ -1,6 +1,7 @@
 """Saved image recovery uses real guarded capture/input contracts, no desktop."""
 import copy
 import hashlib
+import random
 import unittest
 from unittest import mock
 
@@ -15,6 +16,13 @@ class WorkflowVisualTargetTests(unittest.TestCase):
     def setUp(self):
         fixtures.FacadeTests.setUp(self)
         self.runtime.id = 'recovery-session'
+        self.runtime.run_dir = self.tmp.name
+        # The old arithmetic PNG repeated diagonally. Recovery must prove
+        # uniqueness even with a scope, so ordinary contract tests need a
+        # genuinely unique frame rather than bypassing that check.
+        pixels = random.Random(710)
+        self.source_png = encode_png(100, 100, 2, [pixels.randbytes(300) for _ in range(100)])
+        self.transport.after = lambda request, result: result['content'][0].update(data=self.source_png) if request['name'] == 'get_window_state' else None
         self.now = 100.0
         self.manager = WorkflowVisualTargets(clock=lambda: self.now)
         self.addCleanup(self.manager.close)
@@ -61,7 +69,7 @@ class WorkflowVisualTargetTests(unittest.TestCase):
             identity, image_delivery_enabled=vision)
 
     def changed_frame(self, x=95, y=95):
-        width, height, color, channels, rows = decode_png(png(100, 100))
+        width, height, color, channels, rows = decode_png(self.source_png)
         row = bytearray(rows[y]); row[x*channels] ^= 255; rows[y] = bytes(row)
         changed = encode_png(width, height, color, rows)
         self.transport.after = lambda request, result: result['content'][0].update(data=changed) if request['name'] == 'get_window_state' else None
@@ -146,8 +154,11 @@ class WorkflowVisualTargetTests(unittest.TestCase):
         job['condition_proof'] = {'expires':self.now+120, 'geometry':frame['geometry'],
             'regions':conditions, 'digests':[pixel_digest(png) for png in crop_regions(frame['png'],conditions,runtime=self.runtime)]}
         self.changed_frame()  # isolated outside clock fixture pixel
+        submitted = self.submission(opened)
+        submitted['volatile_regions'] = [{'kind':'clock', 'region':{'x':90,'y':90,'width':10,'height':10},
+            'evidence':'Only the small clock, not a business result or status message.'}]
         with mock.patch('visual_targets.match_image', return_value={'status':'matched','rect':self.scope}):
-            result = self.verify(self.submission(opened))
+            result = self.verify(submitted)
         self.assertEqual(result['state'],'target_review_ready')
         self.assertEqual(self.mutations(), [])
 
@@ -161,6 +172,15 @@ class WorkflowVisualTargetTests(unittest.TestCase):
         self.changed_frame(75,15)
         with self.assertRaises(OperationError) as caught: self.verify(self.submission(opened))
         self.assertEqual(caught.exception.code,'target_recovery_context_changed')
+        self.assertEqual(self.mutations(), [])
+
+    def test_scope_must_be_unique_even_when_entire_frame_is_unchanged(self):
+        submitted = self.submission(self.open())
+        with mock.patch('visual_targets.match_image', return_value={'status':'ambiguous'}) as matcher:
+            with self.assertRaises(OperationError) as caught:
+                self.verify(submitted)
+        matcher.assert_called_once()
+        self.assertEqual(caught.exception.code, 'target_recovery_ambiguous')
         self.assertEqual(self.mutations(), [])
 
     def test_no_scope_requires_global_unique_match_at_the_observed_location(self):

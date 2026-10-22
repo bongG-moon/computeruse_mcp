@@ -13,7 +13,7 @@ import threading
 import time
 import uuid
 
-from image_pixels import crop_regions, target_from_region, validate_region, pixel_digest
+from image_pixels import crop_regions, target_from_region, validate_region, pixel_digest, decode_png
 from image_steps import IMAGE_MUTATIONS, execute_image_step, validate_image_step
 from image_targets import match_image, png_dimensions, validate_image_target
 from interaction import InteractionEngine, _same_pixels
@@ -32,6 +32,30 @@ _REFERENCE_KEYS = ('recovery_id', 'run_id', 'step_index', 'step_id', 'iteration_
 def _hash(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
         separators=(',', ':')).encode('utf-8')).hexdigest()
+
+
+def _overlap(a, b):
+    return (a['x'] < b['x']+b['width'] and b['x'] < a['x']+a['width']
+            and a['y'] < b['y']+b['height'] and b['y'] < a['y']+a['height'])
+
+
+def _same_except_clock(left, right, regions):
+    """An explicit clock exception never discards the rest of the scene."""
+    a, b = decode_png(left), decode_png(right)
+    if a[:4] != b[:4]:
+        return False
+    channels = a[3]
+    for y, (before, after) in enumerate(zip(a[4], b[4])):
+        if before == after:
+            continue
+        before, after = bytearray(before), bytearray(after)
+        for region in regions:
+            if region['y'] <= y < region['y']+region['height']:
+                start, stop = region['x']*channels, (region['x']+region['width'])*channels
+                before[start:stop] = after[start:stop]
+        if before != after:
+            return False
+    return True
 
 
 def _image_step(step):
@@ -133,6 +157,12 @@ class WorkflowVisualTargets:
             public['review_candidates'] = copy.deepcopy(comparison.get('review_candidates', [])) if same_frame else []
             public['candidate_policy'] = 'review_only_not_click_coordinates'
             public['candidate_frame_matches_current'] = same_frame
+            public['context_policy'] = 'whole_frame_except_explicit_clock_regions'
+            public['volatile_region_policy'] = {
+                'kind': 'clock', 'max_regions': 2, 'max_total_frame_fraction': .02,
+                'requires_previous_condition_evidence': True,
+                'forbidden': ['target', 'scope', 'condition_evidence', 'business_status', 'error_messages'],
+                'does_not_prove': 'all_historical_business_conditions'}
             with self.lock:
                 self._prune(context)
                 self.jobs[identity] = {'engine': engine, 'runtime': runtime, 'context': context,
@@ -198,19 +228,22 @@ class WorkflowVisualTargets:
                     or [pixel_digest(png) for png in crop_regions(current_png, proof['regions'], runtime=runtime)] != proof['digests']):
                 raise OperationError('이전 단계에서 확인한 업무 조건 영역이 바뀌거나 만료됐습니다.',
                                      'target_recovery_context_changed')
-        # Scope alone does not authorize ignoring prior business conditions.
-        # Require the immediately preceding checkpoint's retained evidence.
+        # A prior checkpoint describes its own condition, not every business
+        # field. Keep ALL other pixels protected, except explicitly identified
+        # clocks. Never mask the original frame used for unique target matching.
         if not _same_pixels(frame['png'], current_png):
-            if proof is None or scope is None:
-                raise OperationError('대상 밖 화면이 바뀌었고 이전 업무 조건의 영역 증명이 없습니다. 해당 조건을 포함한 화면 확인이 필요합니다.',
+            if (proof is None or scope is None or not job.get('volatile_regions')
+                    or not _same_except_clock(frame['png'], current_png, job['volatile_regions'])):
+                raise OperationError('대상·구별 영역 밖 화면이 바뀌었습니다. 명시한 시계 영역 외의 업무 조건·상태 변화는 다시 확인해야 합니다.',
                                      'target_recovery_context_changed')
-        if scope is None or proof is not None:
-            match_target = job['scope_target'] if scope is not None else job['image_target']
-            expected = scope if scope is not None else region
-            matched = match_image(runtime, match_target, current_png)
-            if matched.get('status') != 'matched' or matched.get('rect') != expected:
-                raise OperationError('현재 화면에서 같은 대상을 유일하게 구분하지 못했습니다. 주변 문구를 포함해 다시 확인하세요.',
-                                     'target_recovery_ambiguous')
+        # A model-selected scope is context, not proof of uniqueness. Even an
+        # unchanged full frame can contain several identical empty grid rows.
+        match_target = job['scope_target'] if scope is not None else job['image_target']
+        expected = scope if scope is not None else region
+        matched = match_image(runtime, match_target, current_png)
+        if matched.get('status') != 'matched' or matched.get('rect') != expected:
+            raise OperationError('현재 화면에서 같은 대상을 유일하게 구분하지 못했습니다. 고유한 행 값과 열 이름을 포함해 다시 확인하세요.',
+                                 'target_recovery_ambiguous')
         self._window(job)
         if runtime.guard.image_geometry_resolver(target['window_id']) != frame['geometry']:
             raise OperationError('대상 확인 중 창 위치가 바뀌었습니다.', 'target_recovery_observation_changed')
@@ -222,7 +255,7 @@ class WorkflowVisualTargets:
         _vision(image_delivery_enabled)
         runtime.check_active()
         required = {*_REFERENCE_KEYS, 'target_region', 'evidence'}
-        optional = {'scope_region', 'session_id', 'window_ref', 'step_hash', 'recipe_hash',
+        optional = {'scope_region', 'volatile_regions', 'session_id', 'window_ref', 'step_hash', 'recipe_hash',
                     'inputs_hash', 'snapshot_hash', 'target_hash', 'saved_target_hash'}
         if not isinstance(submission, dict) or not required <= set(submission) or set(submission)-required-optional:
             raise OperationError('실행·단계·화면 식별자와 target_region, evidence를 함께 지정하세요.', 'invalid_target_recovery')
@@ -230,7 +263,7 @@ class WorkflowVisualTargets:
             job = self._job(runtime, record, step, target, submission['recovery_id'])
             if job['verified']:
                 raise OperationError('이미 확인한 대상입니다. 같은 확인을 다시 사용하지 마세요.', 'target_recovery_expired')
-            for key in (*_REFERENCE_KEYS, *(optional-{'scope_region'})):
+            for key in (*_REFERENCE_KEYS, *(optional-{'scope_region', 'volatile_regions'})):
                 if key in submission and (type(submission[key]) is not type(job['public'][key]) or submission[key] != job['public'][key]):
                     raise OperationError('다른 실행·단계·화면의 대상 확인입니다.', 'target_recovery_context_mismatch')
             evidence = submission['evidence']
@@ -245,12 +278,30 @@ class WorkflowVisualTargets:
                         or scope['x']+scope['width'] < region['x']+region['width']
                         or scope['y']+scope['height'] < region['y']+region['height']):
                     raise OperationError('scope_region에는 대상과 구별할 주변 문구가 함께 포함되어야 합니다.', 'invalid_target_recovery')
-            job.update(region=region, scope=scope, image_target=target_from_region(frame['png'], region, runtime=runtime))
-            if scope is not None and job.get('condition_proof'):
-                if max(scope['width'], scope['height']) <= 512:
-                    job['scope_target'] = target_from_region(frame['png'], scope, runtime=runtime)
-                else:
-                    job.pop('condition_proof', None)  # retain strict full-frame check
+            volatile = submission.get('volatile_regions', [])
+            proof = job.get('condition_proof')
+            if (not isinstance(volatile, list) or len(volatile) > 2
+                    or volatile and (proof is None or scope is None)):
+                raise OperationError('시계 제외는 이전 조건 증거와 고유한 구별 영역이 있을 때 최대 2개로 지정하세요.', 'invalid_target_recovery')
+            clocks = []
+            protected = [region, *([scope] if scope else []), *(proof or {}).get('regions', [])]
+            for entry in volatile:
+                if (not isinstance(entry, dict) or set(entry) != {'kind', 'region', 'evidence'}
+                        or entry['kind'] != 'clock' or not isinstance(entry['evidence'], str)
+                        or not entry['evidence'].strip() or len(entry['evidence']) > 1000):
+                    raise OperationError('업무 상태가 아닌 시계만 kind=clock, region, evidence로 명시하세요.', 'invalid_target_recovery')
+                clock_region = validate_region(entry['region'], **frame['image_size'], maximum=256)
+                if any(_overlap(clock_region, item) for item in protected):
+                    raise OperationError('시계 제외 영역은 대상·주변 문구·이전 조건과 겹칠 수 없습니다.', 'invalid_target_recovery')
+                clocks.append(clock_region)
+            if sum(item['width']*item['height'] for item in clocks) > frame['image_size']['width']*frame['image_size']['height']*.02:
+                raise OperationError('시계 제외 영역 합계는 전체 화면의 2% 이하여야 합니다.', 'invalid_target_recovery')
+            job.update(region=region, scope=scope, volatile_regions=copy.deepcopy(clocks),
+                volatile_evidence=copy.deepcopy(volatile), image_target=target_from_region(frame['png'], region, runtime=runtime))
+            if scope is not None:
+                if max(scope['width'], scope['height']) > 512:
+                    raise OperationError('구별 영역은 가로·세로 512픽셀 안에서 고유한 행 값과 열 이름을 포함해 지정하세요.', 'target_recovery_scope_too_large')
+                job['scope_target'] = target_from_region(frame['png'], scope, runtime=runtime)
             fresh = runtime.capture_checkpoint(target)
             self._window(job)
             images = [item for item in fresh.get('content', []) if item.get('type') == 'image']
@@ -264,6 +315,7 @@ class WorkflowVisualTargets:
             return {'state': 'target_review_ready', 'recovery_id': submission['recovery_id'],
                 'input_dispatched': False, 'task_verified': False, 'task_modified': False,
                 'target_region': dict(region), 'scope_region': copy.deepcopy(scope),
+                'volatile_regions': copy.deepcopy(volatile),
                 'evidence_level': 'visual_assessed_target'}
 
     def execute(self, runtime, record, step, target, recovery_id, *, image_delivery_enabled=False,

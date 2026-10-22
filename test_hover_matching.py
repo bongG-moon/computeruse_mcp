@@ -51,6 +51,14 @@ class HoverTests(unittest.TestCase):
         self.cv.putText(hovered,'X',(110,23),self.cv.FONT_HERSHEY_SIMPLEX,.6,(215,155,95),1)
         self.assertNotEqual(self.match(hovered)['status'],'matched')
 
+    def test_blue_interior_rectangle_is_content_not_a_menu_border(self):
+        hovered = self.image(background=(240,220,200))
+        self.cv.rectangle(hovered,(110,8),(153,25),(215,155,95),1)
+        self.assertNotEqual(self.match(hovered)['status'],'matched')
+
+    def test_small_added_glyph_is_not_hidden_by_average_ink_score(self):
+        self.assertNotEqual(self.match(self.image('Export.',(240,220,200)))['status'],'matched')
+
     def test_dark_selection_is_not_silently_normalized(self):
         self.assertNotEqual(self.match(self.image(background=(150,70,20),ink=255))['status'],'matched')
 

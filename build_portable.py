@@ -80,7 +80,7 @@ SOURCE_SUPPORT_FILES = (
     "tools/test_flaui_comparison.py", "tools/FLAUI_COMPARISON.md",
     "test_task_capacity.py", "test_workflow_capacity.py",
     "acceptance_phase1_recording.py", "fixtures/Phase1RecordingFixture.cs", "fixtures/PHASE1_ACCEPTANCE.md",
-    "test_hosted_windows.py", "test_hosted_guard.py", "test_visual_targets.py", "test_workflow_target_review.py",
+    "test_hosted_windows.py", "test_hosted_guard.py", "test_visual_targets.py", "test_visual_recovery_scene.py", "test_workflow_target_review.py",
     "test_interaction.py", "test_workflow_visual_review.py", "test_task_revision.py", "test_easy_api.py", "test_visual_review.py", "test_builtin_programs.py", "test_bundle_packaging.py", "acceptance_apps016.py",
     "CheckpointReview.cs", "test_client_compatibility.py", "test_recorded_clicks.py", "test_recording_reliability.py", "test_native_recording_capture.py", "test_replay_readiness.py", "test_selector_reuse.py", "acceptance_record_replay015.py",
     "test_capture_geometry.py", "capture_picker_fixture.py",

@@ -36,10 +36,16 @@ class WorkflowVisualTests(unittest.TestCase):
     def test_visual_checkpoint_requires_image_enabled_and_never_human_ack(self):
         first = self.run_task()
         self.assertEqual(first["diagnostic"]["code"], "vision_client_required")
-        self.assertEqual(self.runtime.image_action.call_count, 1)
+        self.assertEqual(self.runtime.image_action.call_count, 0)
+        self.assertEqual(first["completed_steps"], 0)
+        self.assertIsNone(first["pending_step"])
+        self.assertNotIn("checkpoint", first)
         self.reviews.open.assert_not_called()
         with self.assertRaises(WorkflowError):
-            self.run_task(resume_run_id=first["run_id"], acknowledge_checkpoint=first["checkpoint"]["id"])
+            self.run_task(resume_run_id=first["run_id"], acknowledge_checkpoint="a"*32)
+        connected = self.run_task(resume_run_id=first["run_id"], image_delivery_enabled=True)
+        self.assertEqual(connected["state"], "needs_observation_review")
+        self.assertEqual(self.runtime.image_action.call_count, 1)
 
     def test_passed_visual_review_completes_without_replaying_image_input(self):
         first = self.run_task(image_delivery_enabled=True)

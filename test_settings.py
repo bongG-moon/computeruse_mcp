@@ -82,7 +82,9 @@ class SettingsTests(unittest.TestCase):
                 value = default_config(Path(tmp) / "config.json")
             self.assertEqual((value["mode"], value["approval"], value["log_detail"]), ("uia", "client", "metadata"))
             self.assertIn("파일 → 저장", value["programs"][0]["hints"])
-        self.assertEqual(VERSION, "0.18.1")
+        # Exact release identity is checked against ZIP/source manifests by
+        # publication tests; default settings must not pin a historical release.
+        self.assertRegex(VERSION, r"^\d+\.\d+\.\d+$")
 
     def test_loading_saved_approval_choices_does_not_migrate_or_rewrite_them(self):
         with tempfile.TemporaryDirectory() as tmp:

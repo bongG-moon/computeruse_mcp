@@ -171,5 +171,10 @@ Driver와 앱 경로를 추측해 실행하지 않습니다. 연결 후 계산�
 - 편집창은 한 번 열고 computer_status(editor_id)로 확인합니다. 선택창이 뜨지 않으면 시작 오류를 확인합니다. F8 반복이나 별도 teach 도구로 분산하지 않습니다. 초안 시험의 모델 확인은 computer_process_editor(action="resume_test", editor_id, observation_review)로 같은 초안을 이어갑니다.
 - 녹화 가져오기 오류는 recording_receipt와 recording_import 진단을 확인합니다. 현재 편집창에 원본이 보관되어 있으면 ‘최근 녹화 다시 분석’으로 처리하고 같은 동작을 다시 녹화하라고 먼저 요구하지 않습니다. 원본 없음·녹화 전 준비 실패·부분 기록·재생 실패는 구분해서 안내합니다. 다시 분석은 앱 입력 없는 초안 변환이며 재생 완료를 뜻하지 않습니다.
 - 저장 작업의 visual_review는 정확한 run/step/iteration/condition/observation/frame ID와 근거를 observation_review로 제출해 같은 실행을 이어갑니다. 만료되면 같은 확인 단계만 새로 관찰합니다. 사람 확인 단계는 실제 로컬 확인 기록이 필요합니다.
+- 자동 팝업 확인은 관련 창과 다음 입력 대상의 존재만 증명합니다. 선택 값·조회 결과·파일 생성은 별도의 완료 조건으로 확인해야 합니다. 사용자가 직접 추가하거나 내용을 수정한 사람 확인은 자동 팝업 확인으로 대체하지 않습니다.
+- Driver의 `target_unavailable`은 실제 창 부재를 뜻하지 않을 수 있습니다. 팝업 관계 증명과 진단을 확인하고, 이미 보낸 클릭을 반복하거나 먼저 재녹화를 요구하지 않습니다. 제한된 `owned-popup-*` 보조 경로는 Driver 입력과 별도로 기록됩니다.
+- `target_review`의 `scope_region`은 고유한 행 이름 등 구별 문맥을 포함해야 합니다. 현재 원본 화면 전체에서 같은 영역이 여러 개면 거부합니다. 빈 셀·행 번호·첫 후보만으로 선택하지 않습니다.
+- 대상 복구 중 시계 변화가 있으면 모델은 현재 관찰의 `volatile_regions`에 `kind="clock"`, `region`, `evidence`를 명시할 수 있습니다. 직전 조건 증거와 고유한 scope가 있어야 하며 최대 2개·화면 합계 2% 이내입니다. 대상·scope·조건 영역과 겹칠 수 없고 업무 결과·오류 상태표시줄은 제외할 수 없습니다. 이 예외는 해당 관찰에서 한 번만 사용하며 저장 작업을 변경하지 않습니다. 나머지 픽셀 변화는 계속 거부합니다.
+- 직전 화면 확인의 `evidence_regions`는 그 확인 조건의 증거입니다. 모든 과거 업무 조건의 자동 추적을 뜻하지 않습니다. 예를 들어 MES=N과 Family=Hybrid가 함께 필요하면 실행 전 완료 조건과 근거에 두 필드를 모두 포함해야 합니다.
 - 부분 수정 전 computer_tasks(action="get")의 최신 revision과 step_id를 읽습니다. set_step, set_input, set_default, set_text, insert_step, delete_step, move_step 또는 restore_revision을 사용합니다. 이미지 픽셀을 채팅에 왕복시켜 전체 작업을 덮어쓰지 않습니다. 이미지 대상 교체는 편집창에서만 합니다.
 - 진행 도구로 상태를 확인하고 같은 결과를 장시간 반복 대기하지 않습니다. input_dispatched는 완료 증거가 아닙니다. task_verified, evidence_level과 실패 단계·진단을 구분해 결과를 간결하게 보고합니다.

@@ -185,6 +185,22 @@ class WorkflowWindowTests(unittest.TestCase):
         invalid=copy.deepcopy(steps); invalid[2]['review_origin']='explicit'
         with self.assertRaises(ValueError): validate_recipe(invalid,{},['editor'])
 
+    def test_popup_visibility_cannot_replace_final_business_result_condition(self):
+        steps=self.opened_popup_steps()
+        steps[2].update(review_mode="popup_image", review_origin="recording_generated", image_target=image_target())
+        steps.append({"operation":"wait_for_image", "program_id":"editor", "window_ref":"popup_1",
+            "image_target":image_target(), "timeout_ms":0})
+        with self.assertRaises(WorkflowError): validate_recipe(steps, {}, ["editor"])
+        # Even an image input must keep its own result condition/checkpoint;
+        # the earlier popup visibility condition cannot approve this input.
+        steps[-1] = {"operation":"image_click", "program_id":"editor", "window_ref":"popup_1",
+            "image_target":image_target()}
+        with self.assertRaises(WorkflowError): validate_recipe(steps, {}, ["editor"])
+        steps.append({"operation":"checkpoint", "program_id":"editor", "window_ref":"popup_1",
+            "review_mode":"human", "review_origin":"explicit", "message":"Confirm the business result"})
+        validated, _ = validate_recipe(steps, {}, ["editor"])
+        self.assertEqual(validated[-1], steps[-1])
+
     def test_automatic_popup_missing_image_does_not_click_next_item(self):
         steps=self.opened_popup_steps()
         steps[2].update(review_mode='popup_image',review_origin='recording_generated',image_target=image_target())

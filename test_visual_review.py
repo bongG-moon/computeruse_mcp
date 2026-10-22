@@ -7,6 +7,7 @@ from unittest import mock
 import test_interaction as fixtures
 from operations import OperationError
 from visual_review import WorkflowVisualReviews
+import transient_popup as popup
 
 
 class WorkflowVisualReviewTests(unittest.TestCase):
@@ -100,6 +101,52 @@ class WorkflowVisualReviewTests(unittest.TestCase):
         with mock.patch('interaction.prepare_image_foreground') as activate:
             self.open()
         activate.assert_not_called()
+
+    def test_popup_review_restores_exact_proof_on_same_run_request(self):
+        owner=fixtures.TARGET; child={**owner,'window_id':owner['window_id']+1}
+        proof={'process':(123,'allowed.exe'),'path':[child['window_id'],owner['window_id']],
+               'window':{'thread_id':7},'bounds':(0,0,100,100),'foreground':owner['window_id']}
+        engine=mock.Mock()
+        engine.bind.side_effect=lambda t:{'window_ref':'main' if t==owner else 'popup'}
+        engine.request_review.return_value={'action_id':'action-test'}
+        engine.observe.return_value={'structuredContent':{'frame_id':'frame-test','observation_id':'obs-test',
+            'image_size':{'width':100,'height':100}},'content':[{'type':'image','mimeType':'image/png','data':'fixture'}]}
+        engine.review.return_value={'task_verified':True}
+        manager=WorkflowVisualReviews(clock=lambda:self.now,engine_factory=lambda *a,**k:engine)
+        self.addCleanup(manager.close)
+        with popup.recorded_window_scope({'steps':[]}), mock.patch.object(popup,'_snapshot',return_value=proof), \
+                mock.patch.object(popup,'current_popup',return_value=child):
+            self.assertTrue(popup.register_popup(child,owner))
+            opened=manager.open(self.runtime,self.record,self.step,owner)
+        with popup.recorded_window_scope({'steps':[]}), mock.patch.object(popup,'_snapshot',return_value=proof):
+            self.assertFalse(popup.proven_popup(child))
+            result=manager.verify(self.runtime,self.record,self.step,owner,self.submission(opened))
+            self.assertTrue(popup.proven_popup(child))
+        self.assertTrue(result['task_verified'])
+        engine.target.assert_any_call('main')
+        engine.target.assert_any_call('popup')
+        engine.review.assert_called_once()
+
+    def test_popup_review_rejects_replacement_before_accepting_assessment(self):
+        owner=fixtures.TARGET; child={**owner,'window_id':owner['window_id']+1}
+        engine=mock.Mock()
+        engine.bind.side_effect=lambda t:{'window_ref':'main' if t==owner else 'popup'}
+        engine.request_review.return_value={'action_id':'action-test'}
+        engine.observe.return_value={'structuredContent':{'frame_id':'frame-test','observation_id':'obs-test',
+            'image_size':{'width':100,'height':100}},'content':[{'type':'image','mimeType':'image/png','data':'fixture'}]}
+        manager=WorkflowVisualReviews(clock=lambda:self.now,engine_factory=lambda *a,**k:engine)
+        self.addCleanup(manager.close)
+        proof={'process':(123,'allowed.exe'),'path':[2,1],'window':{'thread_id':7},'bounds':(0,0,100,100)}
+        with popup.recorded_window_scope({'steps':[]}), mock.patch.object(popup,'_snapshot',return_value=proof), \
+                mock.patch.object(popup,'current_popup',return_value=child):
+            popup.register_popup(child,owner)
+            opened=manager.open(self.runtime,self.record,self.step,owner)
+        with popup.recorded_window_scope({'steps':[]}), mock.patch.object(popup,'_snapshot',return_value={**proof,'path':[2,3,1]}):
+            with self.assertRaises(OperationError) as caught:
+                manager.verify(self.runtime,self.record,self.step,owner,self.submission(opened))
+            self.assertEqual(caught.exception.code,'review_observation_changed')
+        engine.review.assert_not_called()
+        self.assertIn(opened['visual_review']['review_id'],manager.jobs)
 
     def test_full_template_round_trip_and_changed_metadata(self):
         opened = self.open()

@@ -76,6 +76,9 @@ class WorkflowTargetReviewTests(unittest.TestCase):
                     self.assertEqual(result["step_delivery"]["state"], "not_sent")
 
     def test_text_only_preserves_pause_without_disclosing_images(self):
+        # Exercise text-only target recovery for a supported HUMAN recipe.
+        # A visual recipe is now correctly refused before the first input.
+        self.task["steps"][1]["review_mode"] = "human"
         result = self.run_task(image_delivery_enabled=False)
         self.assertEqual(result["state"], "needs_input")
         self.assertFalse(result["target_review_available"])

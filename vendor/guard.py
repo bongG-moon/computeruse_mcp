@@ -917,7 +917,8 @@ def metadata_event(kind, fields):
                 if isinstance(value, str) and value.lower() in {
                     "confirmed", "unconfirmed", "unverifiable", "unknown", "no_effect", "applied", "not_applied",
                     "success", "failed", "error", "refused", "partial", "suspected_noop", "delivered", "background", "foreground",
-                    "uia", "win32", "postmessage", "sendinput", "keyboard", "visual", "observation"}:
+                    "uia", "win32", "postmessage", "sendinput", "keyboard", "visual", "observation",
+                    "owned-popup-printwindow", "owned-popup-messages"}:
                     summary[key] = value.lower()
             if fields.get("success") is False or source.get("effect") in {"unverifiable", "unconfirmed", "unknown"}:
                 summary["diagnostic_code"] = diagnostic_code(source)
@@ -1713,6 +1714,13 @@ class Guard:
                     raise OperationError("이미지 비교 위치가 현재 캡처 범위를 벗어났습니다.", "image_coordinate_mismatch")
                 return {"x": matched["x"], "y": matched["y"]}
             point = locate()
+            def revalidate_popup_image():
+                # Driver discovery can fail slowly. The original image match
+                # must still identify the same point before the separate
+                # native backend is allowed to send its single click.
+                if locate() != point:
+                    raise OperationError("Driver 응답을 기다리는 동안 팝업 대상 위치가 바뀌었습니다. 입력하지 않았습니다.", "popup_image_changed")
+            visual._popup_revalidate_image = revalidate_popup_image
             if step["operation"] == "wait_for_image":
                 return result("image_appeared", "현재 창에서 저장한 이미지를 하나로 확인했습니다.", verified=True)
             operation = step["operation"][6:]
@@ -1898,11 +1906,21 @@ class Guard:
                                      diagnostic_code=getattr(error, "code", "popup_capture_failed"))
                     elif name == "click" and getattr(self, "_popup_image_click", False):
                         check = self._popup_check_active
-                        check()
-                        args = validate_arguments(name, args, self.policy, self.process_resolver, self.window_resolver)
-                        raw = click_popup({key: args[key] for key in ("pid", "window_id")},
-                                          {key: args[key] for key in ("x", "y")},
-                                          self.image_geometry_resolver(args["window_id"]), check)
+                        try:
+                            check()
+                            args = validate_arguments(name, args, self.policy, self.process_resolver, self.window_resolver)
+                            self._popup_revalidate_image()
+                            check()
+                        except (GuardError, OSError, ValueError, RuntimeError) as error:
+                            # The exact Driver refusal proved no first input;
+                            # the fallback has not been called either.
+                            raw = {"isError": True, "structuredContent": {"input_sent": False,
+                                "code": getattr(error, "code", "popup_preflight_failed"),
+                                "message": str(error), "automatic_retry": False}}
+                        else:
+                            raw = click_popup({key: args[key] for key in ("pid", "window_id")},
+                                              {key: args[key] for key in ("x", "y")},
+                                              self.image_geometry_resolver(args["window_id"]), check)
                 result = action_guidance(filter_result(name, raw, self.policy, self.process_resolver), name)
                 result = observation_guidance(result, name, args, self.policy["mode"])
                 if name == "get_window_state" and not result.get("isError"):

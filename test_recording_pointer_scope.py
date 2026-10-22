@@ -1,4 +1,4 @@
-"""Native at-point authorization regression, without windows or injected input."""
+"""Native scope policies and own offscreen popup HWNDs; no injected input."""
 import json
 import os
 from pathlib import Path
@@ -15,9 +15,60 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.Serialization;
+using System.Runtime.InteropServices;
 using System.Web.Script.Serialization;
 internal static class PointerProbe {
+ [DllImport("user32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr CreateWindowEx(uint ex,string cls,string title,uint style,int x,int y,int w,int h,IntPtr owner,IntPtr menu,IntPtr instance,IntPtr parameter);
+ [DllImport("user32.dll")] static extern bool DestroyWindow(IntPtr hwnd);
+ [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hwnd,int command);
+ static IntPtr Offscreen(IntPtr owner, bool child) {
+  IntPtr hwnd=CreateWindowEx(0x08000080,"STATIC","",child?0x50000000u:0x90000000u,-32000,-32000,160,90,owner,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero);
+  if(hwnd==IntPtr.Zero)throw new InvalidOperationException("fixture_window_failed:"+Marshal.GetLastWin32Error());return hwnd;
+ }
+ static object PopupEpisodes(string mode) {
+  var handles=new List<IntPtr>();var targets=new List<VisualTools.Target>();
+  BindingFlags flags=BindingFlags.Instance|BindingFlags.NonPublic;
+  Type recorder=typeof(VisualTools).GetNestedType("Recorder",BindingFlags.NonPublic);
+  object instance=FormatterServices.GetUninitializedObject(recorder);
+  try {
+   IntPtr main=Offscreen(IntPtr.Zero,false);handles.Add(main);
+   var root=new VisualTools.Target(new Dictionary<string,object>{{"pid",System.Diagnostics.Process.GetCurrentProcess().Id},{"window_id",main.ToInt64()},{"program_id","fixture"},{"window_ref","main"},{"image_allowed",false}});targets.Add(root);
+   recorder.GetField("targets",flags).SetValue(instance,targets);recorder.GetField("warnings",flags).SetValue(instance,new List<string>());
+   recorder.GetField("popupPrefix",flags).SetValue(instance,"popup_fixture_");recorder.GetField("maximum",flags).SetValue(instance,100);
+   recorder.GetField("events",flags).SetValue(instance,new List<Dictionary<string,object>>());
+   FieldInfo pendingField=recorder.GetField("pending",flags);object pending=Activator.CreateInstance(pendingField.FieldType);pendingField.SetValue(instance,pending);
+   IntPtr first=Offscreen(main,false), sibling=Offscreen(main,false), nested=Offscreen(first,false), unrelated=Offscreen(IntPtr.Zero,false);
+   handles.Add(first);handles.Add(sibling);handles.Add(nested);handles.Add(unrelated);
+   var discover=recorder.GetMethod("DiscoverPopup",flags,null,new[]{typeof(IntPtr)},null);
+   foreach(IntPtr hwnd in new[]{first,sibling,nested,unrelated})discover.Invoke(instance,new object[]{hwnd});
+   bool scoped=targets.Count==4 && targets[1].Hwnd==first && targets[2].Hwnd==sibling && targets[3].Hwnd==nested;
+   string firstRef=targets[1].Window;discover.Invoke(instance,new object[]{first});discover.Invoke(instance,new object[]{nested});
+   if(mode=="popup_siblings_nested")return new{exact_distinct=scoped,closest_owner=targets[3].Owner==targets[1],siblings_owner=targets[1].Owner==root&&targets[2].Owner==root,unrelated_excluded=targets.TrueForAll(t=>t.Hwnd!=unrelated),same_episode_deduplicated=targets.Count==4&&targets[1].Window==firstRef};
+   if(mode=="popup_episode") {
+    var original=targets[1];ShowWindow(first,0);ShowWindow(first,8);
+    // Process the observed HIDE after the same HWND has become visible again.
+    recorder.GetMethod("RetirePopupEpisode",flags).Invoke(instance,new object[]{first});
+    discover.Invoke(instance,new object[]{first});var fresh=targets[targets.Count-1];
+    return new{old_retired=original.Retired,new_reference=fresh.Hwnd==first&&fresh.Window!=original.Window&&!fresh.Retired,nested_retired=targets[3].Retired,main_valid=root.Valid()};
+   }
+   if(mode=="popup_child_hide") {
+    IntPtr child=Offscreen(first,true);handles.Add(child);
+    recorder.GetMethod("RetirePopupEpisode",flags).Invoke(instance,new object[]{child});
+    recorder.GetMethod("RetirePopupEpisode",flags).Invoke(instance,new object[]{main});
+    return new{menu_retained=!targets[1].Retired,main_retained=!root.Retired};
+   }
+   if(mode=="popup_fast_click") {
+    IntPtr fast=Offscreen(first,false);handles.Add(fast);
+    var method=recorder.GetMethod("UnboundPopupClickFor",flags);Type pointType=method.GetParameters()[1].ParameterType;object point=Activator.CreateInstance(pointType);
+    bool kept=(bool)method.Invoke(instance,new object[]{fast,point,"click"});
+    object item=pending.GetType().GetMethod("Peek").Invoke(pending,null);Type ptype=item.GetType();
+    return new{kept=kept,manual=(string)ptype.GetField("Operation",flags).GetValue(item)=="manual_entry",needs_preimage=(string)ptype.GetField("Reason",flags).GetValue(item)=="image_capture_required",no_pixels=ptype.GetField("Source",flags).GetValue(item)==null,owner=ptype.GetField("Target",flags).GetValue(item)==targets[1]};
+   }
+   throw new InvalidOperationException(mode);
+  } finally {foreach(var t in targets)t.Release();for(int i=handles.Count-1;i>=0;i--)DestroyWindow(handles[i]);}
+ }
  static int Main(string[] args) {
+  if(args[0].StartsWith("popup_")) { Console.WriteLine(new JavaScriptSerializer().Serialize(PopupEpisodes(args[0])));return 0; }
   if(args[0].StartsWith("relationship_")) {
    string relationMode=args[0];
    long destination=relationMode=="relationship_nested"?200:100;
@@ -290,6 +341,21 @@ class RecordingPointerScopeTests(unittest.TestCase):
                        "expired", "other_role", "wrong_property", "unknown_value", "string_value"):
             with self.subTest(suffix=suffix):
                 self.assertEqual(self.call("check_" + suffix), {"accepted": False})
+
+    def test_offscreen_same_class_siblings_and_nested_use_exact_hwnds(self):
+        self.assertEqual(self.call("popup_siblings_nested"), {"exact_distinct": True, "closest_owner": True,
+                         "siblings_owner": True, "unrelated_excluded": True, "same_episode_deduplicated": True})
+
+    def test_offscreen_hide_show_same_hwnd_starts_new_visibility_episode(self):
+        self.assertEqual(self.call("popup_episode"), {"old_retired": True, "new_reference": True,
+                         "nested_retired": True, "main_valid": True})
+
+    def test_offscreen_child_hide_cannot_retire_menu_or_main(self):
+        self.assertEqual(self.call("popup_child_hide"), {"menu_retained": True, "main_retained": True})
+
+    def test_offscreen_fast_click_without_preimage_is_preserved_as_repair(self):
+        self.assertEqual(self.call("popup_fast_click"), {"kept": True, "manual": True,
+                         "needs_preimage": True, "no_pixels": True, "owner": True})
 
     def test_native_combo_pair_can_fold_once_when_final_value_changed(self):
         self.assertEqual(self.call("combo_exact_pair"), {"accepted": True})

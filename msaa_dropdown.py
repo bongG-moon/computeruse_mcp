@@ -20,8 +20,11 @@ def _read_once(runtime, target, timeout=2):
     path = Path(__file__).with_name(HELPER)
     if not path.is_file():
         raise OperationError('MSAA 목록 도우미가 없습니다. 전체 설치본을 업데이트하세요.', 'msaa_helper_missing')
-    process = subprocess.Popen([str(path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               text=True, encoding='utf-8', creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    try:
+        process = subprocess.Popen([str(path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, encoding='utf-8', creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    except OSError as error:
+        raise OperationError('MSAA 도우미를 시작하지 못했습니다. 입력하지 않았습니다.', 'msaa_helper_start_failed') from error
     deadline = time.monotonic() + timeout
     payload = json.dumps(target) + '\n'
     try:
@@ -35,7 +38,12 @@ def _read_once(runtime, target, timeout=2):
                 break
             except subprocess.TimeoutExpired:
                 payload = None
-        data = json.loads(output)
+        try:
+            data = json.loads(output)
+        except (ValueError, TypeError) as error:
+            raise OperationError('MSAA 도우미 응답이 올바른 JSON이 아닙니다.', 'msaa_invalid_response') from error
+        if not isinstance(data, dict):
+            raise OperationError('MSAA 도우미 응답 형식이 올바르지 않습니다.', 'msaa_invalid_response')
         if process.returncode or data.get('ok') is not True:
             code = data.get('code', 'msaa_read_failed')
             if not isinstance(code, str) or not code.startswith('msaa_'): code = 'msaa_read_failed'
@@ -56,26 +64,36 @@ def _read_once(runtime, target, timeout=2):
 def read_lists(runtime, target, timeout=2):
     """One bounded read retry, only for transient provider failures on same HWND."""
     from interaction import _identity
+    from closing import ProbeError
     probe = runtime.create_transition_probe(dict(target))
     started = time.monotonic()
+    def identity(*, initial=False):
+        try:
+            return _identity(probe.capture() if initial else probe.snapshot(), target['window_id'])
+        except (ProbeError, OperationError) as error:
+            cause = getattr(error, 'code', 'native_probe_failed')
+            changed = cause in {'process_identity_mismatch', 'target_handle_reused', 'process_already_exited',
+                'target_not_live_at_prepare', 'window_ref_unavailable'}
+            code = 'msaa_target_changed' if changed else 'msaa_native_probe_failed'
+            raise OperationError('MSAA 대상 창 확인 실패: ' + cause + ' (입력하지 않았습니다).', code) from error
     try:
-        before = _identity(probe.capture(), target['window_id'])
+        before = identity(initial=True)
         for attempt in range(2):
             runtime.check_active()
-            if _identity(probe.snapshot(), target['window_id']) != before:
+            if identity() != before:
                 raise OperationError('MSAA 대상 HWND가 교체됐습니다.', 'msaa_target_changed')
             remaining = timeout - (time.monotonic()-started)
             if remaining <= 0: raise OperationError('MSAA 읽기 시간이 초과됐습니다.', 'msaa_timeout')
             try:
                 data = _read_once(runtime, target, timeout=remaining)
             except OperationError as error:
-                if _identity(probe.snapshot(), target['window_id']) != before:
+                if identity() != before:
                     raise OperationError('접근성 읽기 중 대상 HWND가 바뀌었습니다.', 'msaa_target_changed') from error
                 if attempt == 0 and error.code in {'msaa_provider_error', 'msaa_provider_range',
                         'msaa_incomplete_tree', 'msaa_invalid_child'}:
                     continue
                 raise
-            if _identity(probe.snapshot(), target['window_id']) != before:
+            if identity() != before:
                 raise OperationError('접근성 읽기 후 대상 HWND가 바뀌었습니다.', 'msaa_target_changed')
             data['read_attempts'] = attempt + 1
             return data

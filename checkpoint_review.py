@@ -131,6 +131,8 @@ class CheckpointReviews:
                 try:
                     decision = self._read(job['folder'] / 'result.json', job)
                     ready = self._read(job['folder'] / 'ready.json', job)
+                    if ready and ready.get('visible') is True:
+                        job['initial_ready'] = True
                     if decision is not None:
                         if decision.get('status') not in {'confirmed', 'rejected', 'cancelled'}:
                             raise ValueError('알 수 없는 확인 응답입니다.')
@@ -149,14 +151,17 @@ class CheckpointReviews:
             current = None
             try:
                 state_path = job['folder'] / 'state.json'
-                if state_path.is_file() and 0 <= time.time()-state_path.stat().st_mtime <= 3:
+                if state in {'starting', 'pending'} and not self._helper_exited(job) and state_path.is_file() and 0 <= time.time()-state_path.stat().st_mtime <= 3:
                     observed = self._read(state_path, job)
-                    if observed and observed.get('pid') == getattr(job['process'], 'pid', None):
+                    if (observed and type(observed.get('pid')) is int and observed['pid'] > 0
+                            and observed['pid'] == getattr(job['process'], 'pid', None)
+                            and type(observed.get('hwnd')) is int and observed['hwnd'] > 0
+                            and all(type(observed.get(key)) is bool for key in ('visible', 'minimized', 'on_monitor'))):
                         current = observed
             except (ValueError, OSError):
                 pass
             value = {'status': state, 'review_id': identity, 'review_visible': bool(state == 'pending' and current and current.get('visible') and not current.get('minimized') and current.get('on_monitor')),
-                     'initial_ready': (job['folder'] / 'ready.json').is_file(),
+                     'initial_ready': job.get('initial_ready', False),
                      'current_window_state': current, 'visibility_observed': current is not None,
                      'run_id': job['key'][1], 'checkpoint_id': job['key'][2],
                      'human_reviewed': state == 'confirmed', 'model_image_verified': False,
@@ -183,7 +188,12 @@ class CheckpointReviews:
             value = self.status(identity, runtime)
             if value.get('status') not in {'starting', 'pending'}:
                 return value
-            (self.jobs[identity]['folder'] / 'reveal.flag').touch()
+            try:
+                (self.jobs[identity]['folder'] / 'reveal.flag').touch()
+            except OSError as exc:
+                return {**value, 'redisplay_requested': False,
+                        'diagnostic': {'code': 'checkpoint_review_redisplay_unavailable',
+                                       'source': 'mcp', 'stage': 'local_review', 'message': str(exc)}}
             return {**value, 'redisplay_requested': True, 'human_reviewed': False,
                     'message': '확인창 재표시를 요청했습니다. 창의 확인 버튼은 사용자가 직접 선택해야 합니다.'}
 

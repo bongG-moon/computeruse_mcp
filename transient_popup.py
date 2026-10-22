@@ -5,6 +5,7 @@ The only mutation is a single image-verified left click after exact non-delivery
 """
 from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
+import copy
 import ctypes
 from ctypes import wintypes as W
 import json
@@ -62,9 +63,19 @@ def exact_missing(answer, hwnd):
     for data in list(candidates):
         if isinstance(data, dict):
             candidates.extend(data.get(key) for key in ("error", "diagnostic") if isinstance(data.get(key), dict))
-    if any(isinstance(data, dict) and (data.get("input_sent") is True
-           or data.get("diagnostic_code") not in (None, "target_unavailable")) for data in candidates):
-        return False
+    for data in candidates:
+        if not isinstance(data, dict): continue
+        # A missing-HWND sentence cannot override contradictory delivery or
+        # refusal evidence. Explicit unknown delivery is not non-delivery.
+        delivery = data.get("delivery", {})
+        if (any(key in data and data[key] is not False for key in ("input_sent", "input_dispatched"))
+                or data.get("dispatch") in ("sent", "unknown")
+                or data.get("status") == "unknown"
+                or any(data.get(key) not in (None, "target_unavailable") for key in ("diagnostic_code", "error_code"))
+                or data.get("code") not in (None, "tool_invocation_failed", "target_unavailable")
+                or isinstance(delivery, dict) and (delivery.get("state") in ("sent", "unknown")
+                    or type(delivery.get("delivered_count")) is int and delivery["delivered_count"] > 0)):
+            return False
     pattern = (r"No window with window_id " + str(hwnd) +
                r" exists\.(?: Call `?list_windows\(\{\"pid\":\s*\d+\}\)`? for candidates\.)?")
     for data in candidates:
@@ -140,11 +151,14 @@ def _physical_snapshot(target, owner, declarations):
         probe.close()
 
 
-def register_popup(target, owner):
+def register_popup(target, owner, *, expected_proof=None):
     scope = _scope.get()
     if scope is None: return
     try:
         proof = _snapshot(target, owner, scope["classes"])
+        if expected_proof is not None and any(proof.get(key) != expected_proof.get(key)
+                for key in ("process", "path", "window", "bounds")):
+            raise OperationError("확인하던 팝업의 수명이나 소유 경로가 바뀌었습니다.", "popup_identity_changed")
     except (OperationError, OSError, RuntimeError) as error:
         scope["failures"][(target["pid"], target["window_id"])] = {
             "code": getattr(error, "code", "popup_native_probe_failed"), "message": str(error)[:500]}
@@ -326,6 +340,12 @@ def popup_owner(target):
     return dict(binding["owner"])
 
 
+def popup_proof(target):
+    """Retain identity for observation review across fresh run scopes, not authority."""
+    _, current = _binding(target)
+    return copy.deepcopy(current)
+
+
 def current_popup(owner, runtime=None):
     scope = _scope.get()
     candidates = []
@@ -334,6 +354,16 @@ def current_popup(owner, runtime=None):
         probe = factory(dict(owner))
         try:
             state = probe.capture()
+            # Hosted dropdowns can be child HWNDs that EnumWindows omits.
+            # Capture establishes the original owner handle; the transition
+            # snapshot expands discovery without granting input authority.
+            snapshot = getattr(probe, "transition_snapshot", None)
+            if callable(snapshot):
+                initial = state
+                state = snapshot()
+                if (state.get("process_exited") or not state.get("target_present")
+                        or any(state.get(key) != initial.get(key) for key in ("creation_time", "executable"))):
+                    raise OperationError("팝업 관찰 중 원래 프로그램이나 창이 바뀌었습니다.", "popup_owner_changed")
             for row in state.get("windows", []):
                 if (row.get("pid") != owner["pid"] or row.get("window_id") == owner["window_id"]
                         or row.get("visible") is not True or not _allowed_class(row.get("class_name", ""), scope["classes"])):

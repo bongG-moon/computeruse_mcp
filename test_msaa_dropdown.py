@@ -11,6 +11,7 @@ from operations import OperationError
 from test_image_steps import png, image_target
 from test_recording_windows import Probe, Runtime, step
 from recording_windows import execute_window_wait
+from closing import ProbeError
 
 
 def data(*rects):
@@ -19,6 +20,31 @@ def data(*rects):
 
 
 class MsaaTests(unittest.TestCase):
+    def test_native_hwnd_failure_is_distinct_from_provider_error_and_not_retried(self):
+        for native_code,expected in [('target_handle_reused','msaa_target_changed'),
+                ('window_class_read_failed','msaa_native_probe_failed')]:
+            runtime=Runtime(Probe([]))
+            runtime.probe.snapshot=mock.Mock(side_effect=ProbeError(native_code))
+            with mock.patch.object(msaa,'_read_once') as read:
+                with self.assertRaises(OperationError) as caught:
+                    msaa.read_lists(runtime,{'pid':42,'window_id':10})
+                self.assertEqual(caught.exception.code,expected)
+                self.assertIn(native_code,str(caught.exception))
+                read.assert_not_called()
+            self.assertTrue(runtime.probe.closed)
+
+    def test_helper_malformed_output_has_bounded_diagnostic(self):
+        runtime=SimpleNamespace(check_active=lambda:None,guard=SimpleNamespace(policy={},process_resolver=None,window_resolver=None))
+        for output in ('not json','[]','null'):
+            process=mock.Mock(returncode=0)
+            process.communicate.return_value=(output,'')
+            process.poll.return_value=0
+            with mock.patch('vendor.guard.validate_arguments'), mock.patch.object(msaa.Path,'is_file',return_value=True), \
+                    mock.patch.object(msaa.subprocess,'Popen',return_value=process):
+                with self.assertRaises(OperationError) as caught:
+                    msaa._read_once(runtime,{'pid':42,'window_id':10})
+                self.assertEqual(caught.exception.code,'msaa_invalid_response')
+
     def test_transient_provider_retry_is_read_only_and_bounded(self):
         runtime = Runtime(Probe([]))
         with mock.patch.object(msaa, '_read_once', side_effect=[

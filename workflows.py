@@ -149,9 +149,10 @@ def _validate_expanded(steps, program_ids):
             raise WorkflowError("window_ref는 영문자로 시작하는 1~64자 창 이름이어야 합니다.")
         validate_workflow_step(step)
         if step.get("review_mode") == "popup_image":
-            if (index+1 >= len(steps) or target_key(step) != target_key(steps[index+1])
+            if (index+1 >= len(steps) or steps[index+1].get("operation") not in IMAGE_MUTATIONS
+                    or target_key(step) != target_key(steps[index+1])
                     or step.get("image_target") != steps[index+1].get("image_target")):
-                raise WorkflowError("자동 팝업 확인의 이미지는 바로 다음 동작의 대상과 일치해야 합니다.")
+                raise WorkflowError("자동 팝업 확인은 바로 다음 이미지 입력의 대상만 확인할 수 있습니다. 최종 업무 결과 확인으로 사용할 수 없습니다.")
         if deferred_input(step):
             direct = index+1 < len(steps) and linked_image_checkpoint(step, steps[index+1])
             opened = index+2 < len(steps) and linked_popup_checkpoint(step, steps[index+1], steps[index+2])
@@ -1003,6 +1004,15 @@ class WorkflowRunner:
                 return {**record, **opened, "observation_content": images, "last_result": latest,
                     "can_resume_pending_input": True}
             try:
+                review_source = record.get("checkpoint", {}).get("source_step_index")
+                needs_vision = any(item.get("review_mode") == "visual" for item in steps[record["completed_steps"]:])
+                needs_vision = needs_vision or (type(review_source) is int and 0 <= review_source < len(steps)
+                    and steps[review_source].get("review_mode") == "visual")
+                if needs_vision and not image_delivery_enabled:
+                    save("needs_review")
+                    return {**record, "state":"needs_input", "input_dispatched":False,
+                        "diagnostic":{"code":"vision_client_required", "automatic_replay":False},
+                        "next_step":"저장 작업에 모델 화면 판정이 있습니다. 입력 전에 이미지 전달 연결을 확인하세요. 확인 후 같은 실행으로 이어가거나 편집창에서 판정 방식을 새 버전으로 저장하세요."}
                 visual_passed = False
                 recovered_ticket = None
                 if target_review is not None:

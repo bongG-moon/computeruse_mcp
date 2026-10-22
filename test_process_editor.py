@@ -762,6 +762,81 @@ class ImageDraftTests(unittest.TestCase):
         self.assertIn("이미지 기록 용량", self.draft.summaries()[2]["detail"])
         self.draft.validate(allow_pending=True)
 
+    def popup_recording(self, *, append=False, hover_parent=False):
+        popup = {"program_id": "editor", "window_ref": "popup_1", "owner_ref": "main", "pid": TARGET["pid"],
+            "window_id": TARGET["window_id"]+1, "owner_window_id": TARGET["window_id"],
+            "owner_verified": True, "closed": True, "title": "", "class_name": "ComboLBox"}
+        windows = [popup]
+        if hover_parent:
+            windows.append({**popup, "window_ref":"popup_2", "owner_ref":"popup_1",
+                "window_id":TARGET["window_id"]+2, "owner_window_id":TARGET["window_id"]+1})
+        events = [] if append else [{**image_choice(), "operation":"click", "program_id":"editor"}]
+        events.append({**image_choice(), "operation":"click", "program_id":"editor",
+            "window_ref":"popup_2" if hover_parent else "popup_1"})
+        self.draft.recorded(events, windows=windows, review_mode="visual", auto_popup=True)
+
+    def test_appended_recording_does_not_replace_existing_explicit_human_review(self):
+        self.draft.add({**self.image_base, "action":"click"})
+        self.draft.edit({"index":1,"review_mode":"human"})
+        original = copy.deepcopy(self.draft.steps)
+        self.popup_recording(append=True)
+        self.assertEqual(self.draft.steps[:2], original)
+        self.assertEqual(self.draft.steps[1]["review_origin"], "explicit")
+        self.assertEqual(self.draft.steps[1]["review_mode"], "human")
+        self.draft.validate()
+
+    def test_explicit_review_choice_survives_automatic_completion_edit(self):
+        self.draft.add({**self.image_base, "action":"click"})
+        self.draft.edit({"index":1,"review_mode":"human"})
+        original = copy.deepcopy(self.draft.steps[1])
+        self.draft.completion({"index":0,"selection_id":self.selection["selection_id"],
+            "property":"value","equals":"done"})
+        self.assertEqual(self.draft.steps[1], original)
+
+    def test_authored_review_message_survives_later_automatic_completion(self):
+        self.draft.add({**self.image_base, "action":"click"})
+        self.draft.edit({"index":1,"value":"사용자가 최종 결과를 직접 확인해야 합니다."})
+        original = copy.deepcopy(self.draft.steps[1])
+        self.assertEqual(original["review_origin"], "explicit")
+        self.draft.completion({"index":0,"selection_id":self.selection["selection_id"],
+            "property":"value","equals":"done"})
+        self.assertEqual(self.draft.steps[1], original)
+
+    def test_popup_image_retarget_updates_linked_condition_atomically(self):
+        self.popup_recording()
+        new = image_choice(window_id=TARGET["window_id"]+1, anchor={"x":.25,"y":.75})
+        self.draft.retarget(3, new)
+        self.assertEqual(self.draft.steps[2]["image_target"], self.draft.steps[3]["image_target"])
+        self.assertEqual(self.draft.steps[2]["image_target"]["anchor"], {"x":.25,"y":.75})
+        self.assertEqual(self.draft.steps[2]["review_mode"], "popup_image")
+        self.draft.validate()
+
+    def test_popup_image_repair_updates_condition_and_native_repair_retains_review(self):
+        self.popup_recording()
+        target = self.draft.targets[("editor","popup_1")]
+        selected = self.draft.remember_image(target, image_choice(window_id=target["window_id"], anchor={"x":.25,"y":.75}))
+        self.draft.repair(3, selected)
+        self.assertEqual(self.draft.steps[2]["image_target"], self.draft.steps[3]["image_target"])
+        native_id="native-popup-button"
+        self.draft.selections[native_id] = {"target":("editor","popup_1"),"selector":{"role":"Button","name":"Apply"},
+            "recognition":"uia","actions":["click"],"label":"Apply"}
+        self.draft.repair(3, {"selection_id":native_id})
+        self.assertEqual(self.draft.steps[2]["review_mode"], "human")
+        self.assertNotIn("image_target", self.draft.steps[2])
+        self.assertEqual(self.draft.steps[3]["operation"], "click")
+        self.draft.validate()
+
+    def test_hover_only_intermediate_owner_does_not_create_missing_reference(self):
+        self.popup_recording(hover_parent=True)
+        waits = [item for item in self.draft.steps if item["operation"] == "wait_for_window"]
+        self.assertEqual([(item["window_ref"],item["owner_ref"]) for item in waits], [("popup_2","main")])
+        self.assertEqual(self.draft.steps[2]["opened_from"], "main")
+        self.assertEqual(self.draft.steps[-1]["window_ref"], "main")
+        self.assertEqual(self.draft.steps[-1]["return_from"], "popup_2")
+        self.draft.validate()
+        reopened = ProcessDraft([self.program], {"steps":self.draft.steps})
+        self.assertEqual(set(reopened.targets), {("editor","main"),("editor","popup_2")})
+
     def test_seven_closed_popup_episodes_import_and_reopen_without_live_targets(self):
         windows, events = [], []
         for index in range(7):
@@ -1049,6 +1124,19 @@ class EditorIPCTests(unittest.TestCase):
         lock = self.editors.jobs[job["editor_id"]]["interaction_lock"]
         self.assertTrue(lock.acquire(blocking=False))
         lock.release()
+
+    def test_visual_recording_rechecks_capability_after_editor_opened(self):
+        self.context()
+        self.editors.visual_review_enabled = lambda runtime: True
+        job = self.start()
+        self.assertTrue(self.editors.jobs[job["editor_id"]]["visual_review_enabled"])
+        self.editors.visual_review_enabled = lambda runtime: False
+        with mock.patch("replay_preflight.image_replay_preflight") as preflight, mock.patch.object(self.editors, "_visual") as recorder:
+            response = self.command("record", {"review_mode":"visual"})
+            self.assertNotEqual(response["status"], "ok")
+            preflight.assert_not_called()
+            recorder.assert_not_called()
+        self.assertEqual(self.editors.jobs[job["editor_id"]]["draft"].steps, [])
 
     def test_trial_status_never_sends_screenshots_to_unverified_client(self):
         self.context(); job = self.start()
@@ -1883,7 +1971,7 @@ class EditorIPCTests(unittest.TestCase):
         self.assertFalse(done["input_dispatched"])
         self.assertTrue(self.child.terminated)
 
-    def test_checkpoint_image_is_forwarded_without_claiming_task_verification(self):
+    def test_vision_connection_cannot_forward_unverified_human_acknowledgement(self):
         self.manager.image_delivery.check(delivery_mode="vision")
         task = self.manager.tasks.save({"name": "review", "instructions": "review", "expected": "human review",
             "program_ids": ["editor"], "steps": [{"operation": "checkpoint", "program_id": "editor", "message": "Review"}],
@@ -1893,11 +1981,11 @@ class EditorIPCTests(unittest.TestCase):
                 "checkpoint": {"id": "review-id"}, "checkpoint_content": [content]}) as run:
             response = self.manager.call("computer_run_task", {"task_id": task["id"], "targets": self.args["targets"],
                 "acknowledge_checkpoint": "earlier-reviewed-id"})
-        self.assertFalse(response.get("isError", False), response)
-        self.assertIn(content, response["content"])
+        self.assertTrue(response.get("isError", False), response)
         self.assertFalse(response["structuredContent"]["task_verified"])
+        self.assertFalse(response["structuredContent"]["input_dispatched"])
         self.assertNotIn("checkpoint_content", response["structuredContent"])
-        self.assertEqual(run.call_args.kwargs["acknowledge_checkpoint"], "earlier-reviewed-id")
+        run.assert_not_called()
 
     def test_loading_and_saving_preserves_identity_as_new_revision(self):
         original = self.manager.tasks.save({"name": "original", "instructions": "old", "expected": "old",

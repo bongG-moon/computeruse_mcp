@@ -96,14 +96,23 @@ internal static class CheckpointReview
             buttons.Controls.Add(Button("확인 완료", "confirmed", Color.FromArgb(37,99,235), Color.White, px));
             buttons.Controls.Add(Button("결과가 다름", "rejected", Color.White, Color.FromArgb(22,52,86), px));
             layout.Controls.Add(buttons,0,3);
-            Shown += delegate { Write("ready.json", new Dictionary<string,object> { {"visible",true} }); PublishState(); };
+            Shown += delegate {
+                try { Write("ready.json", new Dictionary<string,object> { {"visible",true} }); PublishState(); }
+                catch (IOException) { Close(); }
+                catch (UnauthorizedAccessException) { Close(); }
+            };
             FormClosing += delegate { Finish("cancelled"); };
             timer.Interval = 200; timer.Tick += delegate {
-                string reveal = Path.Combine(folder,"reveal.flag");
-                if (File.Exists(reveal)) { File.Delete(reveal); Reveal(); }
-                if ((DateTime.UtcNow-lastState).TotalSeconds >= 1) PublishState();
+                // Cancellation wins over redisplay. IPC cleanup can race with
+                // this timer; a failed heartbeat must not open an error dialog.
                 if (DateTime.UtcNow >= expires || File.Exists(Path.Combine(folder,"cancel.flag")) ||
-                    File.Exists(Path.Combine(Path.GetDirectoryName(folder),"stop.flag"))) Close();
+                    File.Exists(Path.Combine(Path.GetDirectoryName(folder),"stop.flag"))) { Close(); return; }
+                try {
+                    string reveal = Path.Combine(folder,"reveal.flag");
+                    if (File.Exists(reveal)) { File.Delete(reveal); Reveal(); }
+                    if ((DateTime.UtcNow-lastState).TotalSeconds >= 1) PublishState();
+                } catch (IOException) { }
+                  catch (UnauthorizedAccessException) { }
             }; timer.Start();
         }
         Button Button(string title, string state, Color back, Color fore, Func<int,int> px)

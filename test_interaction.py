@@ -2,6 +2,7 @@
 import copy
 import threading
 import os
+import random
 import unittest
 from unittest import mock
 from types import SimpleNamespace
@@ -86,8 +87,21 @@ class FacadeTests(unittest.TestCase):
     # the Driver transport contract. No global input/UIA/desktop is exercised.
     def setUp(self):
         image_fixtures.ImageGuardTests.setUp(self)
+        pixels = random.Random(873)
+        self.source_png = encode_png(100, 100, 2, [pixels.randbytes(300) for _ in range(100)])
+        original_request = self.transport.driver_request
+        def request(method, arguments, timeout=None):
+            after = self.transport.after
+            def frame_then_after(request, result):
+                if request['name'] == 'get_window_state':
+                    result['content'][0]['data'] = self.source_png
+                if after: after(request, result)
+            self.transport.after = frame_then_after
+            try: return original_request(method, arguments, timeout)
+            finally: self.transport.after = after
+        self.transport.driver_request = request
         self.probe = Probe()
-        self.runtime = SimpleNamespace(mode='uia', guard=self.guard, stop_event=threading.Event(),
+        self.runtime = SimpleNamespace(mode='uia', guard=self.guard, run_dir=self.tmp.name, stop_event=threading.Event(),
             execution_lock=threading.RLock(), check_active=lambda: None,
             create_transition_probe=lambda target: self.probe,
             capture_checkpoint=lambda target: self.guard.capture_checkpoint(target),
@@ -100,7 +114,7 @@ class FacadeTests(unittest.TestCase):
         self.scope = {'x': 10, 'y': 20, 'width': 50, 'height': 50}
 
     def test_popup_result_owner_requires_known_delivery_and_actual_closure(self):
-        receipt={'input_dispatched':True,'dispatch':'sent'}
+        receipt={'input_dispatched':True,'dispatch':'sent','verification_deferred':True}
         with mock.patch('transient_popup.window_exists',return_value=True):
             self.assertEqual(self.engine._popup_result_ref(self.ref,'owner',receipt),self.ref)
         with mock.patch('transient_popup.window_exists',return_value=False), mock.patch.object(self.engine,'target',return_value=TARGET) as target:
@@ -109,7 +123,19 @@ class FacadeTests(unittest.TestCase):
         with mock.patch('transient_popup.window_exists') as exists:
             for sent in (False,None):
                 self.assertEqual(self.engine._popup_result_ref(self.ref,'owner',{'input_dispatched':sent,'dispatch':'unknown'}),self.ref)
+            for deferred in (False,None):
+                self.assertEqual(self.engine._popup_result_ref(self.ref,'owner',{**receipt,'verification_deferred':deferred}),self.ref)
             exists.assert_not_called()
+
+    def test_proven_popup_default_observation_never_activates_or_requires_uia(self):
+        from inspection import inspect_window
+        with mock.patch('transient_popup.proven_popup', return_value=True), \
+                mock.patch('interaction.prepare_image_foreground') as activate, \
+                mock.patch('interaction.inspect_window', wraps=inspect_window) as inspect:
+            result = self.observe()
+        self.assertEqual(result['state'], 'observed')
+        self.assertEqual(inspect.call_args.kwargs['observation'], 'visual')
+        activate.assert_not_called()
 
     def mutations(self):
         return [call for call in self.transport.calls if call['name'] != 'get_window_state']
@@ -159,7 +185,7 @@ class FacadeTests(unittest.TestCase):
 
     def test_unrelated_animation_does_not_invalidate_scoped_target(self):
         observed = self.observe()
-        width, height, color, channels, rows = decode_png(png(100, 100))
+        width, height, color, channels, rows = decode_png(self.source_png)
         rows[0] = b'\xff' * len(rows[0])
         changed = encode_png(width, height, color, rows)
         self.transport.after = lambda request, answer: answer['content'][0].update(data=changed) if request['name'] == 'get_window_state' else None
@@ -169,7 +195,7 @@ class FacadeTests(unittest.TestCase):
 
     def test_row_content_change_prevents_wrong_row_input(self):
         observed = self.observe()
-        width, height, color, channels, rows = decode_png(png(100, 100))
+        width, height, color, channels, rows = decode_png(self.source_png)
         rows[22] = b'\xff' * len(rows[22])
         changed = encode_png(width, height, color, rows)
         self.transport.after = lambda request, answer: answer['content'][0].update(data=changed) if request['name'] == 'get_window_state' else None
@@ -184,6 +210,35 @@ class FacadeTests(unittest.TestCase):
             answer = self.engine.act(self.ref, {'operation': 'click'}, observation_id=observed['observation_id'],
                 image_region=self.region, image_delivery_enabled=True, completion='started')
         self.assertEqual(answer['dispatch'], 'not_sent')
+        self.assertEqual(self.mutations(), [])
+
+    def test_actual_duplicate_rows_remain_ambiguous_even_with_unchanged_scope(self):
+        self.scope = {'x': 10, 'y': 10, 'width': 40, 'height': 30}
+        self.region = {'x': 20, 'y': 20, 'width': 16, 'height': 16}
+        width, height, color, channels, rows = decode_png(self.source_png)
+        for offset in range(self.scope['height']):
+            source = rows[self.scope['y']+offset][10*channels:50*channels]
+            row = bytearray(rows[60+offset]); row[10*channels:50*channels] = source
+            rows[60+offset] = bytes(row)
+        self.source_png = encode_png(width, height, color, rows)
+        answer = self.act(self.observe())
+        self.assertEqual(answer['dispatch'], 'not_sent')
+        self.assertEqual(answer['diagnostic']['code'], 'image_ambiguous')
+        self.assertEqual(answer['diagnostic']['image_match']['status'], 'ambiguous')
+        self.assertEqual(self.mutations(), [])
+
+    def test_oversize_scope_is_rejected_before_input_or_matching(self):
+        pixels = random.Random(43)
+        self.source_png = encode_png(600, 100, 2, [pixels.randbytes(1800) for _ in range(100)])
+        self.geometry = (0, 0, 600, 100, 2)
+        self.transport.after = lambda request, answer: answer['structuredContent'].update(screenshot_width=600) if request['name'] == 'get_window_state' else None
+        self.scope = {'x': 0, 'y': 20, 'width': 513, 'height': 50}
+        observed = self.observe()
+        with mock.patch('interaction.match_image') as match:
+            with self.assertRaises(OperationError) as error:
+                self.act(observed)
+            self.assertEqual(error.exception.code, 'image_scope_too_large')
+            match.assert_not_called()
         self.assertEqual(self.mutations(), [])
 
     def test_driver_failure_cause_and_explicit_non_delivery_survive_image_facade(self):

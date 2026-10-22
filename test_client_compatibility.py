@@ -139,6 +139,32 @@ class ClientCompatibilityTests(unittest.TestCase):
         self.assertFalse(answer['structuredContent']['input_dispatched'])
         self.assertEqual(answer['structuredContent']['status'], 'needs_review')
 
+    def test_legacy_vision_human_checkpoint_requires_actual_receipt(self):
+        self.manager.session = SimpleNamespace(id='s', state='active')
+        self.manager.image_delivery.configure('vision')
+        args = {'task_id': 'demo', 'targets': [{'program_id': 'editor', 'pid': 10, 'window_id': 20}],
+                'resume_run_id': 'run1', 'acknowledge_checkpoint': 'checkpoint1'}
+        with patch.object(self.manager.tasks, 'get', return_value={'steps': []}), \
+                patch.object(self.manager.workflows, 'run', return_value={'task_verified': True}) as run, \
+                patch.object(self.manager.checkpoint_reviews, 'acknowledgement', return_value={'status': 'not_found', 'human_reviewed': False}):
+            answer = self.manager.call('computer_run_task', args)
+        run.assert_not_called()
+        self.assertEqual(answer['structuredContent']['status'], 'needs_review')
+
+    def test_legacy_vision_opens_human_viewer_but_not_visual_review(self):
+        self.manager.session = SimpleNamespace(id='s', state='active')
+        self.manager.image_delivery.configure('vision')
+        args = {'task_id': 'demo', 'targets': [{'program_id': 'editor', 'pid': 10, 'window_id': 20}]}
+        human = {'task_verified': False, 'run_id': 'run1',
+                 'checkpoint': {'id': 'check1', 'capture_available': True}, 'checkpoint_content': [self.image]}
+        with patch.object(self.manager.tasks, 'get', return_value={'steps': []}), \
+                patch.object(self.manager.workflows, 'run', side_effect=[copy.deepcopy(human), {**copy.deepcopy(human), 'visual_review': {'review_id': 'v'}}]), \
+                patch.object(self.manager.checkpoint_reviews, 'open', return_value={'review_id': 'r', 'status': 'pending'}) as viewer:
+            answer = self.manager.call('computer_run_task', args)
+            self.assertEqual(answer['structuredContent'].get('local_review', {}).get('review_id'), 'r')
+            self.manager.call('computer_run_task', args)
+        self.assertEqual(viewer.call_count, 1)
+
     def test_switching_to_vision_cannot_override_existing_native_rejection(self):
         self.manager.session = SimpleNamespace(id='s', state='active')
         self.manager.image_delivery.check(delivery_mode='vision')
@@ -197,6 +223,39 @@ class CheckpointReviewTests(unittest.TestCase):
         self.assertFalse(result['human_reviewed'])
         self.assertTrue((job['folder']/'reveal.flag').exists())
         self.assertFalse((job['folder']/'result.json').exists())
+
+    def live_state(self, identity, **changes):
+        job = self.reviews.jobs[identity]
+        self.child.pid = 1234
+        value = {'nonce':job['nonce'],'review_id':identity,'pid':1234,'hwnd':99,
+                 'visible':True,'minimized':False,'on_monitor':True}
+        atomic_json(job['folder']/'state.json', {**value, **changes})
+
+    def test_exited_helper_does_not_report_recent_heartbeat_as_current(self):
+        started = self.start(); identity = started['review_id']
+        self.live_state(identity)
+        self.child.poll.return_value = 0
+        result = self.reviews.status(identity,self.runtime)
+        self.assertEqual(result['status'],'cancelled')
+        self.assertFalse(result['visibility_observed'])
+        self.assertIsNone(result['current_window_state'])
+
+    def test_live_visibility_requires_boolean_fields_and_real_hwnd(self):
+        started = self.start(); identity = started['review_id']
+        for change in ({'visible':'yes'}, {'minimized':0}, {'on_monitor':1}, {'hwnd':0}, {'pid':True}):
+            self.live_state(identity, **change)
+            result = self.reviews.status(identity,self.runtime)
+            self.assertFalse(result['visibility_observed'])
+            self.assertFalse(result['review_visible'])
+
+    def test_redisplay_io_failure_is_reported_without_decision(self):
+        started = self.start(); identity = started['review_id']
+        with patch.object(Path,'touch',side_effect=PermissionError('denied')):
+            result = self.reviews.reveal(identity,self.runtime)
+        self.assertFalse(result['redisplay_requested'])
+        self.assertFalse(result['human_reviewed'])
+        self.assertEqual(result['diagnostic']['code'],'checkpoint_review_redisplay_unavailable')
+        self.assertFalse((self.reviews.jobs[identity]['folder']/'result.json').exists())
 
     def test_confirmation_is_bound_to_exact_session_run_checkpoint_and_does_not_replay(self):
         started = self.start()

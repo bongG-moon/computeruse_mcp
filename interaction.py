@@ -105,14 +105,14 @@ class InteractionEngine:
         # Text clients keep all local image recording/replay facilities. This
         # facade does not silently send screenshots to a text-only connection.
         wants_image = image_delivery_enabled and observation != 'uia'
+        from transient_popup import proven_popup
+        popup_visual = wants_image and proven_popup(target)
         focus = None
-        if wants_image and not preserve_foreground:
+        if wants_image and not preserve_foreground and not popup_visual:
             focus = prepare_image_foreground(self.runtime, target)
             if focus is not None:
                 return _answer({**focus, **self._binding(window_ref), 'state': 'blocked', 'dispatch': 'not_sent'})
         geometry = validate_geometry(self.runtime.guard.image_geometry_resolver(target['window_id'])) if wants_image else None
-        from transient_popup import proven_popup
-        popup_visual = wants_image and preserve_foreground and proven_popup(target)
         answer = inspect_window(self.runtime, target, max_controls=max_controls, max_depth=max_depth,
             max_elements=max_elements, search=search, within=within,
             observation='visual' if popup_visual else 'both' if wants_image else 'uia',
@@ -206,6 +206,8 @@ class InteractionEngine:
             image_region = validate_region(image_region, **frame['image_size'], maximum=512)
             if scope_region is not None:
                 scope_region = validate_region(scope_region, **frame['image_size'])
+                if scope_region['width'] > 512 or scope_region['height'] > 512:
+                    raise OperationError('구별 문맥의 유일성을 검사하려면 가로·세로 512픽셀 안에 행 이름을 포함해 지정하세요.', 'image_scope_too_large')
                 if (scope_region['x'] > image_region['x'] or scope_region['y'] > image_region['y']
                         or scope_region['x']+scope_region['width'] < image_region['x']+image_region['width']
                         or scope_region['y']+scope_region['height'] < image_region['y']+image_region['height']
@@ -220,7 +222,8 @@ class InteractionEngine:
             image_step = {**step, 'operation': 'image_'+operation, 'image_target': template}
             from image_steps import validate_image_step
             validate_image_step(image_step)
-            scope_png = crop_png(frame['png'], scope_region, runtime=self.runtime) if scope_region else None
+            scope_target = target_from_region(frame['png'], scope_region, runtime=self.runtime) if scope_region else None
+            scope_png = scope_target['template_png'] if scope_target else None
             def locate(image_target, current_png):
                 self.target(window_ref)
                 if (self.runtime.guard.image_geometry_resolver(target['window_id']) != frame['geometry']
@@ -230,6 +233,11 @@ class InteractionEngine:
                     current_scope, current_target = crop_regions(current_png, [scope_region, image_region], runtime=self.runtime)
                     if not _same_pixels(scope_png, current_scope):
                         raise OperationError('선택한 행 또는 주변 문구가 바뀌었습니다. 다시 관찰하세요.', 'observation_scope_changed')
+                    found = match_image(self.runtime, scope_target, current_png)
+                    if found.get('status') != 'matched':
+                        return found
+                    if found.get('rect') != scope_region:
+                        raise OperationError('구별 문맥을 원래 위치에서 유일하게 확인하지 못했습니다.', 'observation_scope_moved')
                 else:
                     found = match_image(self.runtime, image_target, current_png)
                     if found.get('status') != 'matched':
@@ -286,7 +294,7 @@ class InteractionEngine:
 
     def _popup_result_ref(self, window_ref, owner_ref, result):
         if (owner_ref is None or result.get('input_dispatched') is not True
-                or result.get('dispatch') != 'sent'):
+                or result.get('dispatch') != 'sent' or result.get('verification_deferred') is not True):
             return window_ref
         # A stale or reused HWND is not proof of closure. Only native absence
         # permits returning to the owner bound before this confirmed input.

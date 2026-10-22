@@ -356,6 +356,17 @@ class ProcessDraft:
         last_event = {(event.get("program_id"), event.get("window_ref", "main")): index for index, event in enumerate(events) if isinstance(event, dict)}
         closed = {(row["program_id"], row["window_ref"]): row["owner_ref"] for row in windows if row.get("closed") is True}
         owner_graph = {(row["program_id"], row["window_ref"]): row["owner_ref"] for row in windows}
+        # A hover-only intermediary has no replay step. Keep its proven owner
+        # path, but bind descendants to the nearest owner used by this recipe.
+        used_windows = set(self.targets) | set(last_event)
+        for key, (target, binding) in discovered.items():
+            owner = (key[0], binding["owner_ref"])
+            seen = set()
+            while owner not in used_windows and owner in discovered and owner not in seen:
+                seen.add(owner)
+                owner = (key[0], owner_graph[owner])
+            binding["owner_ref"] = owner[1]
+            if key in closed: closed[key] = owner[1]
         def recorded_owner(source, owner):
             seen = set()
             while source not in seen:
@@ -391,7 +402,7 @@ class ProcessDraft:
                 binding_step = discovered[binding_key][1]
                 owner_key = (target["program_id"], binding_step["owner_ref"])
                 opening_source = (proposed[-2]["program_id"], proposed[-2].get("window_ref", "main")) if len(proposed) >= 2 else None
-                opening = (len(proposed) >= 2 and proposed[-1]["operation"] == "checkpoint"
+                opening = (len(proposed) >= len(self.steps) + 2 and proposed[-1]["operation"] == "checkpoint"
                            and not proposed[-1].get("opened_from")
                            and (proposed[-2]["operation"].startswith("image_") or proposed[-2].get("completion_mode") == "human") and not proposed[-2].get("expect")
                            and recorded_owner(opening_source, owner_key)
@@ -579,6 +590,7 @@ class ProcessDraft:
         view = self.remember_image(target, native)
         proposed = copy.deepcopy(self.steps)
         proposed[index]["image_target"] = copy.deepcopy(self.selections[view["selection_id"]]["image_target"])
+        self._sync_popup_condition(proposed, index)
         self.validate(proposed, allow_pending=True)
         self.steps = proposed
         self.labels[index] = "다시 선택한 이미지"
@@ -621,12 +633,32 @@ class ProcessDraft:
             if chosen in {"click", "double_click", "right_click"} and not step.get("expect"):
                 step["completion_mode"] = "human"
         proposed = copy.deepcopy(self.steps); proposed[index] = step
+        self._sync_popup_condition(proposed, index)
         self.validate(proposed, allow_pending=True)
         self.steps = proposed; self.labels[index] = selected["label"]
         issue = previous.get("step_id")
         if issue in self._target_warning_steps:
             self._target_warning_steps.remove(issue)
         self._resolve_target_warnings()
+
+    @staticmethod
+    def _sync_popup_condition(proposed, index):
+        """Retarget the generated precondition with its next action atomically."""
+        if index < 1: return
+        check, action = proposed[index-1], proposed[index]
+        if (check.get("operation") != "checkpoint" or check.get("review_mode") != "popup_image"
+                or check.get("review_origin") != "recording_generated"
+                or (check.get("program_id"), check.get("window_ref", "main")) !=
+                   (action.get("program_id"), action.get("window_ref", "main"))):
+            return
+        if action.get("image_target"):
+            check["image_target"] = copy.deepcopy(action["image_target"])
+        else:
+            # A UIA target cannot prove the previous image condition. Retain
+            # review rather than silently approving or retaining a stale image.
+            check["review_mode"] = "human"
+            check.pop("image_target", None)
+            check["message"] = "대상을 요소 방식으로 바꿨습니다. 열린 팝업과 다음 동작 대상을 확인하세요."
 
     def edit(self, payload):
         """Edit one authored step; image bytes and untouched fields never round-trip through the UI."""
@@ -641,6 +673,7 @@ class ProcessDraft:
             if operation != "checkpoint" or payload["review_mode"] not in {"human", "visual"}:
                 raise OperationError("사람 확인 또는 모델 판정을 선택하세요.")
             step["review_mode"] = payload["review_mode"]
+            step["review_origin"] = "explicit"
             step.pop("image_target", None)
         if operation == "manual_entry":
             if set(payload) != {"index", "value"}: raise OperationError("먼저 확인되지 않은 입력 내용을 지정하세요.")
@@ -650,6 +683,10 @@ class ProcessDraft:
         if "value" in payload:
             if field is None: raise OperationError("이 단계에는 수정할 입력값이 없습니다.")
             step[field] = _text(payload["value"], "입력 내용", 16000, empty=True)
+            if operation == "checkpoint" and step.get("review_mode") != "popup_image":
+                # An authored review message is an explicit requirement even
+                # when the user keeps the existing human/visual mode.
+                step["review_origin"] = "explicit"
         if "key" in payload:
             if operation not in {"press_key", "image_press_key"}: raise OperationError("키 입력 단계가 아닙니다.")
             step["key"] = payload["key"]
@@ -899,6 +936,11 @@ class ProcessEditors:
                                   "automatic_retry": False, "pending": not job["done"].is_set() or bool(job["result"].get("cleanup_pending")),
                                   "steps": job["summaries"], **extra})
 
+    def _visual_review_ready(self, job):
+        capability = getattr(self, "visual_review_enabled", None)
+        return (job.get("visual_review_enabled") is True and callable(capability)
+                and capability(job["runtime"]) is True)
+
     def _check(self, job):
         if job["cancel"].is_set() or job["runtime"].stop_event.is_set():
             raise OperationError("프로세스 만들기를 취소했습니다.", "editor_cancelled")
@@ -1014,8 +1056,12 @@ class ProcessEditors:
                     if exc.code not in IMAGE_FALLBACK_ERRORS or getattr(exc, "helper_cleanup_pending", False): raise
             if selected is None:
                 selected = draft.remember_image(target, native)
+            previous_review = draft.steps[index-1].get("review_mode") if index else None
             draft.repair(index, selected, action=payload.get("action"), value=payload.get("value"))
             message = "이 단계의 대상만 다시 지정했습니다. 순서와 프로그램·팝업 연결은 그대로 유지했습니다."
+            if previous_review == "popup_image" and draft.steps[index-1].get("review_mode") == "human":
+                message += " 이미지 대상을 요소 방식으로 바꾸어 앞의 팝업 자동 확인이 사람 확인으로 변경됐습니다. 실행 전 확인 방식을 검토하세요."
+                extra["review_policy_change"] = {"step_index":index-1,"from":"popup_image","to":"human"}
         elif action in {"pick_target", "pick_completion"}:
             step_index = None
             if action == "pick_completion":
@@ -1108,7 +1154,7 @@ class ProcessEditors:
                     raise OperationError("교체할 단계를 먼저 선택하세요.")
             elif "index" in payload:
                 raise OperationError("단계 번호는 선택 단계 교체에만 사용하세요.")
-            if payload.get("review_mode") == "visual" and not job.get("visual_review_enabled"):
+            if payload.get("review_mode") == "visual" and not self._visual_review_ready(job):
                 raise OperationError("화면을 읽는 모델 연결이 확인되지 않았습니다. 직접 화면 확인을 사용하세요.")
             # Each input can require one popup binding and one checkpoint.
             # Budget for the worst case, rather than a five-visit assumption.
@@ -1193,13 +1239,15 @@ class ProcessEditors:
         elif action == "resolve_input":
             draft.resolve_input(payload)
         elif action == "edit_step":
-            if payload.get("review_mode") == "visual" and not job.get("visual_review_enabled"):
+            if payload.get("review_mode") == "visual" and not self._visual_review_ready(job):
                 raise OperationError("이미지 전달이 확인되지 않은 연결에서는 모델 판정을 저장할 수 없습니다.", "vision_client_required")
             draft.edit(payload)
             message = "선택한 단계의 설정만 반영했습니다. 다른 단계와 저장 이미지는 유지했습니다."
         elif action == "set_completion":
+            previous_count = len(draft.steps)
             draft.completion(payload)
-            message = "자동 완료 기준을 지정했습니다. 이 동작의 별도 화면 확인은 생략합니다."
+            message = ("자동 완료 기준을 지정했습니다. 이 동작의 자동 생성 화면 확인을 생략합니다."
+                if len(draft.steps) < previous_count else "자동 완료 기준을 지정했습니다. 명시적으로 남긴 화면 확인은 유지합니다.")
         elif action == "test_run":
             if set(payload) != {"name", "description"}: raise OperationError("프로세스 이름과 설명을 확인하세요.")
             draft.validate()
@@ -1220,7 +1268,7 @@ class ProcessEditors:
                 job["result"]["last_test"] = copy.deepcopy(extra["test_result"])
             message = "시험 실행 결과를 확인하세요. 저장한 작업은 변경하지 않았습니다."
         elif action == "add_step":
-            if payload.get("completion_mode") == "visual" and not job.get("visual_review_enabled"):
+            if payload.get("completion_mode") == "visual" and not self._visual_review_ready(job):
                 raise OperationError("화면을 읽는 모델 연결이 확인되지 않았습니다. 직접 화면 확인을 사용하세요.")
             draft.add(payload)
         elif action in {"remove_step", "move_step"}:
