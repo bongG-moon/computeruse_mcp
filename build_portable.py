@@ -52,7 +52,7 @@ APP_FILES = (
     "semantic_targets.py",
     
     "airtest_backend.py", "AIRTEST-NOTICES.md", "APPREF_GUIDE.md",
-    "easy_api.py", "interaction.py", "image_pixels.py", "task_inputs.py", "task_revision.py", "visual_review.py", "visual_targets.py", "builtin_programs.py", "hosted_windows.py",
+    "easy_api.py", "interaction.py", "image_pixels.py", "task_inputs.py", "task_revision.py", "checkpoint_groups.py", "visual_review.py", "visual_targets.py", "builtin_programs.py", "hosted_windows.py",
     "server.py", "settings.py", "setup.py", "consent.py", "register.py", "README.html", "VALIDATION.html",
     "maintenance.py", "diagnostics.py", "install.py", "programs.py", "INSTALL.md", "vendor/__init__.py", "vendor/guard.py", "vendor/windows.py",
     "session_runtime.py", "configuration_state.py", "operations.py", "workflows.py", "inspection.py", "accessibility_tree.py", "closing.py", "close_actions.py", "privileges.py",
@@ -81,7 +81,7 @@ SOURCE_SUPPORT_FILES = (
     "test_task_capacity.py", "test_workflow_capacity.py",
     "acceptance_phase1_recording.py", "fixtures/Phase1RecordingFixture.cs", "fixtures/PHASE1_ACCEPTANCE.md",
     "test_hosted_windows.py", "test_hosted_guard.py", "test_visual_targets.py", "test_visual_recovery_scene.py", "test_workflow_target_review.py",
-    "test_interaction.py", "test_workflow_visual_review.py", "test_task_revision.py", "test_easy_api.py", "test_visual_review.py", "test_builtin_programs.py", "test_bundle_packaging.py", "acceptance_apps016.py",
+    "test_interaction.py", "test_workflow_visual_review.py", "test_task_revision.py", "test_checkpoint_groups.py", "test_popup_review_revision.py", "test_popup_coordinate_routing.py", "test_native_pointer.py", "test_menu_appearance.py", "test_image_wait_diagnostics.py", "test_selection_capability.py", "test_easy_api.py", "test_visual_review.py", "test_builtin_programs.py", "test_bundle_packaging.py", "acceptance_apps016.py",
     "CheckpointReview.cs", "test_client_compatibility.py", "test_recorded_clicks.py", "test_recording_reliability.py", "test_native_recording_capture.py", "test_replay_readiness.py", "test_selector_reuse.py", "acceptance_record_replay015.py",
     "test_capture_geometry.py", "capture_picker_fixture.py",
     "test_execution_progress.py", "acceptance_observation.py", "acceptance_recording_windows.py",

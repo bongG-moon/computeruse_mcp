@@ -104,6 +104,30 @@ class SavedCapacityTests(unittest.TestCase):
         self.assertEqual(answer["completed_steps"], 4)
         self.assertIsNot(self.manager.session, original)
 
+    def test_timeout_at_visual_checkpoint_renews_only_for_fresh_review(self):
+        from operations import OperationError
+        self.manager.tasks.save({"id": "review-boundary", "name": "Review", "instructions": "Check current screen",
+            "expected": "Condition checked", "program_ids": ["editor"], "steps": [
+                {"step_id": "review", "operation": "checkpoint", "program_id": "editor",
+                 "review_mode": "visual", "message": "Condition is ready"}]})
+        self.manager.image_delivery.configure("vision")
+        self.manager.workflows.visual_reviews.close()
+        reviews = self.manager.workflows.visual_reviews = mock.Mock()
+        reviews.open.return_value = {"state": "needs_observation_review", "visual_review": {"review_id": "review-"+"a"*32}, "image_content": []}
+        reviews.verify.side_effect = OperationError("old runtime", "visual_review_expired")
+        first = self.manager.call("computer_run_task", {"task_id": "review-boundary"})["structuredContent"]
+        original = self.manager.session
+        original.deadline = time.monotonic()-1
+        original.stop("Timed out while client assessed", cause="time_budget")
+        second = self.manager.call("computer_run_task", {"task_id": "review-boundary", "resume_run_id": first["run_id"],
+            "observation_review": {"review_id": "review-"+"a"*32}})["structuredContent"]
+        self.assertIsNot(self.manager.session, original)
+        self.assertEqual(second["completed_steps"], 0)
+        self.assertEqual(second["pending_step"], 0)
+        self.assertFalse(second["task_verified"])
+        self.assertEqual(reviews.open.call_count, 2)
+        self.assertEqual(self.manager.session.max_actions, self.config["max_actions"])
+
     def test_explicit_stop_after_timeout_prevents_renewal(self):
         first = self.call()
         original = self.manager.session

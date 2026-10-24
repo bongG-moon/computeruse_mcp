@@ -188,6 +188,11 @@ def _validate_expanded(steps, program_ids):
         if "${" in step["program_id"] or "${" in step.get("operation", "") or "${" in ref:
             raise WorkflowError("프로그램이나 동작 이름은 입력 변수로 바꿀 수 없습니다.")
     dynamic_window_keys([window_step(s) for s in steps])
+    from checkpoint_groups import batch_links
+    try:
+        batch_links(steps)
+    except ValueError as error:
+        raise WorkflowError(str(error)) from error
 
 
 def validate_recipe(steps, variables, program_ids):
@@ -274,7 +279,7 @@ class WorkflowRunner:
     FIELDS = {"format", "run_id", "task_id", "revision", "recipe_hash", "inputs_hash", "created_at", "updated_at",
               "completed_steps", "total_steps", "pending_step", "status", "task_verified", "session_id", "duration_ms"}
     OPTIONAL_FIELDS = {"checkpoint", "image_verification", "step_delivery", "snapshot_hash", "step_receipts", "visual_assessments", "target_recovery", "continuation",
-                       "target_review_refreshes", "visual_review_refreshes"}
+                       "target_review_refreshes", "visual_review_refreshes", "performance"}
     def __init__(self, state_dir):
         self.root = Path(state_dir) / "workflows"
         from repeat_profiles import RepeatProfiles
@@ -327,6 +332,16 @@ class WorkflowRunner:
                                    or int(k.split(":")[0]) >= value["total_steps"]
                                    or type(v) is not int or not 1 <= v <= 4 for k, v in counts.items())):
                         raise ValueError("review_refreshes")
+            if "performance" in value:
+                perf = value["performance"]
+                if (not isinstance(perf, dict) or set(perf) - {"calls", "active_ms", "between_calls_ms", "last_return_at", "phases_ms", "visual_review_requests", "batched_reviews"}
+                        or any(type(v) not in (int, float) or not math.isfinite(v) or not 0 <= v < 1e15
+                               for k, v in perf.items() if k != "phases_ms")
+                        or not isinstance(perf.get("phases_ms", {}), dict)
+                        or any(not isinstance(k, str) or not re.fullmatch(r"[a-z_]{1,60}", k)
+                               or type(v) not in (int, float) or not math.isfinite(v) or not 0 <= v < 1e15
+                               for k, v in perf.get("phases_ms", {}).items())):
+                    raise ValueError("performance")
             if "checkpoint" in value:
                 checkpoint = value["checkpoint"]
                 if (not isinstance(checkpoint, dict) or not {"id", "step_index", "capture_available", "target_hash"} <= set(checkpoint)
@@ -547,7 +562,7 @@ class WorkflowRunner:
 
     def _run(self, runtime, task, inputs, targets, *, resume_run_id=None, delivery_mode="background", acknowledge_checkpoint=None, metrics=None,
              observation_review=None, image_delivery_enabled=False, target_review=None):
-        from operations import Operations, verification_step
+        from operations import Operations, OperationError, verification_step
         if runtime.mode != "uia":
             raise WorkflowError("검증형 반복 작업은 현재 UIA 방식에서만 지원합니다.")
         runtime.check_active()
@@ -563,6 +578,20 @@ class WorkflowRunner:
                 or observation_review is not None or acknowledge_checkpoint is not None or not image_delivery_enabled):
             raise WorkflowError("대상 재지정은 이미지가 연결된 같은 resume_run_id와 target_review만으로 이어가세요.")
         steps, values = render_steps(task, inputs)
+        from checkpoint_groups import batch_links
+        review_batches = batch_links(steps)
+        def review_item(index):
+            item = steps[index]
+            if index in review_batches.values():
+                conditions = [steps[i]["message"] for i, end in review_batches.items() if end == index]
+                return {**item, "message": item["message"] + "\n함께 검증할 선행 완료 조건:\n" + "\n".join(conditions)}
+            if index not in review_batches:
+                return item
+            # Recovery of a later definitely-unsent action needs fresh proof
+            # of ALL settings already deferred, but does not finish the batch.
+            conditions = [steps[i]["message"] for i, end in review_batches.items()
+                          if i <= index and end == review_batches[index]]
+            return {**item, "review_mode": "visual", "message": "계속하기 전 현재 조건 확인:\n" + "\n".join(conditions)}
         apps = {app["id"]: app for app in runtime.programs}
         if not set(task["program_ids"]) <= set(apps):
             raise WorkflowError("작업에 필요한 모든 프로그램으로 computer_begin을 먼저 실행하세요.")
@@ -691,7 +720,7 @@ class WorkflowRunner:
                     if (checkpoint.get("id") != acknowledge_checkpoint or checkpoint.get("capture_available") is not True
                             or record["pending_step"] is None or type(source_index) is not int
                             or not 0 <= source_index < len(steps) or steps[source_index]["operation"] != "checkpoint"
-                            or steps[source_index].get("review_mode") == "visual"):
+                            or review_item(source_index).get("review_mode", "human") != "human"):
                         raise WorkflowError("현재 대기 중인 화면 확인 ID와 일치하지 않습니다. 최신 체크포인트를 확인하세요.")
                     if "source_step_index" in checkpoint and record.get("step_delivery") != {
                             "step_index": record["pending_step"], "state": "not_sent"}:
@@ -706,8 +735,11 @@ class WorkflowRunner:
                     checkpoint = record.get("checkpoint", {})
                     source_index = checkpoint.get("source_step_index", record["pending_step"])
                     if (record["pending_step"] is None or type(source_index) is not int or not 0 <= source_index < len(steps)
-                            or steps[source_index].get("operation") != "checkpoint" or steps[source_index].get("review_mode") != "visual"):
+                            or steps[source_index].get("operation") != "checkpoint" or review_item(source_index).get("review_mode") != "visual"):
                         raise WorkflowError("현재 단계는 모델 시각 확인을 요청한 단계가 아닙니다.")
+                    if ("source_step_index" in checkpoint and record.get("step_delivery") != {
+                            "step_index": record["pending_step"], "state": "not_sent"}):
+                        raise WorkflowError("입력 미전달이 확인된 단계의 이전 조건만 다시 확인할 수 있습니다.")
                 if target_review is not None:
                     recovery = record.get("target_recovery", {})
                     pending = record["pending_step"]
@@ -748,6 +780,21 @@ class WorkflowRunner:
             chunk_start = record["completed_steps"]
             engine = Operations(runtime)
             started = time.monotonic()
+            performance = record.setdefault("performance", {})
+            previous_return = performance.get("last_return_at")
+            performance["calls"] = performance.get("calls", 0) + 1
+            if previous_return is not None:
+                performance["between_calls_ms"] = round(performance.get("between_calls_ms", 0)
+                    + max(0, (time.time()-previous_return)*1000), 2)
+            active_before = performance.get("active_ms", 0)
+            phase_at = started
+            phase_name = "resume_verification"
+            def timed_phase(name):
+                nonlocal phase_at, phase_name
+                now = time.monotonic()
+                phases = performance.setdefault("phases_ms", {})
+                phases[phase_name] = round(phases.get(phase_name, 0) + (now-phase_at)*1000, 2)
+                phase_at, phase_name = now, name
             latest = None
             stage = "resume_verification"
             def measured(result):
@@ -793,10 +840,19 @@ class WorkflowRunner:
                 receipts = record["step_receipts"]
                 for index in range(len(receipts), record["completed_steps"]):
                     step = steps[index]
-                    if step["operation"] == "checkpoint":
-                        for pending in awaiting_receipts: receipts[pending]["status"] = "verified"
-                        awaiting_receipts.clear()
-                    deferred = deferred_input(step)
+                    if step["operation"] == "checkpoint" and index not in review_batches:
+                        remaining = []
+                        for pending in awaiting_receipts:
+                            # A popup precondition cannot certify an earlier
+                            # setting deliberately deferred to the final review.
+                            batch = next((end for start, end in review_batches.items()
+                                          if pending in {start-1, start}), None)
+                            if batch is not None and index < batch:
+                                remaining.append(pending)
+                            else:
+                                receipts[pending]["status"] = "verified"
+                        awaiting_receipts[:] = remaining
+                    deferred = deferred_input(step) or index in review_batches
                     receipt = {"step_index": index, "step_id": step.get("step_id", "step-"+str(index+1)),
                         "iteration_id": step.get("iteration_id"), "status": "awaiting_verification" if deferred else "verified"}
                     if any(check.get("require_change") for check in step.get("expect", [])):
@@ -813,6 +869,9 @@ class WorkflowRunner:
                     if deferred: awaiting_receipts.append(index)
 
             def save(status):
+                timed_phase(phase_name)
+                performance["active_ms"] = round(active_before + (time.monotonic()-started)*1000, 2)
+                if status != "running": performance["last_return_at"] = time.time()
                 record.update(status=status, updated_at=utc_now(), duration_ms=round((time.monotonic()-started)*1000, 2))
                 sync_receipts()
                 atomic_json(path, {key: value for key, value in record.items() if key != "step_receipts"}
@@ -948,7 +1007,8 @@ class WorkflowRunner:
                         return None
                 return None
             def capture_checkpoint(index, target, *, source_index=None):
-                item = steps[index if source_index is None else source_index]
+                timed_phase("review_capture")
+                item = review_item(index if source_index is None else source_index)
                 checkpoint = {"id": uuid.uuid4().hex, "step_index": index, "capture_available": False,
                               "target_hash": digest({"session_id": runtime.id, **target})}
                 if source_index is not None:
@@ -985,6 +1045,9 @@ class WorkflowRunner:
                         save("needs_review")
                         return {**record, "last_result": prepared, "input_dispatched": False}
                     opened = self.visual_reviews.open(runtime, record, item, target)
+                    if metrics is not None:
+                        metrics["visual_review_requests"] = metrics.get("visual_review_requests", 0) + 1
+                    performance["visual_review_requests"] = performance.get("visual_review_requests", 0) + 1
                     checkpoint["capture_available"] = True
                     images = opened.pop("image_content", [])
                     save("needs_review")
@@ -1077,10 +1140,11 @@ class WorkflowRunner:
                         # before another challenge can be captured.
                         recovered_ticket = None
                 if observation_review is not None:
+                    timed_phase("review_verification")
                     if not image_delivery_enabled: raise WorkflowError("이미지 전달이 연결되지 않아 시각 판정을 사용할 수 없습니다.")
                     source_index = record["checkpoint"].get("source_step_index", record["pending_step"])
                     try:
-                        latest = self.visual_reviews.verify(runtime, record, steps[source_index], resolve(steps[source_index]), observation_review)
+                        latest = self.visual_reviews.verify(runtime, record, review_item(source_index), resolve(steps[source_index]), observation_review)
                     except Exception as error:
                         code = getattr(error, "code", "invalid_visual_review")
                         if code in {"visual_review_expired", "review_observation_changed", "observation_expired"}:
@@ -1091,13 +1155,28 @@ class WorkflowRunner:
                                 save("needs_review")
                                 return {**record, "input_dispatched": False,
                                     "diagnostic": {"code": "visual_review_refresh_limit", "cause": code,
-                                                   "message": str(error), "automatic_replay": False},
-                                    "next_step": "같은 화면 확인이 반복 변경됩니다. 화면 상태를 안정화한 뒤 다시 확인하세요. 입력은 반복하지 않았습니다."}
-                            return capture_checkpoint(record["pending_step"], resolve(steps[source_index]),
+                                                   "message": str(error), "automatic_replay": False,
+                                                   **getattr(error, "review_diagnostic", {})},
+                                    "next_step": "같은 화면 확인의 반복 갱신을 중지했습니다. 동일 응답을 반복 제출하지 마세요. 실제 완료 조건 전체를 포함한 evidence_regions와 최신 observation_review_template을 사용하세요. 시계가 원인이라고 단정하지 않습니다."}
+                            refreshed = capture_checkpoint(record["pending_step"], resolve(steps[source_index]),
                                 source_index=source_index if source_index != record["pending_step"] else None)
+                            refreshed["refresh_diagnostic"] = {"code": code, **getattr(error, "review_diagnostic", {})}
+                            return refreshed
                         save("needs_review")
-                        return {**record, "input_dispatched": False,
-                            "diagnostic": {"code": code, "message": str(error), "automatic_replay": False},
+                        # Invalid identifiers are not a reason to create a new
+                        # image/TTL. Return the exact still-pending challenge.
+                        reuse = getattr(self.visual_reviews, "current_request", None)
+                        existing = None
+                        if callable(reuse):
+                            try:
+                                existing = reuse(runtime, record, review_item(source_index), resolve(steps[source_index]))
+                            except OperationError:
+                                pass
+                        existing = existing if isinstance(existing, dict) else {}
+                        images = existing.pop("image_content", [])
+                        return {**record, **existing, "observation_content": images, "input_dispatched": False,
+                            "diagnostic": {"code": code, "message": str(error), "automatic_replay": False,
+                                **getattr(error, "review_diagnostic", {})},
                             "next_step": "현재 확인 요청의 식별자와 근거를 수정해 같은 실행으로 이어가세요. 입력은 반복하지 않았습니다."}
                     if latest.get("task_verified") is not True:
                         save("needs_review")
@@ -1183,6 +1262,7 @@ class WorkflowRunner:
                     item = steps[index]
                     progress_event("running_step", index, item["operation"])
                     stage = "window_binding"
+                    timed_phase("window_binding")
                     target = resolve(item) if item["operation"] != "wait_for_window" else None
                     if target is not None:
                         progress_event("running_step", index, item["operation"], target)
@@ -1197,9 +1277,22 @@ class WorkflowRunner:
                     stage = "checkpoint_before_input"
                     save("running")
                     stage = "operation"
-                    if item["operation"] == "checkpoint" and item.get("review_mode") != "popup_image":
+                    timed_phase("operation")
+                    if item["operation"] == "checkpoint" and item.get("review_mode") not in {"popup_image", "deferred_visual"}:
                         stage = "screenshot_checkpoint"
                         return capture_checkpoint(index, target)
+                    if item.get("review_mode") == "deferred_visual":
+                        # Authored batch boundary. The result is NOT verified;
+                        # durable receipts remain pending until its final review.
+                        runtime.check_active()
+                        record["completed_steps"] = index + 1
+                        record["pending_step"] = None
+                        record.pop("step_delivery", None)
+                        save("running")
+                        if metrics is not None:
+                            metrics["batched_reviews"] = metrics.get("batched_reviews", 0) + 1
+                        performance["batched_reviews"] = performance.get("batched_reviews", 0) + 1
+                        continue
                     if item.get("review_mode") == "popup_image":
                         latest = execute_image_step(runtime, {"operation":"wait_for_image",
                             "image_target":item["image_target"], "timeout_ms":0}, target)
@@ -1327,5 +1420,6 @@ class WorkflowRunner:
                                  if type(getattr(error, key, None)) is int}
                 return {**record, "diagnostic": {"code": "interrupted", "automatic_replay": False,
                                                 "stage": stage, "error_type": type(error).__name__,
-                                                "cause": getattr(error, "code", None), **error_numbers},
+                                                "cause": getattr(error, "code", None), **error_numbers,
+                                                **getattr(error, "review_diagnostic", {})},
                         "next_step": "실행이 중단됐습니다. 이 run_id로 진행 기록을 확인하세요. 새 세션에서 현재 창을 다시 지정하면 마지막 확인 지점부터 검사할 수 있습니다. 미확인 입력은 자동 반복하지 않습니다."}

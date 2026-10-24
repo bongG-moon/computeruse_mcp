@@ -20,6 +20,18 @@ def data(*rects):
 
 
 class MsaaTests(unittest.TestCase):
+    def test_selection_appearance_is_internal_and_waits_for_valid_list_geometry(self):
+        d=data({'x':110,'y':60,'width':40,'height':40})
+        with mock.patch.object(msaa,'match_image',return_value={'status':'not_found'}) as matcher:
+            msaa.match_lists(SimpleNamespace(),image_target(),png(100,100),d)
+            self.assertFalse(matcher.call_args.kwargs['allow_selection_normalization'])
+            msaa.match_lists(SimpleNamespace(),image_target(),png(100,100),d,allow_selection_normalization=True)
+            self.assertTrue(matcher.call_args.kwargs['allow_selection_normalization'])
+            matcher.reset_mock()
+            with self.assertRaises(OperationError):
+                msaa.match_lists(SimpleNamespace(),image_target(),png(101,100),d,allow_selection_normalization=True)
+            matcher.assert_not_called()
+
     def test_native_hwnd_failure_is_distinct_from_provider_error_and_not_retried(self):
         for native_code,expected in [('target_handle_reused','msaa_target_changed'),
                 ('window_class_read_failed','msaa_native_probe_failed')]:

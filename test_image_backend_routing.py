@@ -24,6 +24,29 @@ class BackendRoutingTests(unittest.TestCase):
     def match(self, shot=None):
         return image_targets.match_image(self.runtime, self.target, shot or self.shot)
 
+    def test_selection_capability_is_private_explicit_and_part_of_cache_identity(self):
+        self.native.return_value = {"status":"not_found"}
+        def compare(*args, allow_selection_normalization, **kwargs):
+            return self.good if allow_selection_normalization else {"status":"not_found"}
+        self.air.side_effect = compare
+        self.assertEqual(self.match()["status"],"not_found")
+        self.assertEqual(image_targets.match_image(self.runtime,self.target,self.shot,
+            allow_selection_normalization=True)["status"],"matched")
+        last = self.match()
+        self.assertEqual(last["status"],"not_found")
+        self.assertTrue(last["search_reused"])
+        self.assertEqual(self.air.call_count,2)
+        self.assertEqual([call.kwargs['allow_selection_normalization'] for call in self.air.call_args_list],[False,True])
+        with self.assertRaises(OperationError):
+            image_targets.match_image(self.runtime,self.target,self.shot,allow_selection_normalization='true')
+
+    def test_appearance_rejection_is_preserved_as_bounded_diagnostic(self):
+        self.native.return_value = {"status":"not_found"}
+        self.air.return_value = {"status":"not_found","score":.85,"appearance_rejected":"foreground_ink_changed"}
+        result = self.match()
+        self.assertEqual(result['appearance_rejected'],'foreground_ink_changed')
+        self.assertEqual(result['score'],.85)
+
     def test_small_frame_also_prefers_measured_faster_native_and_reports_timing(self):
         result = self.match()
         self.assertEqual(result["backend"], "native-rgb")

@@ -647,7 +647,7 @@ class ProcessDraft:
         if index < 1: return
         check, action = proposed[index-1], proposed[index]
         if (check.get("operation") != "checkpoint" or check.get("review_mode") != "popup_image"
-                or check.get("review_origin") != "recording_generated"
+                or check.get("review_origin") not in {"recording_generated", "user_grouped"}
                 or (check.get("program_id"), check.get("window_ref", "main")) !=
                    (action.get("program_id"), action.get("window_ref", "main"))):
             return
@@ -669,12 +669,21 @@ class ProcessDraft:
         proposed, variables = copy.deepcopy(self.steps), copy.deepcopy(self.variables)
         step = proposed[index]
         operation = step["operation"]
+        if operation == "checkpoint" and any(k in payload for k in ("review_mode", "value")):
+            # An explicit edit restores individual checks for this whole batch;
+            # it must not leave dangling links or silently discard conditions.
+            end_id = step.get("review_after", step.get("step_id"))
+            for grouped in proposed:
+                if end_id is not None and grouped.get("review_mode") == "deferred_visual" and grouped.get("review_after") == end_id:
+                    grouped["review_mode"] = "visual"
+                    grouped.pop("review_after", None)
         if "review_mode" in payload:
             if operation != "checkpoint" or payload["review_mode"] not in {"human", "visual"}:
                 raise OperationError("사람 확인 또는 모델 판정을 선택하세요.")
             step["review_mode"] = payload["review_mode"]
             step["review_origin"] = "explicit"
             step.pop("image_target", None)
+            step.pop("review_after", None)
         if operation == "manual_entry":
             if set(payload) != {"index", "value"}: raise OperationError("먼저 확인되지 않은 입력 내용을 지정하세요.")
             return self.resolve_input(payload)
@@ -892,6 +901,10 @@ class ProcessDraft:
                                else check["selector"].get("name", check["selector"].get("automation_id", "요소")))
                 detail += " → 확인: " + str(check_label) + " = " + str(check["equals"])
             action_label = ACTION_LABELS.get(action, action)
+            if step.get("review_mode") == "deferred_visual":
+                final_index = next((i+1 for i, row in enumerate(self.steps) if row.get("step_id") == step.get("review_after")), "?")
+                action_label = "조건 묶음 확인 대기"
+                detail = f"{final_index}번째 확인에서 함께 검증 · " + detail
             editable_input = action in {"set_value", "set_checked", "select_option", "image_type_text", "checkpoint", "delay", "wait_for_element", "wait_for_image", "wait_for_state", "wait_for_window", "press_key", "image_press_key", "hotkey", "image_hotkey"} or len(step.get("expect", [])) == 1 or action == "manual_entry" and "image_target" in step and step.get("manual_reason") in {"unknown_input", "existing_text_requires_review"}
             if action == "manual_entry": detail = MANUAL_REASONS.get(step.get("manual_reason"), "이 단계의 대상과 동작을 지정하세요.") + " 초안으로 저장할 수 있으며, 보완 전에는 실행되지 않습니다."
             candidate = (action == "manual_entry" and step.get("manual_reason") == "unknown_input"

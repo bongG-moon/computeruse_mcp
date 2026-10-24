@@ -136,6 +136,9 @@ class PopupNativeContractTests(unittest.TestCase):
         user.SetThreadDpiAwarenessContext.return_value=0
         user.ScreenToClient.return_value=True
         user.ChildWindowFromPointEx.return_value=300
+        user.WindowFromPoint.return_value=300
+        user.SetCursorPos.return_value=True
+        user.PostMessageW.return_value=True
         user.IsWindowEnabled.return_value=True
         def thread(hwnd,pid):
             pid._obj.value=999 if foreign else TARGET['pid']
@@ -143,7 +146,8 @@ class PopupNativeContractTests(unittest.TestCase):
         user.GetWindowThreadProcessId.side_effect=thread
         user.SendMessageTimeoutW.return_value=0 if timeout else 1
         probe=mock.Mock()
-        probe.ownership_path.side_effect=[[300,200], [301,200] if replaced else [300,200]]
+        probe.ownership_path.side_effect=([ [300,200], [301,200] ] if replaced else None)
+        probe.ownership_path.return_value=[300,200]
         proof={'bounds':(0,0,100,100)}
         with mock.patch.object(popup,'_user',return_value=user), \
                 mock.patch.object(popup,'_binding',return_value=({},proof)), \

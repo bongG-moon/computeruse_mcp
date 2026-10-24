@@ -219,7 +219,34 @@ class TaskRevisions:
             for change in changes:
                 if not isinstance(change, dict): raise TaskRevisionError("변경 형식을 확인하세요.")
                 op = change.get("op")
-                if op == "set_step" and set(change) == {"op", "step_id", "fields"}:
+                if op == "group_reviews" and set(change) == {"op", "checkpoint_ids", "condition"}:
+                    from checkpoint_groups import group_reviews
+                    previous_steps = candidate["steps"]
+                    try:
+                        candidate["steps"] = group_reviews(candidate["steps"], change["checkpoint_ids"], change["condition"])
+                    except ValueError as error:
+                        raise TaskRevisionError(str(error)) from error
+                    legacy_ids = [s.get("step_id") for s in previous_steps
+                        if s.get("step_id") in change["checkpoint_ids"] and s.get("review_origin") is None]
+                    summaries.append({"change": "group_reviews", "checkpoint_ids": change["checkpoint_ids"],
+                        "input_steps_changed": False, "conditions_preserved": True,
+                        "legacy_origin_unspecified": legacy_ids})
+                elif op == "use_popup_image_conditions" and set(change) == {"op", "checkpoint_ids"}:
+                    from checkpoint_groups import use_popup_image_conditions
+                    previous_steps = candidate["steps"]
+                    try:
+                        candidate["steps"] = use_popup_image_conditions(previous_steps, change["checkpoint_ids"])
+                    except ValueError as error:
+                        raise TaskRevisionError(str(error)) from error
+                    selected = set(change["checkpoint_ids"])
+                    summaries.append({"change": "use_popup_image_conditions", "checkpoint_ids": change["checkpoint_ids"],
+                        "input_steps_changed": False, "saved_input_images_changed": False,
+                        "verification_scope": "declared_popup_and_unique_next_target", "business_result_verified": False,
+                        "original_reviews": [{"step_id": s["step_id"], "review_mode": s["review_mode"],
+                            "review_origin": s.get("review_origin"), "message": s["message"],
+                            "next_step_id": previous_steps[index+1].get("step_id")}
+                            for index, s in enumerate(previous_steps) if s.get("step_id") in selected]})
+                elif op == "set_step" and set(change) == {"op", "step_id", "fields"}:
                     fields = change["fields"]
                     if (not isinstance(fields, dict) or not fields or set(fields)-{"value", "checked", "selector", "edit_selector", "expect", "message", "duration_ms", "timeout_ms"}):
                         raise TaskRevisionError("단계의 입력값·선택 기준·완료 조건만 부분 수정할 수 있습니다. 이미지 대상은 편집창에서 지정하세요.")

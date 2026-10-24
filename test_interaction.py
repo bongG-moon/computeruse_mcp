@@ -137,6 +137,39 @@ class FacadeTests(unittest.TestCase):
         self.assertEqual(inspect.call_args.kwargs['observation'], 'visual')
         activate.assert_not_called()
 
+    def test_explicit_visual_main_observation_does_not_read_uia(self):
+        self.runtime.call = mock.Mock(side_effect=AssertionError('UIA must not be read'))
+        with mock.patch('interaction.prepare_image_foreground') as activate:
+            result = self.engine.observe(self.ref, observation='visual', image_delivery_enabled=True,
+                                         preserve_foreground=True)['structuredContent']
+        self.assertEqual(result['state'], 'observed')
+        self.assertEqual(result['inspection']['requested_observation'], 'visual')
+        self.assertIn('frame_id', result)
+        self.runtime.call.assert_not_called()
+        activate.assert_not_called()
+
+    def test_visual_request_does_not_bypass_text_client_capability(self):
+        self.runtime.capture_checkpoint = mock.Mock(side_effect=AssertionError('No image capability'))
+        result = self.engine.observe(self.ref, observation='visual', image_delivery_enabled=False)
+        self.assertNotIn('frame_id', result['structuredContent'])
+        self.assertFalse(any(item.get('type') == 'image' for item in result['content']))
+        self.runtime.capture_checkpoint.assert_not_called()
+
+    def test_both_keeps_uia_and_image_observation(self):
+        self.runtime.call = mock.Mock(wraps=self.runtime.call)
+        result = self.engine.observe(self.ref, observation='both', image_delivery_enabled=True,
+                                     preserve_foreground=True)['structuredContent']
+        self.runtime.call.assert_called_once()
+        self.assertEqual(result['inspection']['requested_observation'], 'both')
+        self.assertIn('frame_id', result)
+
+    def test_invalid_observation_rejected_before_capture(self):
+        with mock.patch.object(self.runtime, 'capture_checkpoint') as capture:
+            for value in ('unknown', None, []):
+                with self.subTest(value=value), self.assertRaises(OperationError):
+                    self.engine.observe(self.ref, observation=value, image_delivery_enabled=True)
+        capture.assert_not_called()
+
     def mutations(self):
         return [call for call in self.transport.calls if call['name'] != 'get_window_state']
 

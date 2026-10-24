@@ -294,20 +294,22 @@ def _backend_fingerprint(helper):
     return "|".join(parts)
 
 
-def match_image(runtime, image_target, screenshot_png):
+def match_image(runtime, image_target, screenshot_png, *, allow_selection_normalization=False):
     """Select a bundled local matcher; preserve ambiguity and input safeguards.
 
     Production measurements include isolated-worker startup, so the native
     matcher remains first for every frame. Airtest is a bounded fallback for a
     genuinely absent target. Both only read supplied PNGs.
     """
+    if type(allow_selection_normalization) is not bool:
+        raise OperationError("Invalid private selection appearance capability", "image_match_invalid")
     target = validate_image_target(image_target)
     width, height = png_dimensions(screenshot_png)
     runtime.check_active()
     helper = Path(__file__).resolve().with_name(HELPER_NAME)
     fingerprint = _backend_fingerprint(helper)
     key = hashlib.sha256((json.dumps(target, sort_keys=True, separators=(",", ":"))+"\0"+screenshot_png
-                          +"\0"+fingerprint).encode("utf-8")).hexdigest()
+                          +"\0"+fingerprint+"\0selection="+str(allow_selection_normalization)).encode("utf-8")).hexdigest()
     cache = getattr(runtime, "_image_match_cache", {})
     if isinstance(cache, dict) and key in cache:
         runtime.check_active()
@@ -334,7 +336,8 @@ def match_image(runtime, image_target, screenshot_png):
             if not present:
                 continue
             try:
-                answer = airtest_backend.match_isolated(runtime, target, screenshot_png, deadline=deadline, check_active=active)
+                answer = airtest_backend.match_isolated(runtime, target, screenshot_png, deadline=deadline,
+                    check_active=active, allow_selection_normalization=allow_selection_normalization)
                 candidate = validate_match(answer, target, screenshot_png)
             except _BackendCheckAborted as error:
                 raise error.cause
@@ -354,6 +357,11 @@ def match_image(runtime, image_target, screenshot_png):
         if answer.get("appearance_verified") is True:
             validated["appearance_verified"] = True
             validated["original_score"] = answer.get("original_score")
+        if answer.get("appearance_rejected") in {"foreground_ink_changed"}:
+            validated["appearance_rejected"] = answer["appearance_rejected"]
+            appearance_score = answer.get("appearance_score")
+            if type(appearance_score) in (int, float) and 0 <= appearance_score <= 1:
+                validated["appearance_score"] = appearance_score
         # Uniqueness and detail rejection are final, never a reason to try a
         # more permissive engine. Only a genuinely absent target may fall back.
         if candidate["status"] != "not_found" or candidate.get("low_detail"):

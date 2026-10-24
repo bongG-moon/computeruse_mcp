@@ -29,6 +29,13 @@ def _same_pixels(left, right):
     return left == right or pixel_digest(left) == pixel_digest(right)
 
 
+def _review_error(message, reason, **details):
+    error = OperationError(message, 'review_observation_changed')
+    error.review_diagnostic = {'reason': reason, 'automatic_replay': False,
+                               'input_dispatched': False, **details}
+    return error
+
+
 def _identity(state, window_id):
     if (not isinstance(state, dict) or state.get('process_exited') is not False
             or state.get('target_present') is not True or type(state.get('creation_time')) is not int
@@ -102,11 +109,14 @@ class InteractionEngine:
         target = self.target(window_ref)
         if type(image_delivery_enabled) is not bool or type(preserve_foreground) is not bool:
             raise OperationError('이미지 전달 프로필을 확인하세요.', 'invalid_image_profile')
+        if not isinstance(observation, str) or observation not in {'auto', 'uia', 'visual', 'both'}:
+            raise OperationError('observation은 auto, uia, visual, both 중 하나여야 합니다.', 'invalid_observation')
         # Text clients keep all local image recording/replay facilities. This
         # facade does not silently send screenshots to a text-only connection.
         wants_image = image_delivery_enabled and observation != 'uia'
         from transient_popup import proven_popup
         popup_visual = wants_image and proven_popup(target)
+        capture_only = wants_image and (popup_visual or observation == 'visual')
         focus = None
         if wants_image and not preserve_foreground and not popup_visual:
             focus = prepare_image_foreground(self.runtime, target)
@@ -115,7 +125,7 @@ class InteractionEngine:
         geometry = validate_geometry(self.runtime.guard.image_geometry_resolver(target['window_id'])) if wants_image else None
         answer = inspect_window(self.runtime, target, max_controls=max_controls, max_depth=max_depth,
             max_elements=max_elements, search=search, within=within,
-            observation='visual' if popup_visual else 'both' if wants_image else 'uia',
+            observation='visual' if capture_only else 'both' if wants_image else 'uia',
             requested_goal=goal)
         if answer.get('isError'):
             return answer
@@ -387,19 +397,39 @@ class InteractionEngine:
                 raise OperationError('완료를 확인한 이미지 영역은 1~8개로 지정하세요.')
             evidence_regions = [validate_region(region, **frame['image_size']) for region in evidence_regions]
         if self.runtime.guard.image_geometry_resolver(target['window_id']) != frame['geometry']:
-            raise OperationError('확인할 화면의 위치가 바뀌었습니다. 다시 관찰하세요.', 'review_observation_changed')
+            raise _review_error('확인할 화면의 위치나 배율이 바뀌었습니다. 다시 관찰하세요.', 'geometry_changed')
+        capture_started = self.clock()
         fresh = self.runtime.capture_checkpoint(target)
+        capture_ms = round(max(0, self.clock()-capture_started)*1000, 2)
         images = [item for item in fresh.get('content', []) if item.get('type') == 'image']
         self.target(window_ref)
-        usable = (not fresh.get('isError') and len(images) == 1 and images[0].get('mimeType') == 'image/png'
-                  and png_dimensions(images[0].get('data')) == tuple(frame['image_size'][key] for key in ('width', 'height')))
-        if usable:
-            usable = (all(_same_pixels(before, after) for before, after in
-                          zip(crop_regions(frame['png'], evidence_regions, runtime=self.runtime),
-                              crop_regions(images[0]['data'], evidence_regions, runtime=self.runtime)))
-                      if evidence_regions else _same_pixels(frame['png'], images[0]['data']))
-        if not usable:
-            raise OperationError('확인 중 화면 내용이 바뀌었습니다. 새 관찰로 결과만 다시 확인하세요.', 'review_observation_changed')
+        if self.runtime.guard.image_geometry_resolver(target['window_id']) != frame['geometry']:
+            raise _review_error('결과 확인 캡처 중 창 위치나 배율이 바뀌었습니다.', 'capture_geometry_changed', capture_ms=capture_ms)
+        if fresh.get('isError'):
+            source = fresh.get('structuredContent', {})
+            cause = source.get('error_code') or source.get('code') or source.get('diagnostic_code')
+            raise _review_error('결과 확인 캡처가 거부되거나 실패했습니다. 입력을 반복하지 마세요.',
+                                'capture_failed', capture_cause=cause, capture_ms=capture_ms)
+        if len(images) != 1 or images[0].get('mimeType') != 'image/png':
+            raise _review_error('결과 확인에서 현재 창의 PNG 한 장을 받지 못했습니다.',
+                                'capture_image_invalid', capture_ms=capture_ms)
+        if png_dimensions(images[0].get('data')) != tuple(frame['image_size'][key] for key in ('width', 'height')):
+            raise _review_error('결과 확인 이미지 크기가 처음 관찰과 다릅니다.',
+                                'image_size_changed', capture_ms=capture_ms)
+        compare_started = self.clock()
+        comparisons = ([_same_pixels(before, after) for before, after in
+                       zip(crop_regions(frame['png'], evidence_regions, runtime=self.runtime),
+                           crop_regions(images[0]['data'], evidence_regions, runtime=self.runtime))]
+                       if evidence_regions else [_same_pixels(frame['png'], images[0]['data'])])
+        comparison_ms = round(max(0, self.clock()-compare_started)*1000, 2)
+        if not all(comparisons):
+            raise _review_error('완료 판정에 사용한 영역이 바뀌었습니다. 새 관찰로 결과만 다시 확인하세요.'
+                                if evidence_regions else
+                                '전체 화면 픽셀이 바뀌었습니다. 원인은 확정되지 않았습니다. 새 관찰에서 완료 조건과 구별 문맥을 모두 포함한 evidence_regions를 지정할 수 있습니다.',
+                                'evidence_regions_changed' if evidence_regions else 'full_frame_changed',
+                                comparison_scope='evidence_regions' if evidence_regions else 'full_frame',
+                                changed_region_indices=[i for i, equal in enumerate(comparisons) if not equal] if evidence_regions else [],
+                                capture_ms=capture_ms, comparison_ms=comparison_ms)
         action['reviewed'] = True
         observation['consumed'] = True
         prior = copy.deepcopy(action['result'])
@@ -414,4 +444,6 @@ class InteractionEngine:
             'review': {'verdict': verdict, 'evidence': evidence, 'expected_condition': action['condition'],
                 'observation_id': observation_id, 'frame_id': frame_id, 'evidence_regions': evidence_regions,
                 'assessor': 'connected_client_model'},
+            'review_metrics': {'capture_ms': capture_ms, 'comparison_ms': comparison_ms,
+                               'comparison_scope': 'evidence_regions' if evidence_regions else 'full_frame'},
             'input_replayed': False, 'review_input_dispatched': False, 'automatic_replay': False}

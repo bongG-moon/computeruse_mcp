@@ -18,7 +18,7 @@ def validate_process_step(step):
     operation = step["operation"]
     allowed = {"operation"} | ({"duration_ms"} if operation == "delay" else
         {"selector", "timeout_ms", "poll_interval_ms"} if operation == "wait_for_element" else
-        {"expect", "timeout_ms", "poll_interval_ms"} if operation == "wait_for_state" else {"message", "return_from", "opened_from", "review_mode", "review_origin", "image_target"})
+        {"expect", "timeout_ms", "poll_interval_ms"} if operation == "wait_for_state" else {"message", "return_from", "opened_from", "review_mode", "review_origin", "image_target", "review_after"})
     if set(step) - allowed:
         raise OperationError("이 프로세스 단계에 지원하지 않는 설정이 있습니다.")
     if operation == "delay":
@@ -35,17 +35,24 @@ def validate_process_step(step):
         if type(interval) is not int or not 100 <= interval <= 2000:
             raise OperationError("요소 확인 간격 poll_interval_ms는 100~2000ms로 지정하세요.")
     else:
-        if step.get("review_origin", "explicit") not in {"explicit", "recording_generated"}:
+        if step.get("review_origin", "explicit") not in {"explicit", "recording_generated", "user_grouped"}:
             raise OperationError("확인 단계의 생성 경로가 올바르지 않습니다.")
-        if step.get("review_mode", "human") not in {"human", "visual", "popup_image"}:
+        if step.get("review_mode", "human") not in {"human", "visual", "popup_image", "deferred_visual"}:
             raise OperationError("화면 확인 방식은 human 또는 visual로 지정하세요.")
         if step.get("review_mode") == "popup_image":
             from image_targets import validate_image_target
-            if step.get("review_origin") != "recording_generated" or not step.get("opened_from"):
+            if step.get("review_origin") not in {"recording_generated", "user_grouped"} or not step.get("opened_from"):
                 raise OperationError("자동 팝업 확인은 녹화에서 생성한 열림 확인에만 사용할 수 있습니다.")
             validate_image_target(step.get("image_target"))
         elif "image_target" in step:
             raise OperationError("이미지 조건은 자동 팝업 확인에만 지정하세요.")
+        if step.get("review_mode") == "deferred_visual":
+            from task_inputs import STEP_ID
+            if (step.get("review_origin") not in {"recording_generated", "user_grouped"} or step.get("opened_from")
+                    or not isinstance(step.get("review_after"), str) or not STEP_ID.fullmatch(step["review_after"])):
+                raise OperationError("묶음 확인에는 녹화 확인과 마지막 확인 단계 ID가 필요합니다.")
+        elif "review_after" in step:
+            raise OperationError("review_after는 명시적으로 묶은 확인에만 사용할 수 있습니다.")
         if "return_from" in step and "opened_from" in step:
             raise OperationError("화면 확인은 팝업 열기와 원래 창 복귀 중 하나만 지정하세요.")
         for key in ("return_from", "opened_from"):
@@ -102,7 +109,7 @@ def execute_process_step(runtime, step, target):
         runtime.check_active()
         return result(True, "delay_completed", "지정한 고정 대기를 완료했습니다. 화면 변경을 확인한 것은 아닙니다.")
     if operation == "checkpoint":
-        if step.get("review_mode") == "visual":
+        if step.get("review_mode") in {"visual", "deferred_visual"}:
             return result(False, "visual_review_requires_workflow", "모델 시각 확인은 실행·단계·화면이 연결된 저장 작업에서만 진행하세요.")
         report("observing")
         capture = getattr(runtime, "capture_checkpoint", None)

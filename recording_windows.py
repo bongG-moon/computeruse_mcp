@@ -139,14 +139,15 @@ def _disambiguate_windows(runtime, probe, owner, candidates, image_hint):
         runtime.check_active()
         if time.monotonic() - started > 15:
             return None
-        from transient_popup import register_popup
+        from transient_popup import register_popup, proven_popup
         candidate_target = {key: row[key] for key in ("pid", "window_id")}
         register_popup(candidate_target, owner)
         capture = runtime.capture_checkpoint(candidate_target)
         images = [item for item in capture.get("content", []) if item.get("type") == "image"]
         if capture.get("isError") or len(images) != 1 or images[0].get("mimeType") != "image/png":
             return None
-        compared = match_image(runtime, image_hint, images[0]["data"])
+        compared = match_image(runtime, image_hint, images[0]["data"],
+            allow_selection_normalization=proven_popup(candidate_target))
         if compared.get("status") not in {"matched", "not_found"} or type(compared.get("score")) not in (int, float):
             return None
         scores.append((row, compared["score"]))

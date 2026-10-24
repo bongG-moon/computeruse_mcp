@@ -122,7 +122,9 @@ def regions(data, size):
     return found
 
 
-def match_lists(runtime, image, png, data):
+def match_lists(runtime, image, png, data, *, allow_selection_normalization=False):
+    if type(allow_selection_normalization) is not bool:
+        raise OperationError('Invalid private selection appearance capability', 'msaa_invalid_response')
     size=png_dimensions(png)
     deadline=time.monotonic()+3
     class Budget:
@@ -141,7 +143,7 @@ def match_lists(runtime, image, png, data):
         # The old popup capture dimensions describe the dropdown, not its new
         # hosting parent. Keep all pixels/thresholds; don't scale to parent size.
         cropped=crop_png(png,rect,runtime=runtime)
-        answer=match_image(bounded,image,cropped)
+        answer=match_image(bounded,image,cropped,allow_selection_normalization=allow_selection_normalization)
         if answer.get('status')=='ambiguous': ambiguous=True
         if answer.get('status')!='matched': continue
         answer=copy.deepcopy(answer)
@@ -178,7 +180,7 @@ def recover(runtime, owner, rows, image, probe):
         images=[x['data'] for x in capture.get('content',[]) if x.get('type')=='image']
         if capture.get('isError') or len(images)!=1:
             raise OperationError('MSAA 목록의 현재 화면을 확인하지 못했습니다.', 'msaa_capture_failed')
-        matched=match_lists(runtime,image,images[0],data)
+        matched=match_lists(runtime,image,images[0],data,allow_selection_normalization=True)
         if matched['status']=='ambiguous':
             raise OperationError('기존 녹화 이미지에 맞는 목록이 여러 개입니다.', 'recording_window_ambiguous')
         if matched['status']=='matched': matches.append(target)

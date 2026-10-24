@@ -844,6 +844,39 @@ def action_delivery_failed(result):
     return False
 
 
+def native_delivery_evidence(source):
+    """Small typed receipt; no image or arbitrary application text enters logs."""
+    if not isinstance(source, dict) or source.get("backend") != "owned-popup-messages":
+        return {}
+    evidence = {"backend": "owned-popup-messages"}
+    if isinstance(source.get("capture_backend"), str) and source["capture_backend"] in {"owned-popup-printwindow", "cua-driver"}:
+        evidence["capture_backend"] = source["capture_backend"]
+    if "input_sent" in source and (source["input_sent"] is None or type(source["input_sent"]) is bool):
+        evidence["input_sent"] = source["input_sent"]
+    for key, choices in {"delivery_phase": {"preflight", "pointer", "move", "down", "up"},
+                         "release_delivery": {"not_queued", "queued_once"}}.items():
+        if isinstance(source.get(key), str) and source[key] in choices: evidence[key] = source[key]
+    point = source.get("point_evidence")
+    if isinstance(point, dict):
+        clean = {}
+        for key in ("capture_point", "screen_point", "client_point"):
+            value = point.get(key)
+            if (isinstance(value, dict) and set(value) == {"x", "y"}
+                    and all(type(v) is int and -(2**31) <= v < 2**31 for v in value.values())):
+                clean[key] = dict(value)
+        size = point.get("capture_size")
+        if (isinstance(size, dict) and set(size) == {"width", "height"}
+                and all(type(v) is int and 0 < v <= 4096 for v in size.values())):
+            clean["capture_size"] = dict(size)
+        if type(point.get("child_window_id")) is int and 0 < point["child_window_id"] < 2**64:
+            clean["child_window_id"] = point["child_window_id"]
+        if point.get("coordinate_space") == "physical_pixels": clean["coordinate_space"] = "physical_pixels"
+        for key in ("pointer_aligned", "driver_resize_applied"):
+            if type(point.get(key)) is bool: clean[key] = point[key]
+        evidence["point_evidence"] = clean
+    return evidence
+
+
 def result_summary(result):
     """Bounded, image-free evidence; driver execution is not task verification."""
     text = driver_evidence_text(result)
@@ -851,6 +884,8 @@ def result_summary(result):
                "image_count": sum(c.get("type") == "image" for c in result.get("content", []) if isinstance(c, dict))}
     structured = result.get("structuredContent", {})
     if isinstance(structured, dict):
+        receipt = native_delivery_evidence(structured)
+        if receipt: summary["native_delivery"] = receipt
         for key in ("effect", "verified", "verification", "status", "outcome", "delivery_mode", "backend", "route"):
             if key in structured:
                 value = redact_images(structured[key])
@@ -909,6 +944,8 @@ def metadata_event(kind, fields):
         source = fields["summary"]
         summary = {"task_verified": False, "content_omitted": True}
         if isinstance(source, dict):
+            receipt = native_delivery_evidence(source.get("native_delivery"))
+            if receipt: summary["native_delivery"] = receipt
             for key in ("image_count", "verified"):
                 if type(source.get(key)) in (bool, int):
                     summary[key] = source[key]
@@ -996,6 +1033,8 @@ def input_failure_evidence(result):
                 'message': scalar(driver_evidence_text(result)), 'automatic_retry': False}
     for source in sources:
         if not isinstance(source, dict): continue
+        receipt = native_delivery_evidence(source)
+        if receipt: evidence["native_delivery"] = receipt
         for key in ('code', 'error_code', 'input_sent', 'status', 'effect', 'reason', 'backend', 'route', 'delivery_mode', 'success'):
             if key in source and type(source[key]) in (str, bool, int, float, type(None)):
                 evidence[key] = scalar(source[key])
@@ -1604,6 +1643,7 @@ class Guard:
         focus_diagnostic = None
         capture_size = None
         input_backend = "cua-driver"
+        native_delivery = None
         point = None
         self.observed_targets.clear()
         def result(code, message, *, verified=False, deferred=False):
@@ -1611,6 +1651,7 @@ class Guard:
                     "task_verified": verified, "input_dispatched": may_have_dispatched,
                     "verification_deferred": deferred,
                     "input_backend": input_backend,
+                    **({"native_delivery": copy.deepcopy(native_delivery)} if native_delivery else {}),
                     "diagnostic": {"code": code, "message": message, "automatic_replay": False,
                         **({"image_match": copy.deepcopy(match_diagnostic)} if match_diagnostic else {}),
                         **({"driver_failure": copy.deepcopy(driver_failure)} if driver_failure else {}),
@@ -1684,6 +1725,7 @@ class Guard:
                 png = images[0].get("data")
                 width, height = png_dimensions(png)
                 capture_size = (width, height)
+                visual._popup_capture_size = capture_size
                 metadata = answer.get("structuredContent", {})
                 if (any(metadata.get(k) != v for k, v in target.items())
                         or metadata.get("screenshot_width") != width or metadata.get("screenshot_height") != height):
@@ -1725,7 +1767,7 @@ class Guard:
                 return result("image_appeared", "현재 창에서 저장한 이미지를 하나로 확인했습니다.", verified=True)
             operation = step["operation"][6:]
             def dispatch(name, args, *, require_same_window_after=True):
-                nonlocal may_have_dispatched, driver_failure, input_backend
+                nonlocal may_have_dispatched, driver_failure, input_backend, native_delivery
                 ready()
                 previously_dispatched = may_have_dispatched
                 dispatch_count = visual.action_count
@@ -1745,6 +1787,8 @@ class Guard:
                 sources = [row for row in sources if isinstance(row, dict)]
                 if any(row.get("backend") == "owned-popup-messages" for row in sources):
                     input_backend = "owned-popup-messages"
+                    native_delivery = next((native_delivery_evidence(row) for row in sources
+                        if native_delivery_evidence(row)), None)
                 # A count is an attempted call, not proof of delivered input.
                 # Only explicit, non-contradictory Driver non-delivery can
                 # restore the earlier state. Never clear an earlier focus click.
@@ -1811,6 +1855,10 @@ class Guard:
 
     def call(self, name, arguments, *, timeout_seconds=None):
         started = time.monotonic()
+        if name == "get_window_state":
+            # An attempted observation invalidates the old capture, even if
+            # validation, approval or the new capture subsequently fails.
+            self._native_popup_frame = None
         deadline = started + timeout_seconds if timeout_seconds is not None else None
         call_id = uuid.uuid4().hex
         safe_arguments = arguments if isinstance(arguments, dict) else {}
@@ -1874,8 +1922,39 @@ class Guard:
                         driver_args["keys"] = [*args["modifiers"], args["key"]]
                         driver_args = validate_arguments(driver_name, driver_args, self.policy, self.process_resolver, self.window_resolver)
                         target_evidence["driver_tool"] = driver_name
+                    native_frame = getattr(self, "_native_popup_frame", None)
+                    native_route = (name == "click" and getattr(self, "_popup_image_click", False)
+                        and native_frame is not None and native_frame[:2] == target_key)
                     request = {"name": driver_name, "arguments": driver_args}
-                    if timeout_seconds is not None and isinstance(self.transport, DriverTransport):
+                    if native_route:
+                        from transient_popup import click as click_popup, popup_proof
+                        try:
+                            check = self._popup_check_active
+                            check()
+                            if self.image_geometry_resolver(args["window_id"]) != native_frame[2]:
+                                raise GuardError("Native popup geometry changed; reobserve before input.")
+                            self._popup_revalidate_image()
+                            check()
+                            if getattr(self, "_native_popup_frame", None) != native_frame:
+                                raise GuardError("Native popup capture binding changed; no input sent.")
+                            current_proof = popup_proof({key: args[key] for key in ("pid", "window_id")})
+                            current_proof.pop("foreground", None)
+                            if current_proof != native_frame[3]:
+                                raise GuardError("Native popup lifetime changed; no input sent.")
+                            if deadline is not None and time.monotonic() >= deadline:
+                                raise RequestDeadlineExceeded("단계 시간이 지나 네이티브 입력을 전달하지 않았습니다.")
+                            raw = click_popup({key: args[key] for key in ("pid", "window_id")},
+                                {key: args[key] for key in ("x", "y")}, native_frame[2], check)
+                            raw.setdefault("structuredContent", {})["capture_backend"] = "owned-popup-printwindow"
+                        except (RuntimeError, OSError, ValueError) as error:
+                            # Native input reports its own uncertain delivery.
+                            # Exceptions from its preflight prove no click was sent.
+                            raw = {"isError": True, "structuredContent": {
+                                "backend": "owned-popup-messages", "input_sent": False,
+                                "task_verified": False, "delivery_phase": "preflight",
+                                "release_delivery": "not_queued", "automatic_retry": False,
+                                "code": getattr(error, "code", "popup_preflight_failed"), "message": str(error)}}
+                    elif timeout_seconds is not None and isinstance(self.transport, DriverTransport):
                         configured = self.policy.get("observation_timeout_seconds", 20) if name in OBSERVATIONS else self.policy.get("request_timeout_seconds", 90)
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
@@ -1890,6 +1969,7 @@ class Guard:
                     if name not in OBSERVATIONS:
                         # Once dispatched, even an error may have changed the UI.
                         self.observed_targets.discard(target_key)
+                        self._native_popup_frame = None
                 if name in OBSERVATIONS and not raw.get('isError') and self.policy.get('hosted_windows'):
                     # Suppress pixels/tree if the package inside a shared frame
                     # was replaced while the Driver performed its read.
@@ -1898,12 +1978,21 @@ class Guard:
                 if exact_missing(raw, args.get("window_id")):
                     if name == "get_window_state" and self.policy["mode"] == "visual":
                         try:
+                            from transient_popup import popup_proof
+                            popup_geometry = self.image_geometry_resolver(args["window_id"])
                             raw = capture_popup({key: args[key] for key in ("pid", "window_id")},
-                                                self.image_geometry_resolver(args["window_id"]))
+                                                popup_geometry)
+                            if (not raw.get("isError") and raw.get("structuredContent", {}).get("backend")
+                                    == "owned-popup-printwindow"):
+                                proof = popup_proof({key: args[key] for key in ("pid", "window_id")})
+                                proof.pop("foreground", None)
+                                self._native_popup_frame = (*target_key, popup_geometry, proof)
                         except (RuntimeError, OSError, ValueError) as error:
                             self.log("popup_capture_unavailable", request_id=call_id, tool=name,
                                      summary=str(error), success=False,
                                      diagnostic_code=getattr(error, "code", "popup_capture_failed"))
+                            raw = {"isError": True, "structuredContent": {"input_sent": False,
+                                "code": getattr(error, "code", "popup_capture_failed"), "message": str(error)}}
                     elif name == "click" and getattr(self, "_popup_image_click", False):
                         check = self._popup_check_active
                         try:
@@ -1911,6 +2000,9 @@ class Guard:
                             args = validate_arguments(name, args, self.policy, self.process_resolver, self.window_resolver)
                             self._popup_revalidate_image()
                             check()
+                            geometry = self.image_geometry_resolver(args["window_id"])
+                            if getattr(self, "_popup_capture_size", None) != (geometry[2]-geometry[0], geometry[3]-geometry[1]):
+                                raise GuardError("Native popup fallback requires physical pixel capture; no input sent.")
                         except (GuardError, OSError, ValueError, RuntimeError) as error:
                             # The exact Driver refusal proved no first input;
                             # the fallback has not been called either.
@@ -1918,9 +2010,25 @@ class Guard:
                                 "code": getattr(error, "code", "popup_preflight_failed"),
                                 "message": str(error), "automatic_retry": False}}
                         else:
-                            raw = click_popup({key: args[key] for key in ("pid", "window_id")},
-                                              {key: args[key] for key in ("x", "y")},
-                                              self.image_geometry_resolver(args["window_id"]), check)
+                            try:
+                                raw = click_popup({key: args[key] for key in ("pid", "window_id")},
+                                                  {key: args[key] for key in ("x", "y")}, geometry, check)
+                                raw.setdefault("structuredContent", {})["capture_backend"] = (
+                                    "owned-popup-printwindow" if getattr(self, "_native_popup_frame", None) else "cua-driver")
+                            except (RuntimeError, OSError, ValueError) as error:
+                                raw = {"isError": True, "structuredContent": {
+                                    "backend": "owned-popup-messages", "input_sent": False,
+                                    "task_verified": False, "delivery_phase": "preflight",
+                                    "release_delivery": "not_queued", "automatic_retry": False,
+                                    "code": getattr(error, "code", "popup_preflight_failed"), "message": str(error)}}
+                            finally:
+                                self.observed_targets.discard(target_key)
+                                self._native_popup_frame = None
+                if name not in OBSERVATIONS:
+                    # Fallback revalidation itself observes; that observation
+                    # also belongs to this single input attempt and is consumed.
+                    self.observed_targets.discard(target_key)
+                    self._native_popup_frame = None
                 result = action_guidance(filter_result(name, raw, self.policy, self.process_resolver), name)
                 result = observation_guidance(result, name, args, self.policy["mode"])
                 if name == "get_window_state" and not result.get("isError"):

@@ -102,6 +102,180 @@ class WorkflowVisualReviewTests(unittest.TestCase):
             self.open()
         activate.assert_not_called()
 
+    def test_declared_popup_return_reobserves_transient_ambiguity_without_input(self):
+        self.step['return_from'] = 'export-child'
+        with mock.patch.object(popup, 'current_popup', side_effect=[
+                OperationError('Menus are still closing', 'popup_observation_ambiguous'), None]) as probe, \
+                mock.patch('visual_review.time.sleep') as sleep, \
+                mock.patch.object(self.runtime, 'capture_checkpoint', wraps=self.runtime.capture_checkpoint) as capture:
+            opened = self.open()
+        self.assertEqual(probe.call_count, 2)
+        self.assertEqual(capture.call_count, 1)
+        self.assertEqual(sleep.call_count, 1)
+        transition = opened['review_metrics']['transition_observation']
+        self.assertEqual(transition['attempts'], 2)
+        self.assertEqual(transition['last_reason'], 'popup_observation_ambiguous')
+        self.assertFalse(transition['individual_native_timeout_enforced'])
+        self.assertFalse(opened['task_verified'])
+        self.assertEqual(self.mutations(), [])
+
+    def test_persistent_return_ambiguity_stops_after_three_probes(self):
+        self.step['return_from'] = 'export-child'
+        with mock.patch.object(popup, 'current_popup', side_effect=OperationError(
+                'Multiple menus remain', 'popup_observation_ambiguous')) as probe, \
+                mock.patch('visual_review.time.sleep'), mock.patch.object(self.runtime, 'capture_checkpoint') as capture:
+            with self.assertRaises(OperationError) as error:
+                self.open()
+        self.assertEqual(probe.call_count, 3)
+        capture.assert_not_called()
+        self.assertEqual(error.exception.code, 'popup_observation_ambiguous')
+        self.assertEqual(error.exception.review_diagnostic['transition_observation']['attempts'], 3)
+        self.assertEqual(self.mutations(), [])
+
+    def test_generic_main_checkpoint_does_not_retry_ambiguity(self):
+        with mock.patch.object(popup, 'current_popup', side_effect=OperationError(
+                'Multiple menus', 'popup_observation_ambiguous')) as probe, mock.patch('visual_review.time.sleep') as sleep:
+            with self.assertRaises(OperationError): self.open()
+        self.assertEqual(probe.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_return_does_not_retry_owner_or_identity_error(self):
+        self.step['return_from'] = 'export-child'
+        with mock.patch.object(popup, 'current_popup', side_effect=OperationError(
+                'Owner changed', 'popup_owner_changed')) as probe, mock.patch('visual_review.time.sleep') as sleep:
+            with self.assertRaises(OperationError) as error: self.open()
+        self.assertEqual(error.exception.code, 'popup_owner_changed')
+        self.assertEqual(probe.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_return_stop_check_prevents_next_probe(self):
+        self.step['return_from'] = 'export-child'
+        def ambiguous(*args):
+            self.runtime.check_active = mock.Mock(side_effect=OperationError('Stopped', 'stopped'))
+            raise OperationError('Multiple menus', 'popup_observation_ambiguous')
+        with mock.patch.object(popup, 'current_popup', side_effect=ambiguous) as probe, \
+                mock.patch('visual_review.time.sleep') as sleep:
+            with self.assertRaises(OperationError) as error: self.open()
+        self.assertEqual(error.exception.code, 'stopped')
+        self.assertEqual(probe.call_count, 1)
+        sleep.assert_not_called()
+        self.assertEqual(self.mutations(), [])
+
+    def test_slow_native_probe_exhausts_budget_without_new_probe(self):
+        self.step['return_from'] = 'export-child'
+        with mock.patch.object(popup, 'current_popup', side_effect=OperationError(
+                'Multiple menus', 'popup_observation_ambiguous')) as probe, \
+                mock.patch('visual_review.time.monotonic', side_effect=[0, 1.2, 1.2]), \
+                mock.patch('visual_review.time.sleep') as sleep:
+            with self.assertRaises(OperationError) as error: self.open()
+        self.assertEqual(probe.call_count, 1)
+        self.assertEqual(error.exception.review_diagnostic['transition_observation']['elapsed_ms'], 1200)
+        sleep.assert_not_called()
+
+    def test_main_visual_checkpoint_and_recheck_never_read_uia(self):
+        self.runtime.call = mock.Mock(side_effect=AssertionError('UIA is unresponsive'))
+        with mock.patch.object(self.runtime, 'capture_checkpoint', wraps=self.runtime.capture_checkpoint) as capture:
+            opened = self.open()
+            result = self.verify(self.submission(opened))
+        self.runtime.call.assert_not_called()
+        self.assertEqual(capture.call_count, 2)
+        self.assertTrue(result['task_verified'])
+        self.assertEqual(result['review_metrics']['comparison_scope'], 'full_frame')
+
+    def test_capture_refusal_never_falls_back_or_passes(self):
+        self.runtime.call = mock.Mock(side_effect=AssertionError('UIA must not be a fallback'))
+        self.runtime.capture_checkpoint = mock.Mock(return_value={
+            'isError': True, 'structuredContent': {'error_code': 'checkpoint_requires_foreground'}, 'content': []})
+        with self.assertRaises(OperationError) as error:
+            self.open()
+        self.assertEqual(error.exception.code, 'visual_review_capture_failed')
+        self.assertEqual(error.exception.review_diagnostic['reason'], 'capture_failed')
+        self.runtime.call.assert_not_called()
+        self.assertEqual(self.mutations(), [])
+
+    def test_recheck_capture_refusal_retains_pending_challenge(self):
+        opened = self.open()
+        self.runtime.capture_checkpoint = mock.Mock(return_value={
+            'isError': True, 'structuredContent': {'error_code': 'checkpoint_requires_foreground'}, 'content': []})
+        with self.assertRaises(OperationError) as error:
+            self.verify(self.submission(opened))
+        self.assertEqual(error.exception.review_diagnostic['reason'], 'capture_failed')
+        self.assertEqual(error.exception.review_diagnostic['capture_cause'], 'checkpoint_requires_foreground')
+        self.assertIn(opened['visual_review']['review_id'], self.manager.jobs)
+        self.assertEqual(self.mutations(), [])
+
+    def test_current_request_reissues_exact_ids_without_capture_or_ttl_extension(self):
+        opened = self.open()
+        original_expires = self.manager.jobs[opened['visual_review']['review_id']]['expires']
+        self.now += 11
+        with mock.patch.object(self.runtime, 'capture_checkpoint') as capture:
+            repeated = self.manager.current_request(self.runtime, self.record, self.step, fixtures.TARGET)
+        capture.assert_not_called()
+        self.assertEqual(repeated['observation_review_template'], opened['observation_review_template'])
+        self.assertEqual(repeated['image_content'], opened['image_content'])
+        self.assertEqual(repeated['review_metrics']['remaining_seconds'], 109)
+        self.assertTrue(repeated['review_metrics']['request_reused'])
+        self.assertFalse(repeated['review_metrics']['new_capture_performed'])
+        self.assertEqual(self.manager.jobs[opened['visual_review']['review_id']]['expires'], original_expires)
+        self.assertTrue(self.verify(self.submission(repeated))['task_verified'])
+
+    def test_current_request_never_reuses_other_session_run_or_expired_frame(self):
+        self.open()
+        other_runtime = SimpleNamespace(**vars(self.runtime))
+        self.assertIsNone(self.manager.current_request(other_runtime, self.record, self.step, fixtures.TARGET))
+        self.assertIsNone(self.manager.current_request(self.runtime, {**self.record, 'run_id': 'other'}, self.step, fixtures.TARGET))
+        self.now += 121
+        self.assertIsNone(self.manager.current_request(self.runtime, self.record, self.step, fixtures.TARGET))
+        self.assertEqual(self.mutations(), [])
+
+    def test_current_request_rejects_replaced_window(self):
+        self.open()
+        self.probe.state['creation_time'] += 1
+        with self.assertRaises(OperationError):
+            self.manager.current_request(self.runtime, self.record, self.step, fixtures.TARGET)
+
+    def change_pixel(self, x, y):
+        width, height, color, channels, rows = fixtures.decode_png(self.source_png)
+        row = bytearray(rows[y]); row[x*channels] ^= 255; rows[y] = bytes(row)
+        self.source_png = fixtures.encode_png(width, height, color, rows)
+
+    def test_unrelated_clock_pixel_only_allowed_with_explicit_evidence_regions(self):
+        opened = self.open()
+        self.change_pixel(90, 90)
+        with self.assertRaises(OperationError) as error:
+            self.verify(self.submission(opened))
+        self.assertEqual(error.exception.review_diagnostic['reason'], 'full_frame_changed')
+        # The same still-live frame can support a bounded assessment, but only
+        # when the caller explicitly supplies the unchanged condition region.
+        result = self.verify({**self.submission(opened), 'evidence_regions': [
+            {'x': 10, 'y': 10, 'width': 30, 'height': 30}]})
+        self.assertTrue(result['task_verified'])
+        self.assertEqual(result['review_metrics']['comparison_scope'], 'evidence_regions')
+        self.assertEqual(self.mutations(), [])
+
+    def test_condition_region_change_cannot_pass_with_evidence_regions(self):
+        opened = self.open()
+        self.change_pixel(20, 20)
+        with self.assertRaises(OperationError) as error:
+            self.verify({**self.submission(opened), 'evidence_regions': [
+                {'x': 10, 'y': 10, 'width': 30, 'height': 30}]})
+        self.assertEqual(error.exception.review_diagnostic['reason'], 'evidence_regions_changed')
+        self.assertEqual(error.exception.review_diagnostic['changed_region_indices'], [0])
+        self.assertEqual(self.mutations(), [])
+
+    def test_geometry_change_during_capture_is_not_pixel_success(self):
+        opened = self.open()
+        original = self.runtime.capture_checkpoint
+        def moved(target):
+            result = original(target)
+            self.geometry = (2, 0, 102, 100, 2)
+            return result
+        self.runtime.capture_checkpoint = moved
+        with self.assertRaises(OperationError) as error:
+            self.verify(self.submission(opened))
+        self.assertEqual(error.exception.review_diagnostic['reason'], 'capture_geometry_changed')
+        self.assertEqual(self.mutations(), [])
+
     def test_popup_review_restores_exact_proof_on_same_run_request(self):
         owner=fixtures.TARGET; child={**owner,'window_id':owner['window_id']+1}
         proof={'process':(123,'allowed.exe'),'path':[child['window_id'],owner['window_id']],

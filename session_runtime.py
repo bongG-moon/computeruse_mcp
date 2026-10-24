@@ -472,9 +472,12 @@ class SessionRuntime:
                     if scope != target:
                         raise SessionError("MSAA 목록과 실행 대상이 다릅니다.")
                     from msaa_dropdown import read_lists, match_lists
-                    matched = match_lists(self, image_target, png, read_lists(self, target))
+                    matched = match_lists(self, image_target, png, read_lists(self, target),
+                        allow_selection_normalization=True)
                 else:
-                    matched = match_image(self, image_target, png)
+                    from transient_popup import proven_popup
+                    matched = match_image(self, image_target, png,
+                        allow_selection_normalization=proven_popup(target))
                 last_match.clear(); last_match.update(matched)
                 return matched
             answer = self.guard.image_action(step, target,
@@ -482,7 +485,8 @@ class SessionRuntime:
             diagnostic = answer.get("diagnostic", {})
             if answer.get("input_dispatched") is False and diagnostic.get("code") in {"image_not_found", "image_ambiguous"} and last_match:
                 details = dict(diagnostic.get("image_match", {}))
-                details.update({key:last_match[key] for key in ("frame_comparison", "frame_sha256", "score_gap", "review_candidates") if key in last_match})
+                details.update({key:last_match[key] for key in ("frame_comparison", "frame_sha256", "score_gap", "review_candidates",
+                    "appearance_rejected", "appearance_score", "original_score", "backend", "screenshot") if key in last_match})
                 answer = {**answer, "diagnostic":{**diagnostic,"image_match":details,
                     "message":match_failure_message(details) if diagnostic["code"]=="image_not_found" else diagnostic.get("message", "이미지 후보가 여러 개입니다.")}}
             if self._driver_ended():

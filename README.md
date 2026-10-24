@@ -4,6 +4,8 @@ Windows 프로그램을 채팅 또는 녹화로 조작하는 로컬 MCP입니다
 
 0.18.8은 중첩 메뉴를 연 뒤 화면 확인 단계로 이어지지 못하던 재생 문제를 수정한 버전입니다. 기존 22단계 작업을 수정 없이 두 차례 끝까지 재생하고, 각 실행에서 생성된 XLSX의 데이터 5행을 확인했습니다. 사내 운영 프로그램 검증은 별도로 필요합니다. [변경 안내](CHANGES.html) · [검증 범위](VALIDATION.html) · [설치](INSTALL.md)
 
+> 현재 `main`에는 0.18.8 출시 이후의 팝업 입력·화면 확인 최적화 수정이 포함되어 있습니다. 아직 새 Release ZIP으로 배포하지 않았습니다. [소스 검증 및 배포 상태](https://github.com/bongG-moon/computeruse_mcp/blob/main/PUBLICATION.md#main-source-validation-20261024)를 확인하세요.
+
 ## 두 가지 사용 방법
 
 **말로 요청하기**

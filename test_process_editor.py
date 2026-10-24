@@ -811,6 +811,15 @@ class ImageDraftTests(unittest.TestCase):
         self.assertEqual(self.draft.steps[2]["review_mode"], "popup_image")
         self.draft.validate()
 
+    def test_legacy_popup_image_retarget_keeps_condition_in_sync(self):
+        self.popup_recording()
+        self.draft.steps[2]["review_origin"] = "user_grouped"
+        new = image_choice(window_id=TARGET["window_id"]+1, anchor={"x":.25,"y":.75})
+        self.draft.retarget(3, new)
+        self.assertEqual(self.draft.steps[2]["image_target"], self.draft.steps[3]["image_target"])
+        self.assertEqual(self.draft.steps[2]["review_origin"], "user_grouped")
+        self.draft.validate()
+
     def test_popup_image_repair_updates_condition_and_native_repair_retains_review(self):
         self.popup_recording()
         target = self.draft.targets[("editor","popup_1")]

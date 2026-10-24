@@ -39,6 +39,21 @@ class Runtime:
 
 
 class WindowBindingTests(unittest.TestCase):
+    def test_selection_appearance_requires_fresh_proof_for_each_candidate(self):
+        probe = Probe([row(20,thread_id=8),row(21,thread_id=8)])
+        runtime = Runtime(probe)
+        runtime.capture_checkpoint = mock.Mock(return_value={'content':[
+            {'type':'image','mimeType':'image/png','data':'fixture'}]})
+        with mock.patch('transient_popup.register_popup'), \
+                mock.patch('transient_popup.proven_popup',side_effect=[True,False]) as proof, \
+                mock.patch('image_targets.match_image',side_effect=[
+                    {'status':'matched','score':.99},{'status':'not_found','score':.8}]) as matcher:
+            result = execute_window_wait(runtime,step(),{('editor','main'):{'pid':42,'window_id':10}},
+                image_hint={'ambiguity_margin':.03})
+        self.assertTrue(result['task_verified'])
+        self.assertEqual(proof.call_args_list,[mock.call({'pid':42,'window_id':20}),mock.call({'pid':42,'window_id':21})])
+        self.assertEqual([c.kwargs['allow_selection_normalization'] for c in matcher.call_args_list],[True,False])
+
     def test_same_class_candidates_require_unique_image_and_unchanged_identity(self):
         for scores, expected in (([.99, .80], True), ([.99, .98], False), ([.99, .99], False)):
             probe = Probe([row(20, thread_id=8), row(21, thread_id=8)])

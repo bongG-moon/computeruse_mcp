@@ -1,7 +1,8 @@
 """Narrow, run-scoped fallback for a proven HWND omitted by the Driver.
 
 No public coordinate API. Guard owns policy, approvals, budgets and journaling.
-The only mutation is a single image-verified left click after exact non-delivery.
+The only mutation is a single image-verified left click paired with a native
+capture, or following an exact Driver non-delivery response.
 """
 from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
@@ -98,6 +99,9 @@ def _user():
         "GetClassNameW": ([W.HWND, W.LPWSTR, ctypes.c_int], ctypes.c_int),
         "ScreenToClient": ([W.HWND, ctypes.POINTER(W.POINT)], W.BOOL),
         "ChildWindowFromPointEx": ([W.HWND, W.POINT, W.UINT], W.HWND),
+        "WindowFromPoint": ([W.POINT], W.HWND),
+        "SetCursorPos": ([ctypes.c_int, ctypes.c_int], W.BOOL),
+        "PostMessageW": ([W.HWND, W.UINT, W.WPARAM, W.LPARAM], W.BOOL),
         "SendMessageTimeoutW": ([W.HWND, W.UINT, W.WPARAM, W.LPARAM, W.UINT, W.UINT,
                                 ctypes.POINTER(ctypes.c_size_t)], ctypes.c_size_t),
         "GetWindowDC": ([W.HWND], W.HDC),
@@ -308,15 +312,52 @@ def click(target, point, geometry, check):
             check()
             if _binding(target)[1] != before or probe.ownership_path(child, target["window_id"]) != path:
                 raise OperationError("입력 직전에 팝업이 바뀌었습니다.", "popup_identity_changed")
-            value = ctypes.c_size_t()
-            packed = local.x | (local.y << 16)
-            for message, flags in ((0x201, 1), (0x202, 0)):
-                if not user.SendMessageTimeoutW(child, message, flags, packed, 0x22, 500, ctypes.byref(value)):
-                    return {"isError":True, "structuredContent":{"backend":"owned-popup-messages",
-                        "input_sent":None, "task_verified":False, "code":"popup_input_unknown",
-                        "message":"메시지 전달 결과가 불명확합니다. 자동 재시도하지 않습니다."}}
-            return {"structuredContent":{"backend":"owned-popup-messages", "input_sent":True,
-                    "task_verified":False}, "content":[]}
+            evidence = {"capture_point": dict(point),
+                "capture_size": {"width": geometry[2]-geometry[0], "height": geometry[3]-geometry[1]},
+                "screen_point": {"x": physical.x, "y": physical.y},
+                "client_point": {"x": local.x, "y": local.y}, "child_window_id": child,
+                "coordinate_space": "physical_pixels", "driver_resize_applied": False,
+                "pointer_aligned": False}
+            phase, attempted = "pointer", False
+            def refusal(code, message):
+                return {"isError": True, "structuredContent": {
+                    "backend": "owned-popup-messages", "input_sent": None if attempted else False,
+                    "task_verified": False, "code": code, "message": message,
+                    "delivery_phase": phase, "release_delivery": "not_queued",
+                    "point_evidence": dict(evidence), "automatic_retry": False}}
+            def validate_point():
+                check()
+                current_pid = W.DWORD()
+                current_thread = user.GetWindowThreadProcessId(child, ctypes.byref(current_pid))
+                if (_binding(target)[1] != before or current_pid.value != target["pid"]
+                        or current_thread != thread or not user.IsWindowEnabled(child)
+                        or probe.ownership_path(child, target["window_id"]) != path):
+                    raise OperationError("입력 직전에 팝업이나 입력 자식이 바뀌었습니다.", "popup_identity_changed")
+                hit = int(user.WindowFromPoint(physical) or 0)
+                if hit != child and not (hit and probe.ownership_path(hit, child)):
+                    raise OperationError("팝업 입력점이 다른 창에 가려졌습니다.", "popup_point_occluded")
+            try:
+                validate_point()
+                if not user.SetCursorPos(physical.x, physical.y):
+                    return refusal("popup_pointer_unknown", "포인터 위치를 맞추지 못해 클릭하지 않았습니다.")
+                evidence["pointer_aligned"] = True
+                # Pointer movement and hover handlers may replace a submenu.
+                # Recheck the same child before MOVE and again before DOWN.
+                value = ctypes.c_size_t()
+                packed = local.x | (local.y << 16)
+                for phase, message, flags in (("move", 0x200, 0), ("down", 0x201, 1), ("up", 0x202, 0)):
+                    validate_point()
+                    attempted = True
+                    accepted = (user.PostMessageW(child, message, flags, packed) if phase == "up" else
+                        user.SendMessageTimeoutW(child, message, flags, packed, 0x22, 500, ctypes.byref(value)))
+                    if not accepted:
+                        return refusal("popup_input_unknown", "메시지 전달 결과가 불명확합니다. 자동 재시도하지 않습니다.")
+                # Queue acceptance is delivery evidence, never business success.
+                return {"structuredContent": {"backend": "owned-popup-messages", "input_sent": True,
+                    "task_verified": False, "delivery_phase": "up", "release_delivery": "queued_once",
+                    "point_evidence": evidence}, "content": []}
+            except (OperationError, OSError, RuntimeError, ValueError) as error:
+                return refusal(getattr(error, "code", "popup_input_preflight_failed"), str(error))
         finally: probe.close()
     finally:
         if previous: user.SetThreadDpiAwarenessContext(previous)

@@ -288,8 +288,46 @@ def _rgb_candidates(image_target, screenshot_png, *, deadline=None, check_active
     return {**result, **best[0], "status": "matched"}
 
 
-def _appearance_frame(frame):
-    """Normalize light menu rows; erase blue outlines only at the frame edge."""
+def _selection_bands(frame, *, dark):
+    """Find short, rectangular blue selection bands, not arbitrary blue ink.
+
+    These are appearance candidates only. _ink_agrees still proves the glyphs,
+    their contrast, the clicked row and the unchanged surrounding content.
+    """
+    cv2, np, _ = _load()
+    b, g, r = (frame[:, :, i].astype(np.int16) for i in range(3))
+    levels = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    colored = ((b-r > (60 if dark else 35)) & (g-r > (25 if dark else 15))
+               & (levels >= (45 if dark else 145)))
+    if dark:
+        colored &= levels <= 180
+    rows = colored.mean(axis=1) >= .55
+    bands = []
+    start = 0
+    while start < len(rows):
+        if not rows[start]:
+            start += 1
+            continue
+        stop = start+1
+        while stop < len(rows) and rows[stop]:
+            stop += 1
+        if 10 <= stop-start <= 48:
+            # Background must extend consistently across the band. A large
+            # blue icon/triangle is not evidence of a selected menu row.
+            columns = np.flatnonzero(colored[start:stop].mean(axis=0) >= .70)
+            if len(columns) >= frame.shape[1]*.55:
+                left, right = int(columns[0]), int(columns[-1])+1
+                left = 0 if left <= 2 else left
+                right = frame.shape[1] if right >= frame.shape[1]-2 else right
+                if (right-left >= frame.shape[1]*.55
+                        and colored[start:stop, left:right].mean() >= .70):
+                    bands.append((start, stop, left, right))
+        start = stop
+    return bands
+
+
+def _appearance_frame(frame, *, allow_selection_normalization=False):
+    """Normalize bounded selection backgrounds while preserving menu ink."""
     cv2, np, _ = _load()
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
     backgrounds = np.zeros(frame.shape[:2], dtype=bool)
@@ -300,6 +338,33 @@ def _appearance_frame(frame):
             level = float(cv2.cvtColor(bg.reshape(1,1,3), cv2.COLOR_BGR2GRAY)[0,0])
             gray[y] = np.minimum(255, gray[y]*255/level)
             backgrounds[y] = np.max(np.abs(row.astype(np.int16)-bg.astype(np.int16)),axis=1) <= 8
+    for start, stop, left, right in (_selection_bands(frame, dark=True) if allow_selection_normalization else []):
+        for y in range(start, stop):
+            row = frame[y].astype(np.int16)
+            colors, counts = np.unique(frame[y, left:right], axis=0, return_counts=True)
+            bg = colors[int(counts.argmax())]
+            level = float(cv2.cvtColor(bg.reshape(1, 1, 3), cv2.COLOR_BGR2GRAY)[0, 0])
+            if not 45 <= level <= 180:
+                continue
+            normalized = 255-np.clip((gray[y]-level)*255/(255-level), 0, 255)
+            neutral_grid = ((row.max(axis=1)-row.min(axis=1) <= 3)
+                            & (row.min(axis=1) >= 145) & (row.max(axis=1) <= 225))
+            selected = np.zeros(frame.shape[1], dtype=bool)
+            selected[left:right] = True
+            selected &= ~neutral_grid
+            gray[y, selected] = normalized[selected]
+        # Windows focus dots alternate between selection blue and neutral
+        # pixels. Remove only that perimeter pattern, not blue interior ink.
+        for edge_y in (start-1, stop):
+            if not 0 <= edge_y < frame.shape[0]:
+                continue
+            row = frame[edge_y, left:right].astype(np.int16)
+            selection = (row[:, 0]-row[:, 2] > 60) & (row[:, 1]-row[:, 2] > 25)
+            neutral = (row.max(axis=1)-row.min(axis=1) <= 3) & (row.min(axis=1) >= 145)
+            alternating = np.count_nonzero(selection[1:] != selection[:-1])
+            if (selection.mean() >= .40 and neutral.mean() >= .40
+                    and (selection | neutral).mean() >= .95 and alternating >= len(row)*.70):
+                gray[edge_y, left:right][selection] = 255
     b,g,r = (frame[:,:,i].astype(np.int16) for i in range(3))
     blue = (b-r > 60) & (g-r > 25) & (cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)>90)
     # Only a thin connected rectangular outline qualifies. Blue text/icons
@@ -310,29 +375,68 @@ def _appearance_frame(frame):
         if w < 40 or h < 10 or x > 2 or x+w < frame.shape[1]-2: continue
         region = labels[y:y+h,x:x+w] == component
         interior = region[2:-2,2:-2]
-        if interior.any(): continue
+        filled_row = h <= 48 and area >= w*h*.70 and backgrounds[y:y+h,x:x+w].mean() >= .55
+        if interior.any() and not filled_row: continue
         if min(float(region[:2,:].any(axis=0).mean()), float(region[-2:,:].any(axis=0).mean()),
                float(region[:,:2].any(axis=1).mean()),float(region[:,-2:].any(axis=1).mean())) < .9:
             continue
-        gray[y:y+h,x:x+w][region] = 255
+        outline = region.copy()
+        outline[2:-2, 2:-2] = False
+        gray[y:y+h,x:x+w][outline] = 255
     result = np.rint(gray).astype(np.uint8)
     return cv2.cvtColor(result,cv2.COLOR_GRAY2BGR), backgrounds
 
 
-def _appearance_png(encoded):
+def _appearance_png(encoded, *, allow_selection_normalization=False):
     cv2, np, _ = _load()
     frame = cv2.imdecode(np.frombuffer(base64.b64decode(encoded), dtype=np.uint8), cv2.IMREAD_COLOR)
-    normalized, _ = _appearance_frame(frame)
+    normalized, _ = _appearance_frame(frame, allow_selection_normalization=allow_selection_normalization)
     ok, data = cv2.imencode(".png", normalized)
     if not ok: raise ValueError("PNG normalization failed")
     return base64.b64encode(data).decode("ascii")
 
 
-def _ink_agrees(pattern, current, anchor_y):
+def _selection_text_tints(frame, *, allow_selection_normalization=False):
+    """Only antialias mixtures of a selection background and white/black ink."""
+    _, np, _ = _load()
+    allowed = np.zeros(frame.shape[:2], dtype=bool)
+    for dark in ((False, True) if allow_selection_normalization else (False,)):
+        for start, stop, left, right in _selection_bands(frame, dark=dark):
+            for y in range(start, stop):
+                row = frame[y, left:right]
+                colors, counts = np.unique(row, axis=0, return_counts=True)
+                background = colors[int(counts.argmax())].astype(np.float32)
+                direction = (255 if dark else 0)-background
+                pixels = row.astype(np.float32)
+                alpha = ((pixels-background)*direction).sum(axis=1)/max(1, float((direction*direction).sum()))
+                expected = background+alpha[:, None]*direction
+                allowed[y, left:right] = ((alpha >= 0) & (alpha <= 1)
+                    & (np.max(np.abs(pixels-expected), axis=1) <= 8))
+    return allowed
+
+
+def _ink_agrees(pattern, current, anchor_y, *, allow_selection_normalization=False):
     cv2, np, _ = _load()
-    a, _ = _appearance_frame(pattern); b, _ = _appearance_frame(current)
+    if pattern.shape != current.shape:
+        return False
+    a, _ = _appearance_frame(pattern, allow_selection_normalization=allow_selection_normalization)
+    b, _ = _appearance_frame(current, allow_selection_normalization=allow_selection_normalization)
     ia = (255-a.astype(np.float32).mean(axis=2))
     ib = (255-b.astype(np.float32).mean(axis=2))
+    # Grayscale normalization must not erase a meaningful colored icon/text.
+    # Selection backgrounds and removed outlines have no remaining strong ink.
+    colors_a, colors_b = pattern.astype(np.int16), current.astype(np.int16)
+    colored_ink_a = (colors_a.max(axis=2)-colors_a.min(axis=2) > 25) & (ia >= 127)
+    colored_ink_b = (colors_b.max(axis=2)-colors_b.min(axis=2) > 25) & (ib >= 127)
+    neutral_a = colors_a.max(axis=2)-colors_a.min(axis=2) <= 3
+    neutral_b = colors_b.max(axis=2)-colors_b.min(axis=2) <= 3
+    tint_a = _selection_text_tints(pattern, allow_selection_normalization=allow_selection_normalization)
+    tint_b = _selection_text_tints(current, allow_selection_normalization=allow_selection_normalization)
+    text_antialias = ((neutral_a & tint_b) | (neutral_b & tint_a) | (tint_a & tint_b))
+    changed_color = ((colored_ink_a | colored_ink_b)
+                     & (np.max(np.abs(colors_a-colors_b), axis=2) > 25) & ~text_antialias)
+    if int(changed_color.sum()) >= 2:
+        return False
     # A small changed glyph (e.g. an added decimal point) can disappear in
     # the aggregate Dice score. Preserve strong ink topology while allowing
     # one-pixel antialias fringes around the same strokes.
@@ -340,21 +444,44 @@ def _ink_agrees(pattern, current, anchor_y):
     kernel = np.ones((3,3), dtype=np.uint8)
     near_a = cv2.dilate(core_a.astype(np.uint8), kernel) != 0
     near_b = cv2.dilate(core_b.astype(np.uint8), kernel) != 0
-    if int(((core_a & ~near_b) | (core_b & ~near_a)).sum()) >= 2:
+    missing_ink = (core_a & ~near_b & (ib <= 35)) | (core_b & ~near_a & (ia <= 35))
+    if int(missing_ink.sum()) >= 2:
         return False
     center = min(a.shape[0]-1, max(0, int(anchor_y*a.shape[0])))
+    dark_bands = (_selection_bands(pattern, dark=True)+_selection_bands(current, dark=True)
+                  if allow_selection_normalization else [])
+    light_bands = _selection_bands(pattern, dark=False)+_selection_bands(current, dark=False)
+    # Dark inversion requires surrounding menu context. A whole blue banner
+    # or single cropped status badge cannot be proved to be a selection.
+    if dark_bands and any(start < 8 and stop > a.shape[0]-8 for start, stop, _, _ in dark_bands):
+        return False
+    inverted = any(start <= center < stop for start, stop, _, _ in dark_bands)
+    light = any(start <= center < stop for start, stop, _, _ in light_bands)
     for left, right, minimum in ((ia, ib, .98),
             (ia[max(0,center-8):center+9], ib[max(0,center-8):center+9], .95)):
         mask = (left > 35) | (right > 35)
-        if int(mask.sum()) < 12:
+        if int(mask.sum()) < 12 or not (left > 35).any() or not (right > 35).any():
             return False
         dice = 2*float(np.minimum(left,right).sum())/max(1,float(left.sum()+right.sum()))
-        if dice < minimum or float(np.abs(left-right)[mask].mean()) > 10:
-            return False
+        difference = float(np.abs(left-right)[mask].mean())
+        if dice < minimum or difference > 10:
+            correlation = float(cv2.matchTemplate(left.astype(np.float32), right.astype(np.float32),
+                                                  cv2.TM_CCOEFF_NORMED)[0, 0])
+            # Selection color evidence must be on the clicked band; a blue
+            # row elsewhere cannot relax this row's text or disabled contrast.
+            contrast = abs(float(np.percentile(left[left > 35], 90))
+                           - float(np.percentile(right[right > 35], 90))) <= 40
+            contrast_agrees = ((inverted and dice >= .85 and difference <= 35 and correlation >= .96)
+                               or (light and dice >= .93 and difference <= 10 and correlation >= .99))
+            if not (minimum == .95 and contrast and contrast_agrees and math.isfinite(correlation)):
+                return False
     return True
 
 
-def match_candidates(image_target, screenshot_png, *, deadline=None, check_active=None):
+def match_candidates(image_target, screenshot_png, *, deadline=None, check_active=None,
+                     allow_selection_normalization=False):
+    if type(allow_selection_normalization) is not bool:
+        raise ValueError("Invalid private selection appearance capability")
     end = min(deadline, time.monotonic()+15) if deadline is not None else time.monotonic()+15
     original = _rgb_candidates(image_target, screenshot_png, deadline=end, check_active=check_active)
     if original["status"] != "not_found" or original.get("code") == "template_low_detail":
@@ -386,8 +513,10 @@ def match_candidates(image_target, screenshot_png, *, deadline=None, check_activ
         if len(alternatives)>1:
             return {**original,"status":"ambiguous","candidate_count":len(alternatives)}
         if alternatives: return alternatives[0]
-    normalized = dict(target, template_png=_appearance_png(target["template_png"]))
-    result = _rgb_candidates(normalized, _appearance_png(screenshot_png), deadline=end, check_active=check_active)
+    normalized = dict(target, template_png=_appearance_png(target["template_png"],
+        allow_selection_normalization=allow_selection_normalization))
+    result = _rgb_candidates(normalized, _appearance_png(screenshot_png,
+        allow_selection_normalization=allow_selection_normalization), deadline=end, check_active=check_active)
     if result["status"] == "ambiguous":
         return {**result, "backend": "airtest-light-background", "original_score": original.get("score")}
     if result["status"] != "matched" or result.get("template_clip"):
@@ -398,14 +527,19 @@ def match_candidates(image_target, screenshot_png, *, deadline=None, check_activ
     rect = result["rect"]; x,y,w,h = (rect[k] for k in ("x","y","width","height"))
     if pattern.shape[:2] != (h,w):
         pattern = cv2.resize(pattern, (w,h), interpolation=cv2.INTER_CUBIC)
-    if not _ink_agrees(pattern, screen[y:y+h,x:x+w], target["anchor"]["y"]):
-        return {**original, "appearance_rejected": "foreground_ink_changed"}
+    if not _ink_agrees(pattern, screen[y:y+h,x:x+w], target["anchor"]["y"],
+                       allow_selection_normalization=allow_selection_normalization):
+        return {**original, "appearance_rejected": "foreground_ink_changed", "appearance_score": result.get("score")}
     if check_active: check_active()
-    return {**result, "backend": "airtest-light-background", "original_score": original.get("score"),
+    dark_selection = allow_selection_normalization and (
+        _selection_bands(pattern, dark=True) or _selection_bands(screen[y:y+h,x:x+w], dark=True))
+    return {**result, "backend": "airtest-list-selection" if dark_selection else "airtest-light-background",
+            "original_score": original.get("score"),
             "appearance_verified": True}
 
 
-def match_isolated(runtime, image_target, screenshot_png, *, deadline=None, check_active=None):
+def match_isolated(runtime, image_target, screenshot_png, *, deadline=None, check_active=None,
+                   allow_selection_normalization=False):
     """Bound native-library startup and matching outside the MCP worker thread.
 
     Some Windows/NumPy combinations hang while importing an extension from the
@@ -413,6 +547,8 @@ def match_isolated(runtime, image_target, screenshot_png, *, deadline=None, chec
     broken binary can now be cancelled/killed without trapping the MCP server.
     """
     from learning import ElementLibrary
+    if type(allow_selection_normalization) is not bool:
+        raise ValueError("Invalid private selection appearance capability")
     target = validate_image_target(image_target)
     png_dimensions(screenshot_png)
     end = min(deadline, time.monotonic()+20) if deadline is not None else time.monotonic()+20
@@ -428,7 +564,8 @@ def match_isolated(runtime, image_target, screenshot_png, *, deadline=None, chec
     child = None
     try:
         with request.open("x", encoding="utf-8") as stream:
-            json.dump({"nonce": nonce, "target": target, "screenshot_png": screenshot_png}, stream)
+            json.dump({"nonce": nonce, "target": target, "screenshot_png": screenshot_png,
+                       "allow_selection_normalization": allow_selection_normalization}, stream)
         # -I excludes user site/PYTHONPATH. Explicitly add only our own source
         # directory; selected vision dependencies are loaded from its bundle.
         entry = "import runpy,sys; root,script=sys.argv[1:3]; sys.argv=sys.argv[2:]; sys.path.insert(0,root); runpy.run_path(script,run_name='__main__')"
@@ -474,11 +611,16 @@ def _worker_main(arguments):
     if not request.is_file() or request.stat().st_size > 32*1024*1024 or response.exists():
         return 2
     value = json.loads(request.read_text(encoding="utf-8"))
+    if not isinstance(value, dict) or set(value) != {"nonce", "target", "screenshot_png", "allow_selection_normalization"}:
+        return 2
     nonce = value.get("nonce")
+    if type(value.get("allow_selection_normalization")) is not bool:
+        return 2
     if not isinstance(nonce, str) or len(nonce) != 64 or any(c not in "0123456789abcdef" for c in nonce):
         return 2
     try:
-        result = match_candidates(value["target"], value["screenshot_png"])
+        result = match_candidates(value["target"], value["screenshot_png"],
+                                  allow_selection_normalization=value["allow_selection_normalization"])
     except Exception as error:
         result = {"status": "failed", "error_type": type(error).__name__}
     with response.open("x", encoding="utf-8") as stream:

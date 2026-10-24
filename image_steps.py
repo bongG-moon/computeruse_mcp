@@ -89,7 +89,12 @@ def execute_image_step(runtime, step, target, *, verification_state=None, save_v
             return result
         if time.monotonic() >= deadline:
             return {**result, "diagnostic": {"code": "image_wait_timeout", "automatic_replay": False,
-                                            "message": "제한 시간 안에 이미지가 나타나지 않았습니다."}}
+                "message": "제한 시간 안에 이미지가 나타나지 않았습니다.",
+                "cause": copy.deepcopy(result.get("diagnostic", {})),
+                "last_match": copy.deepcopy(result.get("image_match", result.get("diagnostic", {}).get("image_match", {}))),
+                "template": {key: copy.deepcopy(step["image_target"][key])
+                             for key in ("width", "height", "capture_window", "min_score", "ambiguity_margin")},
+                "wait_timeout_ms": step["timeout_ms"]}}
         runtime.stop_event.wait(min(step.get("poll_interval_ms", 500)/1000, max(0, deadline-time.monotonic())))
 
 
