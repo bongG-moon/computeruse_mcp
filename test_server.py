@@ -25,7 +25,7 @@ def config_at(folder, **changes):
     config = {"version": 1, "driver": str(driver), "state_dir": str(Path(folder) / "state"),
               "programs": [{"id": "editor", "name": "편집기", "exe": str(editor), "control_exes": [], "hints": "", "enabled": True},
                            {"id": "disabled", "name": "비활성", "exe": str(editor), "control_exes": [], "hints": "", "enabled": False}],
-              "mode": "uia", "approval": "session", "max_minutes": 10, "max_actions": 20,
+              "mode": "uia", "data_policy": "connected", "approval": "session", "max_minutes": 10, "max_actions": 20,
               "approval_timeout_seconds": 1}
     config.update(changes)
     return config
@@ -708,6 +708,34 @@ class ProtocolTests(unittest.TestCase):
     def test_non_jsonrpc_message_is_rejected(self):
         self.input.send({"id": 5, "method": "tools/call", "params": {"name": "computer_stop"}})
         self.assertEqual(self.wait_for(5)["error"]["code"], -32600)
+
+    def test_live_status_and_stop_errors_obey_local_delivery_policy(self):
+        # These requests bypass _worker, whose exception boundary is filtered
+        # separately. Raw OS/driver errors can include business text or paths.
+        sentinel = r"SENTINEL-business-value C:\private-business\result.xlsx"
+        request_id = 100
+        for policy in ("local", None, "connected"):
+            if policy is None:
+                self.manager.config.pop("data_policy", None)
+            else:
+                self.manager.config["data_policy"] = policy
+            for name in ("computer_status", "computer_activity", "computer_task_progress",
+                         "computer_stop", "computer_end"):
+                with self.subTest(policy=policy, tool=name), \
+                     mock.patch.object(self.manager, "call", side_effect=OSError(sentinel)):
+                    self.input.send({"jsonrpc": "2.0", "id": request_id, "method": "tools/call",
+                        "params": {"name": name, "arguments": {}}})
+                    reply = self.wait_for(request_id)
+                    self.assertTrue(reply["result"]["isError"])
+                    encoded = json.dumps(reply, ensure_ascii=False)
+                    if policy == "connected":
+                        self.assertIn("SENTINEL-business-value", encoded)
+                    else:
+                        self.assertNotIn("SENTINEL-business-value", encoded)
+                        self.assertNotIn("private-business", encoded)
+                        self.assertEqual(reply["result"]["structuredContent"]["diagnostic"]["code"],
+                                         "local_operation_failed")
+                    request_id += 1
 
     def test_stop_bypasses_blocked_begin_and_cancels_queued_actions(self):
         self.begin()

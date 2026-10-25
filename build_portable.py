@@ -47,6 +47,7 @@ VISUAL_TOOLS_NAME = "Computer Use MCP 이미지 도구.exe"
 SCOPED_CONTROLS_NAME = "Computer Use MCP 빠른 확인.exe"
 CHECKPOINT_REVIEW_NAME = "Computer Use MCP 화면 확인.exe"
 APP_FILES = (
+    "authoring_inputs.py", "local_skill.py", "local_delivery.py", "local_runs.py", "local_task_ids.py",
     "msaa_dropdown.py",
     "artifact_lifecycle.py",
     "semantic_targets.py",
@@ -66,6 +67,7 @@ APP_FILES = (
 )
 OPTIONAL_APP_FILES = ()
 SOURCE_SUPPORT_FILES = (
+    "test_authoring_inputs.py", "test_local_skill.py", "test_local_delivery.py", "test_authoring_editor.py", "test_local_runs.py", "test_local_task_ids.py", "test_local_authoring_native.py", "fixtures/LocalAuthoringFixture.cs", "tools/benchmark_local_authoring.py",
     "test_transient_popup.py", "test_hover_matching.py", "test_loaded_code_identity.py", "fixtures/PopupExportFixture.cs",
     "MsaaDropdown.cs", "test_msaa_dropdown.py", "fixtures/MsaaListFixture.cs", "tools/test_msaa_native.py",
     "test_semantic_targets.py",
@@ -126,7 +128,8 @@ IMPORT_CHECK = (
 APPLICATION_IMPORT_CHECK = (
     "import server,settings,consent,register,maintenance,diagnostics,install,programs,"
     "learning,learning_picker,teaching_sessions,process_editor,process_steps,image_targets,image_steps,"
-    "checkpoint_review,image_delivery,replay_preflight,vendor.guard,vendor.windows; "
+    "checkpoint_review,image_delivery,replay_preflight,vendor.guard,vendor.windows,"
+    "authoring_inputs,local_skill,local_delivery,local_runs,local_task_ids; "
     "print('Application imports passed')"
 )
 IMAGE_BACKEND_CHECK = r'''

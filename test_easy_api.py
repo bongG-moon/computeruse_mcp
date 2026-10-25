@@ -74,6 +74,15 @@ class EasyApiTests(unittest.TestCase):
         api.close()
         self.assertEqual(api.run_bindings, {})
 
+    def test_local_run_status_rejects_conflicting_identity_and_passes_cancel(self):
+        with mock.patch.object(self.manager.local_runs, 'status', return_value={'status': 'cancelled'}) as status:
+            with self.assertRaises(SessionError):
+                self.manager.call('computer_status', {'local_run_id': 'aa'*16, 'editor_id': 'bb'*16})
+            status.assert_not_called()
+            response = self.manager.call('computer_status', {'local_run_id': 'aa'*16, 'cancel': True})
+            self.assertEqual(response['structuredContent']['status'], 'cancelled')
+            status.assert_called_once_with('aa'*16, cancel=True)
+
     def test_saved_draft_is_listed_and_blocked_before_app_attach_or_launch(self):
         task = self.manager.tasks.save({'id': 'unfinished', 'name': 'Draft', 'instructions': 'Repair first',
             'expected': 'Done', 'program_ids': ['editor'],

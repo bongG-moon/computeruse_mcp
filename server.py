@@ -475,9 +475,15 @@ class ComputerManager:
     def __init__(self, config, *, config_path=None, runtime_factory=SessionRuntime, transport_factory=DriverTransport):
         self.config = copy.deepcopy(config)
         self.config_path = config_path
+        from local_delivery import enabled
+        if enabled(self.config):
+            self.config['tool_profile'] = 'simple'
+            self.config['log_detail'] = 'metadata'
         self.runtime_factory = runtime_factory
         self.transport_factory = transport_factory
         self.tasks = TaskStore(config["state_dir"], self.config)
+        from local_task_ids import LocalTaskIds
+        self.task_ids = LocalTaskIds(self.tasks, config['state_dir'])
         self.workflows = WorkflowRunner(config["state_dir"])
         from learning import ElementLibrary
         self.elements = ElementLibrary(config["state_dir"], self.config)
@@ -502,12 +508,17 @@ class ComputerManager:
         from checkpoint_review import CheckpointReviews
         self.checkpoint_reviews = CheckpointReviews()
         self.progress_reporter = None
+        self.local_results = threading.local()
         from easy_api import EasyApi
         self.easy = EasyApi(self)
+        from local_runs import LocalRuns
+        self.local_runs = LocalRuns(self)
         self.process_editors.test_runner = lambda runtime, task, targets, **kwargs: self.workflows.run(
-            runtime, task, {}, targets, delivery_mode="foreground", image_delivery_enabled=self.image_delivery.status()["delivery_mode"] == "vision", **kwargs)
+            runtime, task, kwargs.pop("inputs", {}), targets, delivery_mode="foreground", image_delivery_enabled=self.image_delivery.status()["delivery_mode"] == "vision", **kwargs)
         self.process_editors.visual_review_enabled = lambda runtime: (self.image_delivery.status()["delivery_mode"] == "vision"
             and self.image_delivery.status()["last_roundtrip"] == "passed")
+        from local_delivery import enabled
+        self.process_editors.local_only = enabled(self.config)
         self.storage_cleanup = None
         self._cleanup_storage()
 
@@ -662,6 +673,10 @@ class ComputerManager:
                 return []
 
     def tools_list(self, cancel_event=None):
+        from local_delivery import enabled
+        if enabled(self.config):
+            from easy_api import schemas
+            return {'tools': schemas(MANAGEMENT), '_meta': {'data_policy': 'local'}}
         if self.config.get("tool_profile") == "simple":
             from easy_api import schemas
             return {"tools": schemas(MANAGEMENT), "_meta": {"tool_profile": "simple"}}
@@ -712,6 +727,7 @@ class ComputerManager:
         return current.start()
 
     def stop(self, reason="사용자가 화면 작업을 중지했습니다.", *, cause="requested_or_error"):
+        if cause == 'requested_or_error': self.local_runs.cancel()
         with self.lock:
             self.stop_generation += 1
             current, probe = self.session, self.probe_transport
@@ -736,6 +752,8 @@ class ComputerManager:
 
     def close(self, reason="MCP 입력 연결이 닫혀 화면 작업을 중지했습니다.", timeout=10):
         self.stop(reason)
+        if not self.local_runs.close(min(timeout, 3)):
+            raise SessionError('로컬 실행 창 종료를 확인하지 못했습니다.')
         with self.lock:
             current = self.session
         teaching_stopped = self.teachings.close(min(timeout, 3))
@@ -749,6 +767,44 @@ class ComputerManager:
         self._cleanup_storage(current)
 
     def call(self, name, args, cancel_event=None):
+        from local_delivery import enabled, filter_response as local_filter, require_local_task
+        def filter_response(response):
+            return local_filter(response, self.task_ids.alias)
+        local = enabled(self.config)
+        self.local_results.value = None
+        if self.local_runs.busy() and not self.local_runs.is_worker_thread():
+            read_only = name in {'computer_status', 'computer_activity', 'computer_task_progress', 'computer_programs', 'computer_tasks'}
+            if not read_only and name not in {'computer_stop', 'computer_end'}:
+                blocked = result({'status': 'blocked', 'diagnostic': {'code': 'local_run_busy'}}, True)
+                return filter_response(blocked) if local else blocked
+        if name in {'computer_stop', 'computer_end'}:
+            self.local_runs.cancel()
+        if local:
+            self.image_delivery.configure('text')
+            if 'task_id' in args and not self.local_runs.is_worker_thread():
+                try:
+                    args = {**args, 'task_id': self.task_ids.resolve(args['task_id'])}
+                except Exception:
+                    return filter_response(result({'status': 'blocked', 'diagnostic': {'code': 'local_use_editor'}}, True))
+            if args.get('image_delivery') == 'vision':
+                return filter_response(result({'status': 'blocked', 'diagnostic': {'code': 'local_vision_disabled'}}, True))
+            if name in {'computer_export_skill', 'computer_update_task', 'computer_act', 'computer_observe'}:
+                return filter_response(result({'status': 'blocked', 'diagnostic': {'code': 'local_use_editor'}}, True))
+            if (name == 'computer_process_editor' and args.get('action', 'open') == 'open'
+                    and not args.get('program_ids') and not args.get('window_refs') and self.session is None):
+                if set(args) - {'action', 'task_id', 'name'}:
+                    return filter_response(result({'status': 'blocked', 'diagnostic': {'code': 'local_use_editor'}}, True))
+                return filter_response(result(self.local_runs.open_editor(args.get('task_id'), args.get('name'))))
+            if name == 'computer_run_task':
+                try:
+                    from task_revision import TaskRevisions
+                    task = TaskRevisions(self.tasks).get(args['task_id'], args.get('revision'))
+                    if args.get('resume_run_id'):
+                        frozen = self.workflows.resume_snapshot(args['resume_run_id'], task['id'], args.get('inputs', {}))
+                        if frozen: task = frozen[0]
+                    require_local_task(task)
+                except Exception as exc:
+                    return filter_response(result({'status': 'blocked', 'diagnostic': {'code': getattr(exc, 'code', 'local_operation_failed')}}, True))
         if self.config.get("tool_profile") == "simple":
             from easy_api import schemas
             if name not in {tool["name"] for tool in schemas(MANAGEMENT)}:
@@ -761,7 +817,9 @@ class ComputerManager:
                 return {'status': 'not_required', 'next_step': '요소 정보가 부족하면 프로세스 편집창에서 직접 요소 또는 이미지를 지정하세요. 모델이 화면을 읽었다고 판단하지 마세요.'}
             return self.checkpoint_reviews.open(self.session, value, images, args)
         response = self.image_delivery.filter_response(response, local_review=review)
-        return self.easy.normalize_response(name, args, response) if self.config.get("tool_profile") == "simple" else response
+        response = self.easy.normalize_response(name, args, response) if self.config.get('tool_profile') == 'simple' else response
+        if local: self.local_results.value = copy.deepcopy(response.get('structuredContent', {}))
+        return filter_response(response) if local else response
 
     def _call(self, name, args, cancel_event=None):
         if cancel_event is not None and cancel_event.is_set():
@@ -1072,6 +1130,7 @@ class StdioServer:
         self.emit({"jsonrpc": "2.0", "id": request_id, "error" if error else "result": error or payload})
 
     def _worker(self):
+        from local_delivery import enabled
         while True:
             item = self.work.get()
             if item is None:
@@ -1101,7 +1160,7 @@ class StdioServer:
                             return
                         last_notification[:] = [now, snapshot["stage"]]
                         self.emit({"jsonrpc": "2.0", "method": "notifications/progress", "params": {
-                            "progressToken": token, "progress": snapshot["sequence"], "message": snapshot["message"]}})
+                            "progressToken": token, "progress": snapshot["sequence"], "message": "Local operation in progress" if enabled(self.manager.config) else snapshot["message"]}})
                     operation_id = self.manager.activity.start(params["name"], sink=notify_progress)
                     def report(stage, _operation_id=operation_id, **fields):
                         self.manager.activity.update(_operation_id, stage, **fields)
@@ -1122,9 +1181,12 @@ class StdioServer:
                     self.manager.activity.finish(operation_id, error=True)
                     operation_id = None
                 if message["method"] == "tools/call":
-                    self.response(request_id, result(str(exc), True))
+                    from local_delivery import enabled, filter_response
+                    failure = result(str(exc), True)
+                    self.response(request_id, filter_response(failure) if enabled(self.manager.config) else failure)
                 else:
-                    self.response(request_id, error={"code": -32603, "message": str(exc)})
+                    from local_delivery import enabled
+                    self.response(request_id, error={"code": -32603, "message": 'Local operation failed' if enabled(self.manager.config) else str(exc)})
             finally:
                 if operation_id is not None:
                     self.manager.activity.finish(operation_id, error=failed)
@@ -1168,6 +1230,12 @@ class StdioServer:
                 self.response(request_id, error={"code": -32602, "message": "Invalid initialize parameters."})
                 return
             self.initialized = True
+            from local_delivery import enabled
+            if enabled(self.manager.config):
+                self.response(request_id, {'protocolVersion': params.get('protocolVersion', '2024-11-05'),
+                    'capabilities': {'tools': {}}, 'serverInfo': {'name': 'company-computer-use', 'version': VERSION},
+                    'instructions': 'Local-only authoring: use computer_process_editor for recording, editing inputs and skill preview. Business contents stay in the local window. Use computer_tasks action=run_local with task_id and pinned revision to open the local input form and execute. Poll computer_status(local_run_id). Never request raw data, images, defaults, change policy or use other file tools as a workaround. Existing model-review tasks require an explicitly edited new revision with local completion conditions; never auto-approve or replay uncertain input.'})
+                return
             if self.manager.config.get("tool_profile") == "simple":
                 from easy_api import INSTRUCTIONS
                 self.response(request_id, {"protocolVersion": params.get("protocolVersion", "2024-11-05"),
@@ -1226,7 +1294,9 @@ class StdioServer:
                 try:
                     self.response(request_id, self.manager.call(params["name"], params.get("arguments", {})))
                 except Exception as exc:
-                    self.response(request_id, result(str(exc), True))
+                    from local_delivery import enabled, filter_response
+                    failure = result(str(exc), True)
+                    self.response(request_id, filter_response(failure) if enabled(self.manager.config) else failure)
                 return
         if method == "tools/call" and isinstance(params, dict) and params.get("name") in {"computer_stop", "computer_end"}:
             try:
@@ -1238,7 +1308,9 @@ class StdioServer:
                 payload = self.manager.call(params["name"], params.get("arguments", {}))
                 self.response(request_id, payload)
             except Exception as exc:
-                self.response(request_id, result(str(exc), True))
+                from local_delivery import enabled, filter_response
+                failure = result(str(exc), True)
+                self.response(request_id, filter_response(failure) if enabled(self.manager.config) else failure)
             return
         if method not in {"tools/list", "tools/call"}:
             self.response(request_id, error={"code": -32601, "message": "Unsupported method."})

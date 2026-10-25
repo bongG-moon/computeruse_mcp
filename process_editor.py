@@ -1,4 +1,4 @@
-﻿"""Human-authored declarative processes, using the same guarded picker and task store."""
+"""Human-authored declarative processes, using the same guarded picker and task store."""
 from __future__ import annotations
 
 import copy
@@ -1018,7 +1018,48 @@ class ProcessEditors:
             return self._view(job, status="cancelling", message="편집 창 표시를 확인하지 못해 취소하고 있습니다.")
         return self._view(job)
 
+    def _authoring_view(self, job):
+        from authoring_inputs import describe_inputs
+        draft = job['draft']
+        return {'inputs': describe_inputs(draft.steps, draft.variables),
+                'saved_task': copy.deepcopy(job.get('saved_task', {'id': draft.task_id, 'revision': draft.revision} if draft.task_id else None)),
+                'dirty': job.get('dirty', not bool(draft.task_id)),
+                'can_undo': bool(job.get('undo')), 'can_redo': bool(job.get('redo'))}
+
     def _command(self, job, command):
+        # Only authoring snapshots are reversible. App input and approval
+        # receipts are never undone, synthesized or restored by this history.
+        action = command.get('action')
+        tracked = action in {'input_edit', 'edit_step', 'set_completion', 'add_step', 'remove_step', 'move_step', 'resolve_input', 'retarget_step'}
+        before = copy.deepcopy(job['draft'].__dict__) if tracked else None
+        try:
+            answer = self._command_impl(job, command)
+        except Exception:
+            if before is not None: job['draft'].__dict__ = before
+            raise
+        if tracked:
+            history = job.setdefault('undo', [])
+            history.append(before)
+            del history[:-8]
+            job['redo'] = []
+        if action in {'record', 'reimport_recording'}:
+            job['undo'], job['redo'] = [], []
+        if tracked or action in {'record', 'reimport_recording', 'undo', 'redo', 'ack_recording_warnings'}:
+            job['dirty'] = True
+            job['result']['status'] = 'editing'
+            preview = job.pop('skill_preview', None)
+            if preview: self._skill_previews().cancel(preview['preview_id'])
+        answer.update(self._authoring_view(job))
+        job['summaries'] = job['draft'].summaries()
+        return answer
+
+    def _skill_previews(self):
+        if not hasattr(self, 'skill_previews'):
+            from local_skill import LocalSkillPreviews
+            self.skill_previews = LocalSkillPreviews(self.tasks, self.tasks.path.parent)
+        return self.skill_previews
+
+    def _command_impl(self, job, command):
         self._check(job)
         action, payload = command.get("action"), command.get("payload")
         if not isinstance(payload, dict):
@@ -1026,6 +1067,43 @@ class ProcessEditors:
         draft, runtime = job["draft"], job["runtime"]
         extra = {}
         message = "반영했습니다."
+        if action == 'input_edit':
+            from authoring_inputs import edit_inputs
+            draft.steps, draft.variables = edit_inputs(draft.steps, draft.variables, payload.get('edit', payload))
+            draft.validate(allow_pending=True)
+            return {'status': 'ok', 'message': '입력값과 연결된 확인 조건을 함께 반영했습니다.', 'steps': draft.summaries()}
+        if action in {'undo', 'redo'}:
+            source, destination = ('undo', 'redo') if action == 'undo' else ('redo', 'undo')
+            if not job.get(source): raise OperationError('되돌릴 편집이 없습니다.')
+            job.setdefault(destination, []).append(copy.deepcopy(draft.__dict__))
+            identity = draft.task_id, draft.revision
+            # Selection observations and window bindings belong to the live
+            # session, not the recipe being edited. Never rewind them along
+            # with an old draft or resurrect an earlier approval state.
+            live = {key: getattr(draft, key) for key in ('programs', 'targets', 'selections')}
+            warnings, acknowledged = list(draft.recording_warnings), draft.recording_acknowledged
+            restored = job[source].pop()
+            restored['recording_acknowledged'] = (
+                acknowledged if restored.get('recording_warnings', []) == warnings else False)
+            draft.__dict__ = restored
+            draft.__dict__.update(live)
+            draft.task_id, draft.revision = identity
+            job['result']['recording_review'] = draft.recording_review()
+            return {'status': 'ok', 'message': '편집만 되돌렸습니다. 실제 앱 동작과 승인 기록은 바꾸지 않았습니다.',
+                    'steps': draft.summaries(), 'recording_review': draft.recording_review(), 'readiness': draft.readiness()}
+        if action in {'skill_preview', 'skill_export'}:
+            if job.get('dirty', not bool(draft.task_id)) or not draft.task_id:
+                raise OperationError('현재 편집 내용을 먼저 저장한 뒤 스킬을 확인하세요.', 'skill_unsaved_changes')
+            previews = self._skill_previews()
+            if action == 'skill_preview':
+                preview = previews.preview(draft.task_id, draft.revision)
+                job['skill_preview'] = preview
+                return {'status': 'ok', 'message': '저장한 버전의 로컬 스킬입니다.', 'skill_preview': preview}
+            preview = job.get('skill_preview')
+            if not preview or payload.get('preview_id') != preview['preview_id']:
+                raise OperationError('현재 스킬을 다시 미리 보세요.', 'skill_preview_stale')
+            return {'status': 'ok', 'message': '미리 본 내용 그대로 로컬 파일에 저장했습니다.',
+                    'skill_export': previews.export(preview['preview_id'], draft.task_id, draft.revision)}
         if action == "preview_step":
             index = payload.get("index")
             if set(payload) != {"index"} or type(index) is not int or not 0 <= index < len(draft.steps):
@@ -1040,9 +1118,10 @@ class ProcessEditors:
             preview["editable"] = {key: copy.deepcopy(step[key]) for key in ("value", "message", "key", "keys", "duration_ms", "timeout_ms", "checked") if key in step}
             if len(step.get("expect", [])) == 1:
                 preview["editable"]["expected"] = copy.deepcopy(step["expect"][0]["equals"])
-            variable = step.get("value")
-            if isinstance(variable, str) and variable.startswith("${") and variable.endswith("}") and variable[2:-1] in draft.variables:
-                preview["editable"].update(variable=variable[2:-1], variable_spec=copy.deepcopy(draft.variables[variable[2:-1]]))
+            from authoring_inputs import input_name
+            variable = input_name(step.get('value', step.get('checked')))
+            if variable in draft.variables:
+                preview['editable'].update(variable=variable, variable_spec=copy.deepcopy(draft.variables[variable]))
             count = 1
             while "input_" + str(count) in draft.variables: count += 1
             preview["editable"]["suggested_variable"] = "input_" + str(count)
@@ -1262,7 +1341,9 @@ class ProcessEditors:
             message = ("자동 완료 기준을 지정했습니다. 이 동작의 자동 생성 화면 확인을 생략합니다."
                 if len(draft.steps) < previous_count else "자동 완료 기준을 지정했습니다. 명시적으로 남긴 화면 확인은 유지합니다.")
         elif action == "test_run":
-            if set(payload) != {"name", "description"}: raise OperationError("프로세스 이름과 설명을 확인하세요.")
+            if not {'name', 'description'} <= set(payload) or set(payload) - {'name', 'description', 'inputs'}: raise OperationError('프로세스 이름과 설명을 확인하세요.')
+            from task_inputs import resolve_values
+            trial_inputs = resolve_values(draft.variables, payload.get('inputs', {}))
             draft.validate()
             if not draft.steps: raise OperationError("시험할 동작을 먼저 추가하세요.")
             runner = getattr(self, "test_runner", None)
@@ -1273,11 +1354,15 @@ class ProcessEditors:
                     "steps": copy.deepcopy(draft.steps), "variables": copy.deepcopy(draft.variables)}
             targets = [{key: target[key] for key in ("program_id", "pid", "window_id", "window_ref") if key in target}
                        for target in draft.programs if target["window_id"] > 0]
-            tested = runner(runtime, task, targets)
+            from local_delivery import require_local_task
+            if getattr(self, 'local_only', False): require_local_task(task)
+            frozen_task, frozen_targets, frozen_inputs = copy.deepcopy(task), copy.deepcopy(targets), copy.deepcopy(trial_inputs)
+            tested = runner(runtime, copy.deepcopy(task), copy.deepcopy(targets), inputs=copy.deepcopy(trial_inputs)) if trial_inputs else runner(runtime, copy.deepcopy(task), copy.deepcopy(targets))
             if not isinstance(tested, dict): raise OperationError("시험 실행 결과의 형식을 확인하지 못했습니다.", "editor_test_invalid_result")
             extra["test_result"] = self._trial_summary(tested, task)
             with self.lock:
-                job["test_task"], job["test_targets"], job["test_result_full"] = copy.deepcopy(task), copy.deepcopy(targets), copy.deepcopy(tested)
+                job["test_inputs"] = frozen_inputs
+                job["test_task"], job["test_targets"], job["test_result_full"] = frozen_task, frozen_targets, copy.deepcopy(tested)
                 job["result"]["last_test"] = copy.deepcopy(extra["test_result"])
             message = "시험 실행 결과를 확인하세요. 저장한 작업은 변경하지 않았습니다."
         elif action == "add_step":
@@ -1316,7 +1401,12 @@ class ProcessEditors:
                 # Task ID and history are independent. Step IDs remain local
                 # to this copied task so draft warning references stay intact.
                 saved = self.tasks.save(save_args)
-            draft.task_id, draft.revision = saved["id"], saved.get("revision", 1)
+            draft.task_id, draft.revision = saved['id'], saved.get('revision', 1)
+            job['dirty'] = False
+            job['saved_task'] = {'id': draft.task_id, 'task_id': draft.task_id, 'revision': draft.revision}
+            job['name'], job['description'] = name, description
+            preview = job.pop('skill_preview', None)
+            if preview: self._skill_previews().cancel(preview['preview_id'])
             # TaskStore has already persisted independent image templates.
             # Drafts and receipts whose normalization failed remain recoverable.
             if readiness["runnable"]:
@@ -1327,6 +1417,7 @@ class ProcessEditors:
                     except (OSError, ValueError):
                         extra["storage_notice"] = "프로세스는 저장됐습니다. 원본 정리 예약을 확인하지 못해 녹화 원본은 보존합니다."
             extra["saved_task"] = {"id": saved["id"], "name": saved["name"], "revision": draft.revision, "step_count": len(saved["steps"]), **readiness}
+            job['saved_task'] = copy.deepcopy(extra['saved_task'])
             message = ("프로세스를 저장했습니다. 실행할 수 있습니다." if readiness["runnable"] else
                        "초안을 저장했습니다 · 보완할 단계 " + str(readiness["unresolved_steps"]) + "개" + (" · 녹화 경고 확인 필요" if readiness["review_required"] else "") + ". 같은 프로세스를 다시 열어 이어서 수정할 수 있습니다.")
             if readiness["runnable"] and any("image_target" in step for step in _leaf_steps(draft.steps)):
@@ -1501,7 +1592,8 @@ class ProcessEditors:
             trial_signalled = True
             self._trial_signal(job, "running")
             result = self.test_runner(runtime, copy.deepcopy(job["test_task"]), copy.deepcopy(job["test_targets"]),
-                resume_run_id=previous["run_id"], observation_review=observation_review, acknowledge_checkpoint=acknowledge_checkpoint)
+                resume_run_id=previous["run_id"], observation_review=observation_review, acknowledge_checkpoint=acknowledge_checkpoint,
+                **({'inputs': copy.deepcopy(job['test_inputs'])} if job.get('test_inputs') else {}))
             if not isinstance(result, dict): raise OperationError("시험 실행 결과를 확인하지 못했습니다.", "editor_test_invalid_result")
             with self.lock:
                 job["test_result_full"] = copy.deepcopy(result)
@@ -1802,7 +1894,7 @@ class ProcessEditors:
             self._write(request, {"nonce": nonce, "timeout_seconds": timeout, "programs": job["draft"].program_views(),
                                  "max_steps": MAX_RECIPE_STEPS,
                                  "visual_review_enabled": job.get("visual_review_enabled", False),
-                                 "draft": {"name": job["name"], "description": job["description"], "task_id": job["draft"].task_id, "steps": job["summaries"], "recording_review": job["draft"].recording_review()}})
+                                 "draft": {"name": job["name"], "description": job["description"], "task_id": job["draft"].task_id, "steps": job["summaries"], "recording_review": job["draft"].recording_review(), **self._authoring_view(job)}})
             child = subprocess.Popen([str(helper), "--edit", str(request), str(response)], cwd=str(helper.parent),
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 close_fds=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0)
@@ -1828,7 +1920,7 @@ class ProcessEditors:
                     if type(seq) is not int or seq < 1 or seq > sequence + 1:
                         raise OperationError("편집 요청 순서를 확인하지 못했습니다.", "editor_invalid_sequence")
                     if seq == sequence + 1:
-                        if not visible or job["result"].get("status") == "saved":
+                        if not visible:
                             raise OperationError("편집 가능한 상태가 아닙니다.", "editor_invalid_state")
                         try:
                             with job["interaction_lock"]:
@@ -1850,10 +1942,12 @@ class ProcessEditors:
                         sequence = seq
                 if response.exists():
                     final = self._read(response, nonce)
-                    if job["result"].get("status") != "saved":
+                    if not job.get("saved_task"):
                         if final.get("status") not in {"cancelled", "timeout"}:
                             raise OperationError("프로세스 저장 확인 없이 편집 창이 종료되었습니다.", "editor_unsaved")
                         raise OperationError("저장하지 않고 프로세스 만들기를 종료했습니다.", "editor_cancelled")
+                    if job.get("saved_task"):
+                        job["result"].update(status="saved", saved_task=job["saved_task"], unsaved_changes=job.get("dirty", False))
                     break
                 if child.poll() is not None:
                     if job["result"].get("status") == "saved":

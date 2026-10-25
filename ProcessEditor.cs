@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Web.Script.Serialization;
@@ -142,7 +143,7 @@ internal static class ProcessEditor
     [STAThread]
     static int Main(string[] args)
     {
-        if (args.Length != 3 || args[0] != "--edit") return 2;
+        if (args.Length != 3 || (args[0] != "--edit" && args[0] != "--inputs" && args[0] != "--result")) return 2;
         string nonce = null, response = null;
         try {
             if (!Path.IsPathRooted(args[1]) || !Path.IsPathRooted(args[2])) return 2;
@@ -155,7 +156,21 @@ internal static class ProcessEditor
             try { SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch (EntryPointNotFoundException) { SetProcessDPIAware(); }
             Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
-            using (EditorForm editor = new EditorForm(data, result)) Application.Run(editor);
+            if (args[0] == "--result") {
+                using (var form = new LocalResultForm(data)) {
+                    form.Shown += delegate { Write(result + ".ready.json", new Dictionary<string, object> { { "nonce", token }, { "status", "ready" }, { "helper_pid", Process.GetCurrentProcess().Id }, { "helper_window_id", form.Handle.ToInt64() } }); };
+                    form.ShowDialog();
+                    Write(result, new Dictionary<string,object>{{"nonce",token},{"status","closed"}});
+                }
+            } else if (args[0] == "--inputs") {
+                using (var form = new LocalInputForm(data)) {
+                    form.Shown += delegate { Write(result + ".ready.json", new Dictionary<string, object> { { "nonce", token }, { "status", "ready" }, { "helper_pid", Process.GetCurrentProcess().Id }, { "helper_window_id", form.Handle.ToInt64() } }); };
+                    DialogResult outcome = form.ShowDialog();
+                    var answer = new Dictionary<string, object> { { "nonce", token }, { "status", outcome == DialogResult.OK ? "confirmed" : "cancelled" } };
+                    if (outcome == DialogResult.OK) answer["inputs"] = form.Values;
+                    Write(result, answer);
+                }
+            } else using (EditorForm editor = new EditorForm(data, result)) Application.Run(editor);
             return File.Exists(result) ? 0 : 3;
         } catch (Exception error) {
             if (nonce != null && response != null && !File.Exists(response)) {
@@ -165,6 +180,188 @@ internal static class ProcessEditor
             }
             return 2;
         }
+    }
+    internal static string InputText(object value)
+    {
+        if (value == null) return "";
+        if (value is bool) return (bool)value ? "true" : "false";
+        var entries = value as IEnumerable;
+        if (entries != null && !(value is string) && !(value is IDictionary)) {
+            var lines = new List<string>(); foreach (object item in entries) lines.Add(InputText(item)); return String.Join("\r\n", lines);
+        }
+        return Convert.ToString(value, CultureInfo.InvariantCulture);
+    }
+    internal static object ParseInputText(Dictionary<string, object> spec, string text)
+    {
+        string kind = Str(spec, "type", "text");
+        if (kind == "list") {
+            var items = Map(spec, "items"); if (items == null || Str(items, "type", "") == "list") throw new ArgumentException("목록의 항목 형식을 확인하세요.");
+            var result = new List<object>();
+            foreach (string line in text.Replace("\r\n", "\n").Split('\n')) result.Add(ParseInputText(items, line));
+            if (text.Length == 0 || result.Count > Num(spec, "max_items", 1000)) throw new ArgumentException("목록에 항목을 한 줄씩 입력하고 허용 개수를 확인하세요.");
+            return result;
+        }
+        if (kind == "boolean") {
+            if (text == "true" || text == "예") return true;
+            if (text == "false" || text == "아니요") return false;
+            throw new ArgumentException("예 또는 아니요를 선택하세요.");
+        }
+        if (kind == "number" || kind == "integer") {
+            double number; long integer;
+            if (!Double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out number) || Double.IsNaN(number) || Double.IsInfinity(number) || Math.Abs(number) > 1e15)
+                throw new ArgumentException("올바른 숫자를 입력하세요. 소수점은 .으로 표시합니다.");
+            if (kind == "integer" && !Int64.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out integer)) throw new ArgumentException("정수를 입력하세요.");
+            double boundary;
+            if (spec.ContainsKey("minimum") && Double.TryParse(InputText(spec["minimum"]), NumberStyles.Float, CultureInfo.InvariantCulture, out boundary) && number < boundary ||
+                spec.ContainsKey("maximum") && Double.TryParse(InputText(spec["maximum"]), NumberStyles.Float, CultureInfo.InvariantCulture, out boundary) && number > boundary)
+                throw new ArgumentException("지정된 숫자 범위 안의 값을 입력하세요.");
+            return kind == "integer" ? (object)Int64.Parse(text, CultureInfo.InvariantCulture) : number;
+        }
+        if (kind != "text" && kind != "date" && kind != "enum") throw new ArgumentException("지원하지 않는 입력 형식입니다.");
+        if (text.Length > 4000 || text.IndexOf('\0') >= 0) throw new ArgumentException("입력값은 4,000자 이내여야 합니다.");
+        if (kind == "date") {
+            DateTime date;
+            if (!DateTime.TryParseExact(text, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out date)) throw new ArgumentException("날짜를 YYYY-MM-DD 형식으로 입력하세요.");
+        }
+        if (kind == "enum") {
+            bool found = false; var options = List(spec, "values");
+            if (options != null) foreach (object option in options) if (Object.Equals(option, text)) found = true;
+            if (!found) throw new ArgumentException("목록에 있는 값 중 하나를 선택하세요.");
+        }
+        return text;
+    }
+    internal static void FinishLocalDialog(Form form)
+    {
+        // All local forms are authored in 96-DPI units. Without this explicit
+        // baseline WinForms can size the form in raw pixels while rendering
+        // its font at the monitor DPI, clipping both content and footer buttons.
+        form.ResumeLayout(true);
+        form.PerformAutoScale();
+        FitLocalDialog(form, Screen.FromControl(form).WorkingArea);
+    }
+    internal static void FitLocalDialog(Form form, Rectangle working)
+    {
+        int width = Math.Max(1, working.Width), height = Math.Max(1, working.Height);
+        form.MinimumSize = new Size(Math.Min(form.MinimumSize.Width, width), Math.Min(form.MinimumSize.Height, height));
+        form.Size = new Size(Math.Min(form.Width, width), Math.Min(form.Height, height));
+        form.StartPosition = FormStartPosition.Manual;
+        form.Location = new Point(working.Left + (width - form.Width) / 2, working.Top + (height - form.Height) / 2);
+        form.PerformLayout();
+    }
+    internal sealed class LocalResultForm : Form
+    {
+        readonly Timer lifetime = new Timer();
+        internal LocalResultForm(Dictionary<string,object> request)
+        {
+            SuspendLayout(); AutoScaleDimensions=new SizeF(96F,96F); AutoScaleMode=AutoScaleMode.Dpi;
+            var result=Map(request,"result"); if(result==null)throw new ArgumentException("missing_local_result");
+            Text="작업 실행 결과 · 이 PC에서만 표시";Font=new Font("맑은 고딕",10);BackColor=Color.FromArgb(245,247,251);
+            ClientSize=new Size(650,430);MinimumSize=new Size(500,340);
+            bool verified=Object.Equals(result.ContainsKey("task_verified")?result["task_verified"]:null,true);
+            string state=Str(result,"status","unknown");
+            string title=verified?"작업을 완료하고 결과를 확인했습니다.":state=="cancelled"?"작업이 취소되었습니다.":"작업을 끝내려면 확인이 필요합니다.";
+            var heading=new Label {Text=title,Font=new Font(Font.FontFamily,14,FontStyle.Bold),ForeColor=verified?Color.FromArgb(26,100,74):Color.FromArgb(24,43,72),Dock=DockStyle.Top,Height=90,Padding=new Padding(20),Name="LocalResultHeading",AccessibleName="작업 결과"};Controls.Add(heading);
+            var bottom=new FlowLayoutPanel {Dock=DockStyle.Bottom,Height=70,Padding=new Padding(12),FlowDirection=FlowDirection.RightToLeft};Controls.Add(bottom);
+            var close=new Button {Text="닫기",Width=110,Height=34,DialogResult=DialogResult.OK,Name="CloseLocalResult",AccessibleName="닫기"};bottom.Controls.Add(close);AcceptButton=CancelButton=close;
+            var lines=new List<string>();
+            lines.Add("진행: "+Num(result,"completed_steps",0)+" / "+Num(result,"total_steps",0)+" 단계");
+            lines.Add("상태: "+state);
+            string summary=Str(result,"summary","");if(summary.Length>0)lines.Add(summary);
+            var diagnostic=Map(result,"diagnostic");string code=Str(diagnostic,"code","");string message=Str(diagnostic,"message","");
+            if(code.Length>0)lines.Add("확인 코드: "+code);
+            if(message.Length>0)lines.Add(message);
+            if(!verified)lines.Add("이미 전달된 입력은 자동으로 반복하지 않았습니다. 원인을 확인한 뒤 기존 실행을 이어가세요.");
+            var body=new TextBox {ReadOnly=true,Multiline=true,ScrollBars=ScrollBars.Vertical,WordWrap=true,BackColor=Color.White,BorderStyle=BorderStyle.FixedSingle,Dock=DockStyle.Fill,Text=String.Join("\r\n\r\n",lines),Name="LocalResultDetails",AccessibleName="실행 결과 상세"};
+            var panel=new Panel {Dock=DockStyle.Fill,Padding=new Padding(20,0,20,0)};panel.Controls.Add(body);Controls.Add(panel);panel.BringToFront();
+            int seconds=Num(request,"timeout_seconds",600);if(seconds<30||seconds>1800)throw new ArgumentException("invalid_timeout");DateTime deadline=DateTime.UtcNow.AddSeconds(seconds);
+            lifetime.Interval=500;lifetime.Tick+=delegate {if(DateTime.UtcNow>=deadline)Close();};lifetime.Start();
+            FinishLocalDialog(this);
+        }
+        protected override void Dispose(bool disposing) {if(disposing)lifetime.Dispose();base.Dispose(disposing);}
+    }
+    internal sealed class LocalInputForm : Form
+    {
+        internal Dictionary<string, object> Values = new Dictionary<string, object>();
+        readonly Timer lifetime = new Timer();
+        readonly List<Dictionary<string, object>> definitions = new List<Dictionary<string, object>>();
+        readonly Dictionary<string, Control> editors = new Dictionary<string, Control>();
+        internal LocalInputForm(Dictionary<string, object> request)
+        {
+            SuspendLayout(); AutoScaleDimensions=new SizeF(96F,96F); AutoScaleMode=AutoScaleMode.Dpi;
+            Text = Str(request,"title","실행할 입력값 · 이 PC에서만 사용"); Font = new Font("맑은 고딕", 10); BackColor = Color.FromArgb(245,247,251);
+            ClientSize = new Size(620, 530); MinimumSize = new Size(500, 400);
+            var intro = new Label { Text = Str(request,"intro","필요한 값만 입력하세요. 입력값은 로컬 실행에 전달하며 채팅이나 스킬 파일에 넣지 않습니다."), Dock = DockStyle.Top, Height = 60, Padding = new Padding(16) }; Controls.Add(intro);
+            var bottom = new Panel { Dock = DockStyle.Bottom, Height = 110, Padding = new Padding(16) }; Controls.Add(bottom);
+            var error = new Label { ForeColor = Color.Firebrick, AutoEllipsis = true, Dock = DockStyle.Top, Height = 26 }; bottom.Controls.Add(error);
+            var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 42, FlowDirection = FlowDirection.RightToLeft };
+            var cancel = new Button { Text = "취소", Width = 100, Height = 32, DialogResult = DialogResult.Cancel, Name = "CancelLocalInputs", AccessibleName = "취소" };
+            string confirmLabel=Str(request,"confirm_label","이 값으로 실행");
+            var start = new Button { Text = confirmLabel, Width = 160, Height = 32, Name = "ConfirmLocalInputs", AccessibleName = confirmLabel };
+            buttons.Controls.Add(cancel); buttons.Controls.Add(start); bottom.Controls.Add(buttons); CancelButton = cancel;
+            var fields = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(18) }; Controls.Add(fields); fields.BringToFront();
+            var items = List(request, "inputs"); if (items == null) throw new ArgumentException("missing_input_definitions");
+            foreach (object raw in items) {
+                var entry = raw as Dictionary<string, object>; var spec = Map(entry, "spec"); string key = Str(entry, "name", "");
+                if (key.Length == 0 || spec == null || editors.ContainsKey(key) || definitions.Count >= 30) throw new ArgumentException("invalid_input_definitions");
+                definitions.Add(entry);
+                string kind = Str(spec, "type", "text"), label = Str(spec, "description", key); if (label.Length == 0) label = key;
+                fields.Controls.Add(new Label { Text = label + (spec.ContainsKey("default") ? " · 기본값 변경 가능" : " · 매번 입력"), Width = 540, Height = 28, AutoEllipsis = true });
+                Control control;
+                var itemSpec=kind=="list"?Map(spec,"items"):null;
+                // A normal foreach list is ordered and may contain repeats.
+                // Checklists are only for explicit set-like local choosers.
+                bool multipleChoice=Object.Equals(request.ContainsKey("multiple_choice_lists")?request["multiple_choice_lists"]:null,true)
+                    &&itemSpec!=null&&Str(itemSpec,"type","")=="enum";
+                if(multipleChoice) {
+                    var checklist=new CheckedListBox {Width=530,Height=150,CheckOnClick=true,IntegralHeight=false,HorizontalScrollbar=true};
+                    var defaults=new HashSet<string>(StringComparer.Ordinal);var defaultEntries=List(spec,"default");
+                    if(defaultEntries!=null)foreach(object item in defaultEntries)defaults.Add(Convert.ToString(item));
+                    var options=List(itemSpec,"values");if(options!=null)foreach(object option in options){string code=Convert.ToString(option);checklist.Items.Add(new Choice {Code=code,Label=code},defaults.Contains(code));}
+                    control=checklist;
+                } else if (kind == "enum" || kind == "boolean") {
+                    var combo = new ComboBox { Width = 530, Height = 32, DropDownStyle = ComboBoxStyle.DropDownList };
+                    if (kind == "boolean") { combo.Items.Add(new Choice { Code = "true", Label = "예" }); combo.Items.Add(new Choice { Code = "false", Label = "아니요" }); }
+                    else { var options = List(spec, "values"); if (options != null) foreach (object option in options) combo.Items.Add(new Choice { Code = Convert.ToString(option), Label = Convert.ToString(option) }); }
+                    if (spec.ContainsKey("default")) foreach (Choice option in combo.Items) if (option.Code == InputText(spec["default"])) combo.SelectedItem = option;
+                    control = combo;
+                } else {
+                    control = new TextBox { Width = 530, Height = kind == "list" ? 100 : 34, Multiline = kind == "list", ScrollBars = kind == "list" ? ScrollBars.Vertical : ScrollBars.None,
+                        MaxLength = kind == "list" ? 200000 : 4000, Text = spec.ContainsKey("default") ? InputText(spec["default"]) : "" };
+                }
+                control.Name = "LocalInput_" + key; control.AccessibleName = label; control.Margin = new Padding(0,0,0,12); editors.Add(key,control); fields.Controls.Add(control);
+                if (kind == "date" || kind == "list") fields.Controls.Add(new Label { Text = kind == "date" ? "예: 2026-10-25" : multipleChoice ? "사용할 항목을 하나 이상 체크하세요." : "한 줄에 항목 하나. 반복 실행은 저장된 작업의 반복 구간을 사용합니다.", ForeColor = Color.DimGray, Width = 540, Height = 30 });
+            }
+            start.Click += delegate {
+                try {
+                    var values = new Dictionary<string, object>();
+                    foreach (var entry in definitions) {
+                        string key = Str(entry,"name","");
+                        values.Add(key, ReadControlValue(Map(entry,"spec"),editors[key]));
+                    }
+                    Values = values; DialogResult = DialogResult.OK; Close();
+                } catch (ArgumentException failure) { error.Text = failure.Message; }
+            };
+            int seconds = Num(request, "timeout_seconds", 600); if (seconds < 30 || seconds > 1800) throw new ArgumentException("invalid_timeout");
+            DateTime deadline = DateTime.UtcNow.AddSeconds(seconds);
+            lifetime.Interval = 500; lifetime.Tick += delegate { if (DateTime.UtcNow >= deadline) { DialogResult = DialogResult.Cancel; Close(); } }; lifetime.Start();
+            fields.ClientSizeChanged += delegate {
+                int available = Math.Max(1, fields.ClientSize.Width-fields.Padding.Horizontal-SystemInformation.VerticalScrollBarWidth);
+                foreach(Control control in fields.Controls) control.Width=Math.Max(1,available-control.Margin.Horizontal);
+            };
+            FinishLocalDialog(this);
+        }
+        internal static object ReadControlValue(Dictionary<string,object> spec,Control control)
+        {
+            var multiple=control as CheckedListBox;
+            if(multiple!=null) {
+                var item=Map(spec,"items");if(Str(spec,"type","")!="list"||item==null||Str(item,"type","")!="enum")throw new ArgumentException("선택 목록의 형식을 확인하세요.");
+                var values=new List<object>();foreach(object raw in multiple.CheckedItems){var selected=raw as Choice;if(selected==null)throw new ArgumentException("선택 항목을 확인하세요.");values.Add(ParseInputText(item,selected.Code));}
+                if(values.Count<1||values.Count>Num(spec,"max_items",1000))throw new ArgumentException("항목을 하나 이상 선택하고 허용 개수를 확인하세요.");return values;
+            }
+            var combo=control as ComboBox;string text=combo==null?control.Text:combo.SelectedItem==null?"":((Choice)combo.SelectedItem).Code;
+            return ParseInputText(spec,text);
+        }
+        protected override void Dispose(bool disposing) { if (disposing) lifetime.Dispose(); base.Dispose(disposing); }
     }
     internal sealed class Choice
     {
@@ -185,6 +382,15 @@ internal static class ProcessEditor
         readonly TextBox value = new TextBox(), optionOrder = new TextBox(), expected = new TextBox(), processName = new TextBox(), description = new TextBox();
         readonly NumericUpDown seconds = new NumericUpDown();
         readonly ListView steps = new ListView();
+        readonly TabControl authoringTabs = new TabControl();
+        readonly ListView inputList = new ListView();
+        readonly TextBox skillText = new TextBox();
+        readonly Label inputHelp = new Label(), skillHelp = new Label();
+        readonly Button newInput = new Button(), changeInput = new Button(), removeInput = new Button(), bindInput = new Button(), unbindInput = new Button(), previewSkill = new Button(), exportSkill = new Button(), undo = new Button(), redo = new Button();
+        readonly List<Dictionary<string, object>> inputDefinitions = new List<Dictionary<string, object>>();
+        Dictionary<string, object> savedTask, skillPreview;
+        bool draftDirty, canUndo, canRedo, loadingDraft;
+        string savedName = "", savedDescription = "";
         readonly FlowLayoutPanel fields = new FlowLayoutPanel();
         readonly Panel valueSection = new Panel(), optionSection = new Panel(), timeSection = new Panel(), expectSection = new Panel(), completionSection = new Panel();
         readonly Button pick = new Button(), pickImage = new Button(), record = new Button(), reanalyzeRecording = new Button(), reviewRecording = new Button(), editInput = new Button(), pickExpect = new Button(), add = new Button(), save = new Button(), trial = new Button(), up = new Button(), down = new Button(), remove = new Button();
@@ -302,12 +508,37 @@ internal static class ProcessEditor
             saveMode.SelectedIndex = 1;
             right.Controls.Add(new Label { Text = "업무 설명 (선택 사항)", Bounds = Box(20, 93, 508, 25), ForeColor = muted, Font = new Font(Font.FontFamily, 9, FontStyle.Bold) });
             description.Multiline = true; description.MaxLength = 4000; description.ScrollBars = ScrollBars.Vertical; Input(description, "ProcessDescription", Box(20, 122, 508, 56), right);
-            right.Controls.Add(new Label { Text = "실행 순서 · 두 번 클릭 / Enter로 대상 확인", Bounds = Box(20, 195, 508, 25), ForeColor = blue, Font = new Font(Font.FontFamily, 11, FontStyle.Bold) });
-            steps.Bounds = Box(20, 229, 508, 260); steps.View = View.Details; steps.FullRowSelect = true; steps.MultiSelect = false; steps.HideSelection = false;
+            authoringTabs.Bounds = Box(16, 192, 516, 358); Identify(authoringTabs, "AuthoringTabs", "단계 · 입력값 · 스킬 보기"); right.Controls.Add(authoringTabs);
+            var stepsPage = new TabPage("단계") { BackColor = Color.White };
+            var inputsPage = new TabPage("입력값") { BackColor = Color.White };
+            var skillPage = new TabPage("스킬 보기") { BackColor = Color.White };
+            authoringTabs.TabPages.Add(stepsPage); authoringTabs.TabPages.Add(inputsPage); authoringTabs.TabPages.Add(skillPage);
+            stepsPage.Controls.Add(new Label { Text = "실행 순서 · 두 번 클릭 / Enter로 대상 확인", Bounds = Box(8, 6, 488, 25), ForeColor = blue });
+            steps.Bounds = Box(8, 36, 488, 225); steps.View = View.Details; steps.FullRowSelect = true; steps.MultiSelect = false; steps.HideSelection = false;
             steps.HeaderStyle = ColumnHeaderStyle.Nonclickable; steps.GridLines = false; steps.BorderStyle = BorderStyle.FixedSingle;
-            steps.Columns.Add("순서", Px(44)); steps.Columns.Add("프로그램", Px(104)); steps.Columns.Add("동작 / 대상", Px(166)); steps.Columns.Add("내용", Px(170)); Identify(steps, "ProcessSteps", "프로세스 실행 순서"); right.Controls.Add(steps);
-            ButtonStyle(up, "MoveStepUp", "위로", Box(20, 507, 82, 38), false, right); ButtonStyle(down, "MoveStepDown", "아래로", Box(110, 507, 82, 38), false, right);
-            ButtonStyle(editInput, "ResolveInput", "값·조건 수정", Box(200, 507, 176, 38), false, right); ButtonStyle(remove, "RemoveStep", "단계 삭제", Box(384, 507, 144, 38), false, right);
+            steps.Columns.Add("순서", Px(40)); steps.Columns.Add("프로그램", Px(96)); steps.Columns.Add("동작 / 대상", Px(164)); steps.Columns.Add("내용", Px(170)); Identify(steps, "ProcessSteps", "프로세스 실행 순서"); stepsPage.Controls.Add(steps);
+            ButtonStyle(up, "MoveStepUp", "위로", Box(8, 272, 58, 34), false, stepsPage); ButtonStyle(down, "MoveStepDown", "아래로", Box(72, 272, 58, 34), false, stepsPage);
+            ButtonStyle(editInput, "ResolveInput", "값·조건", Box(136, 272, 100, 34), false, stepsPage); ButtonStyle(remove, "RemoveStep", "삭제", Box(242, 272, 64, 34), false, stepsPage);
+            ButtonStyle(undo, "UndoEdit", "되돌리기", Box(320,272,78,34),false,stepsPage); ButtonStyle(redo,"RedoEdit","다시 적용",Box(404,272,78,34),false,stepsPage);
+            inputHelp.Text = "실행마다 바꿀 값을 모아서 관리합니다. 값은 이 PC에만 저장합니다."; inputHelp.ForeColor = muted; inputHelp.Bounds = Box(8,6,488,42); inputsPage.Controls.Add(inputHelp);
+            inputList.Bounds = Box(8,52,488,198); inputList.View = View.Details; inputList.FullRowSelect = true; inputList.MultiSelect = false; inputList.HideSelection = false;
+            inputList.Columns.Add("입력 이름",Px(160)); inputList.Columns.Add("형식",Px(72)); inputList.Columns.Add("기본값",Px(130)); inputList.Columns.Add("사용 단계",Px(100)); Identify(inputList,"InputDefinitions","실행할 입력값"); inputsPage.Controls.Add(inputList);
+            ButtonStyle(newInput,"NewInput","추가",Box(8,266,56,36),false,inputsPage); ButtonStyle(changeInput,"EditInputDefinition","수정",Box(70,266,56,36),false,inputsPage);
+            ButtonStyle(removeInput,"RemoveInputDefinition","삭제",Box(132,266,56,36),false,inputsPage); ButtonStyle(bindInput,"BindInputToStep","단계에 연결",Box(196,266,138,36),false,inputsPage);
+            ButtonStyle(unbindInput,"UnbindInputFromStep","고정값으로",Box(342,266,146,36),false,inputsPage);
+            skillHelp.Text = "저장한 작업의 호출 안내를 미리 봅니다. 업무 값과 화면은 넣지 않습니다."; skillHelp.ForeColor = muted; skillHelp.Bounds = Box(8,6,488,44); skillPage.Controls.Add(skillHelp);
+            skillText.Multiline = true; skillText.ReadOnly = true; skillText.ScrollBars = ScrollBars.Both; skillText.WordWrap = false; skillText.Font = new Font("Consolas",9); skillText.Bounds = Box(8,56,488,196); Identify(skillText,"SkillPreviewText","스킬 파일 전체 미리보기"); skillPage.Controls.Add(skillText);
+            ButtonStyle(previewSkill,"PreviewSkill","미리보기 갱신",Box(8,266,206,36),false,skillPage); ButtonStyle(exportSkill,"ExportSkill","보이는 내용 내보내기",Box(226,266,262,36),true,skillPage);
+            inputList.SelectedIndexChanged += delegate { UpdateButtons(); };
+            newInput.Click += delegate { EditInputDefinition(null); };
+            changeInput.Click += delegate { if (inputList.SelectedItems.Count==1) EditInputDefinition(inputList.SelectedItems[0].Tag as Dictionary<string,object>); };
+            removeInput.Click += delegate { if(inputList.SelectedItems.Count==1) { var item=inputList.SelectedItems[0].Tag as Dictionary<string,object>; Send("input_edit",new Dictionary<string,object>{{"edit",new Dictionary<string,object>{{"action","remove"},{"name",Str(item,"name","")}}}},null); } };
+            bindInput.Click += delegate { BindSelectedInput(); };
+            unbindInput.Click += delegate { UnbindSelectedInput(); };
+            undo.Click += delegate { Send("undo",new Dictionary<string,object>(),null); };
+            redo.Click += delegate { Send("redo",new Dictionary<string,object>(),null); };
+            previewSkill.Click += delegate { Send("skill_preview",new Dictionary<string,object>(),null); };
+            exportSkill.Click += delegate { if(skillPreview!=null) Send("skill_export",new Dictionary<string,object>{{"preview_id",Str(skillPreview,"preview_id","")}},null); };
             status.Text = "화면에서 대상을 선택하거나 녹화를 시작하세요."; status.ForeColor = muted; status.Bounds = Box(26, 688, 532, 44); Identify(status, "ProcessEditorStatus", "프로세스 작성 상태"); Controls.Add(status);
             ButtonStyle(trial, "TestProcess", "▷ 시험 실행", Box(574, 692, 156, 38), false, this);
             ButtonStyle(save, "SaveProcess", "프로세스 저장", Box(748, 692, 176, 38), true, this);
@@ -328,12 +559,12 @@ internal static class ProcessEditor
             reanalyzeRecording.Click += delegate { Send("reimport_recording", new Dictionary<string, object>(), null); };
             reviewRecording.Click += delegate { ShowRecordingReview(); };
             editInput.Click += delegate { if (steps.SelectedIndices.Count == 1) Send("preview_step", new Dictionary<string, object> { { "index", steps.SelectedIndices[0] } }, "edit"); };
-            trial.Click += delegate { Send("test_run", new Dictionary<string, object> { { "name", processName.Text.Trim() }, { "description", description.Text } }, null); if (busy) { hiddenForPicker = true; Hide(); } };
+            trial.Click += delegate { StartTrial(); };
             save.Click += delegate { Send("save", new Dictionary<string, object> { { "name", processName.Text.Trim() }, { "description", description.Text }, { "save_mode", ((Choice)saveMode.SelectedItem).Code } }, null); };
-            cancel.Click += delegate { Finish("cancelled", null); };
+            cancel.Click += delegate { CloseEditor(); };
             up.Click += delegate { MoveStep(-1); }; down.Click += delegate { MoveStep(1); };
             remove.Click += delegate { if (steps.SelectedIndices.Count == 1) Send("remove_step", new Dictionary<string, object> { { "index", steps.SelectedIndices[0] } }, null); };
-            steps.SelectedIndexChanged += delegate { UpdateButtons(); }; processName.TextChanged += delegate { UpdateButtons(); };
+            steps.SelectedIndexChanged += delegate { UpdateButtons(); }; processName.TextChanged += delegate { InvalidateSkill(); UpdateButtons(); }; description.TextChanged += delegate { InvalidateSkill(); UpdateButtons(); };
             steps.DoubleClick += delegate { if (!busy && steps.SelectedIndices.Count == 1) Send("preview_step", new Dictionary<string, object> { { "index", steps.SelectedIndices[0] } }, null); };
             steps.KeyDown += delegate(object sender, KeyEventArgs e) {
                 if (e.KeyCode == Keys.Enter && !busy && steps.SelectedIndices.Count == 1) {
@@ -342,13 +573,13 @@ internal static class ProcessEditor
                 }
             };
             program.SelectedIndex = 0; PopulateActions(); UpdateExpectFields();
-            var draft = Map(request, "draft"); processName.Text = Str(draft, "name", ""); description.Text = Str(draft, "description", ""); UpdateSteps(List(draft, "steps")); SetRecordingReview(Map(draft, "recording_review")); UpdateButtons();
+            loadingDraft = true; var draft = Map(request, "draft"); processName.Text = Str(draft, "name", ""); description.Text = Str(draft, "description", ""); UpdateSteps(List(draft, "steps")); SetRecordingReview(Map(draft, "recording_review")); UpdateAuthoring(draft); loadingDraft = false; UpdateButtons();
             editingExisting = Str(draft, "task_id", "").Length > 0;
             saveMode.SelectedIndex = editingExisting ? 0 : 1;
             saveMode.Enabled = editingExisting;
             saveMode.SelectedIndexChanged += delegate { UpdateButtons(); };
             UpdateButtons();
-            FormClosing += delegate(object sender, FormClosingEventArgs args) { if (!done) { args.Cancel = true; Finish("cancelled", null); } };
+            FormClosing += delegate(object sender, FormClosingEventArgs args) { if (!done) { args.Cancel = true; CloseEditor(); } };
             Shown += delegate { BeginInvoke(new Action(delegate {
                 if (!Visible || !IsWindowVisible(Handle)) { Finish("startup_failed", new Dictionary<string, object> { { "code", "editor_not_visible" } }); return; }
                 Write(response + ".ready.json", new Dictionary<string, object> { { "nonce", nonce }, { "status", "ready" }, { "helper_pid", Process.GetCurrentProcess().Id }, { "helper_window_id", Handle.ToInt64() } });
@@ -356,6 +587,146 @@ internal static class ProcessEditor
             })); };
         }
 
+        bool UnsavedChanges { get { return draftDirty || savedTask != null && (processName.Text.Trim() != savedName || description.Text != savedDescription); } }
+        void InvalidateSkill()
+        {
+            if (loadingDraft) return;
+            skillPreview = null; skillText.Clear();
+            skillHelp.Text = "변경 내용을 저장한 뒤 미리보기를 갱신하세요. 저장 전 내용을 내보내지 않습니다.";
+        }
+        internal void DisplaySkillPreview(Dictionary<string,object> preview)
+        {
+            // WinForms multiline edit controls require CRLF for visible line
+            // breaks. Normalize only this presentation string: the reviewed
+            // preview ID, original Markdown, hash and export bytes stay intact.
+            skillPreview = preview;
+            string original = Str(preview,"skill_markdown","");
+            skillText.Text = original.Replace("\r\n","\n").Replace("\r","\n").Replace("\n","\r\n");
+            skillHelp.Text=preview==null?"미리보기를 만들지 못했습니다.":"저장본 v"+Num(preview,"revision",1)+" · 화면에 보이는 파일 그대로 내보냅니다. 자동 설치하지 않습니다.";
+        }
+        void CloseEditor()
+        {
+            // Preserve cancellation while a local request is outstanding.
+            // Closing never claims that already dispatched app input was undone.
+            if (busy) { Finish("cancelled",null); return; }
+            if (UnsavedChanges && MessageBox.Show(this,"아직 저장하지 않은 편집 내용이 있습니다. 저장하지 않고 닫을까요?", "편집 내용 확인",MessageBoxButtons.YesNo,MessageBoxIcon.Question)!=DialogResult.Yes) return;
+            if (savedTask != null && !UnsavedChanges) Finish("saved",new Dictionary<string,object>{{"saved_task",savedTask}});
+            else Finish("cancelled",null);
+        }
+        void UpdateAuthoring(Dictionary<string,object> result)
+        {
+            if (result == null) return;
+            if (result.ContainsKey("dirty")) draftDirty = Object.Equals(result["dirty"],true);
+            if (result.ContainsKey("can_undo")) canUndo=Object.Equals(result["can_undo"],true);
+            if (result.ContainsKey("can_redo")) canRedo=Object.Equals(result["can_redo"],true);
+            if (result.ContainsKey("saved_task")) {
+                var saved=Map(result,"saved_task");
+                if(saved!=null) {
+                    bool changed=savedTask==null || Str(savedTask,"id",Str(savedTask,"task_id",""))!=Str(saved,"id",Str(saved,"task_id","")) || Num(savedTask,"revision",0)!=Num(saved,"revision",0);
+                    savedTask=saved;if(changed){savedName=processName.Text.Trim();savedDescription=description.Text;}editingExisting=true;
+                }
+            } else if (Str(result,"task_id","").Length>0 && savedTask==null) {
+                savedTask=new Dictionary<string,object>{{"id",Str(result,"task_id","")},{"revision",Num(result,"revision",1)}};
+                savedName=processName.Text.Trim(); savedDescription=description.Text;
+            }
+            if(result.ContainsKey("inputs")) {
+                string chosen=inputList.SelectedItems.Count==1?Str(inputList.SelectedItems[0].Tag as Dictionary<string,object>,"name",""):"";
+                inputDefinitions.Clear(); inputList.Items.Clear(); var entries=List(result,"inputs");
+                if(entries!=null) foreach(object raw in entries) {
+                    var entry=raw as Dictionary<string,object>; var spec=Map(entry,"spec"); if(entry==null || spec==null) continue;
+                    inputDefinitions.Add(entry); string key=Str(entry,"name",""); string label=Str(spec,"description",key); if(label.Length==0) label=key;
+                    var uses=new List<string>(); var used=List(entry,"uses");
+                    if(used!=null) foreach(object rawUse in used) { var use=rawUse as Dictionary<string,object>; string n=(Num(use,"index",-1)+1).ToString(); if(n!="0"&&!uses.Contains(n)) uses.Add(n); }
+                    var row=new ListViewItem(label); row.SubItems.Add(TypeLabel(Str(spec,"type","text"))); row.SubItems.Add(spec.ContainsKey("default")?InputText(spec["default"]).Replace("\r\n"," / "):"매번 입력"); row.SubItems.Add(uses.Count==0?"연결 없음":String.Join(", ",uses)); row.Tag=entry; inputList.Items.Add(row); if(key==chosen) row.Selected=true;
+                }
+            }
+            if(UnsavedChanges) InvalidateSkill();
+            else if(skillPreview==null) skillHelp.Text=savedTask==null?"프로세스를 먼저 저장하면 실제 저장본의 스킬을 볼 수 있습니다.":"저장본 v"+Num(savedTask,"revision",1)+" · 미리보기에는 업무 값과 화면을 넣지 않습니다.";
+        }
+        static string TypeLabel(string type)
+        {
+            switch(type) { case "date": return "날짜"; case "enum":return "선택 목록"; case "number":return "숫자"; case "integer":return "정수";case "boolean":return "예/아니요";case "list":return "반복 목록";default:return "글자"; }
+        }
+        void StartTrial()
+        {
+            var inputs=new Dictionary<string,object>();
+            if(inputDefinitions.Count>0) using(var dialog=new LocalInputForm(new Dictionary<string,object>{{"inputs",inputDefinitions},{"timeout_seconds",600}})) {
+                if(dialog.ShowDialog(this)!=DialogResult.OK) return;
+                inputs=dialog.Values;
+            }
+            Send("test_run",new Dictionary<string,object>{{"name",processName.Text.Trim()},{"description",description.Text},{"inputs",inputs}},null);
+            if(busy) { hiddenForPicker=true; Hide(); }
+        }
+        void BindSelectedInput()
+        {
+            if(inputList.SelectedItems.Count!=1 || steps.SelectedIndices.Count!=1) return;
+            var chosen=inputList.SelectedItems[0].Tag as Dictionary<string,object>; int index=steps.SelectedIndices[0];
+            var step=steps.Items[index].Tag as Dictionary<string,object>; string operation=Str(step,"action","");
+            if(operation!="set_value" && operation!="select_option" && operation!="set_checked" && operation!="image_type_text") {
+                ShowError("실제 입력값을 바꾸는 단계만 연결할 수 있습니다. 이미지 클릭은 선택할 글자만 바꿔 재생할 수 없습니다."); return;
+            }
+            Send("input_edit",new Dictionary<string,object>{{"edit",new Dictionary<string,object>{{"action","bind"},{"index",index},{"name",Str(chosen,"name","")},{"field",operation=="set_checked"?"checked":"value"}}}},null);
+        }
+        void UnbindSelectedInput()
+        {
+            if(inputList.SelectedItems.Count!=1 || steps.SelectedIndices.Count!=1)return;
+            var chosen=inputList.SelectedItems[0].Tag as Dictionary<string,object>;int index=steps.SelectedIndices[0];string field=null;
+            var uses=List(chosen,"uses");if(uses!=null)foreach(object raw in uses){var use=raw as Dictionary<string,object>;if(Num(use,"index",-1)!=index)continue;var path=List(use,"path");if(path!=null){var names=new List<string>();foreach(object part in path)names.Add(Convert.ToString(part));if(names.Count==1&&(names[0]=="value"||names[0]=="checked"))field=names[0];}else {string value=Str(use,"path","");if(value=="value"||value=="checked")field=value;}}
+            if(field==null){ShowError("선택한 단계에 이 입력값이 직접 연결되어 있지 않습니다. ‘단계’ 탭에서 사용 중인 입력 단계를 선택하세요.");return;}
+            using(var dialog=new LocalInputForm(new Dictionary<string,object>{{"inputs",new object[]{chosen}},{"timeout_seconds",600}})){
+                dialog.Text="선택 단계의 고정값 지정";
+                if(dialog.ShowDialog(this)!=DialogResult.OK)return;
+                string name=Str(chosen,"name","");Send("input_edit",new Dictionary<string,object>{{"edit",new Dictionary<string,object>{{"action","unbind"},{"index",index},{"field",field},{"value",dialog.Values[name]}}}},null);
+            }
+        }
+        void EditInputDefinition(Dictionary<string,object> entry)
+        {
+            string name=Str(entry,"name",""); var original=Map(entry,"spec")??new Dictionary<string,object>{{"type","text"}};
+            if(name.Length==0) { var keys=new HashSet<string>(); foreach(var item in inputDefinitions) keys.Add(Str(item,"name","")); int n=1; while(keys.Contains("input_"+n)) n++; name="input_"+n; }
+            using(var dialog=new Form()) {
+                dialog.Text=entry==null?"실행할 입력값 추가":"실행할 입력값 수정"; dialog.Font=Font; dialog.BackColor=BackColor; dialog.StartPosition=FormStartPosition.CenterParent;
+                dialog.FormBorderStyle=FormBorderStyle.FixedDialog; dialog.MaximizeBox=dialog.MinimizeBox=false; dialog.ClientSize=new Size(Px(580),Px(570));
+                var area=new FlowLayoutPanel {Bounds=Box(22,18,536,470),AutoScroll=true,FlowDirection=FlowDirection.TopDown,WrapContents=false}; dialog.Controls.Add(area);
+                Action<string> heading=delegate(string text) {area.Controls.Add(new Label {Text=text,Width=Px(500),Height=Px(28),ForeColor=muted});};
+                heading("입력 이름 · 실행할 때 보이는 설명"); var label=new TextBox {Text=Str(original,"description","입력할 값"),Width=Px(500),MaxLength=200,Name="InputLabel",AccessibleName="입력 이름"}; area.Controls.Add(label);
+                heading("값의 형식"); var kind=new ComboBox {DropDownStyle=ComboBoxStyle.DropDownList,Width=Px(500),Name="InputType",AccessibleName="입력 형식"};
+                foreach(string type in new[]{"text","date","enum","number","integer","boolean","list"}) kind.Items.Add(new Choice {Code=type,Label=TypeLabel(type)}); area.Controls.Add(kind);
+                var each=new CheckBox {Text="기본값 없이 실행할 때마다 입력",Checked=!original.ContainsKey("default"),Width=Px(500),Height=Px(34),Name="InputEveryRun",AccessibleName="매번 입력"}; area.Controls.Add(each);
+                var optionsCaption=new Label {Text="선택 가능한 값 · 한 줄에 하나",Width=Px(500),Height=Px(28),ForeColor=muted}; area.Controls.Add(optionsCaption);
+                var options=new TextBox {Multiline=true,ScrollBars=ScrollBars.Vertical,Width=Px(500),Height=Px(76),MaxLength=200000,Name="InputOptions",AccessibleName="선택 목록"}; area.Controls.Add(options);
+                var itemType=new ComboBox {DropDownStyle=ComboBoxStyle.DropDownList,Width=Px(500),Name="ListItemType",AccessibleName="반복 목록의 항목 형식"};
+                foreach(string type in new[]{"text","date","enum","number","integer","boolean"}) itemType.Items.Add(new Choice {Code=type,Label="목록 항목: "+TypeLabel(type)}); area.Controls.Add(itemType);
+                var boundsCaption=new Label {Text="숫자 최소 / 최대 (비워 두면 제한 없음)",Width=Px(500),Height=Px(28),ForeColor=muted}; area.Controls.Add(boundsCaption);
+                var limits=new FlowLayoutPanel {Width=Px(500),Height=Px(36),FlowDirection=FlowDirection.LeftToRight,WrapContents=false};
+                var minimum=new TextBox {Width=Px(236),Name="InputMinimum",AccessibleName="최소값"}; var maximum=new TextBox {Width=Px(236),Name="InputMaximum",AccessibleName="최대값"}; limits.Controls.Add(minimum);limits.Controls.Add(maximum);area.Controls.Add(limits);
+                heading("기본값 · 날짜는 YYYY-MM-DD, 예/아니요는 true 또는 false");
+                var defaultValue=new TextBox {Multiline=true,ScrollBars=ScrollBars.Vertical,Width=Px(500),Height=Px(74),MaxLength=200000,Text=original.ContainsKey("default")?InputText(original["default"]):"",Name="InputDefault",AccessibleName="기본값"}; area.Controls.Add(defaultValue);
+                var error=new Label {Bounds=Box(22,492,536,30),ForeColor=Color.Firebrick};dialog.Controls.Add(error);
+                var confirm=new Button();ButtonStyle(confirm,"ApplyInputDefinition","변경 반영",Box(314,530,142,34),true,dialog);
+                var cancel=new Button();ButtonStyle(cancel,"CancelInputDefinition","취소",Box(468,530,90,34),false,dialog);cancel.DialogResult=DialogResult.Cancel;dialog.CancelButton=cancel;
+                Action refresh=delegate {string type=kind.SelectedItem==null?"text":((Choice)kind.SelectedItem).Code;string item=itemType.SelectedItem==null?"text":((Choice)itemType.SelectedItem).Code;bool enumeration=type=="enum" || type=="list"&&item=="enum";options.Visible=optionsCaption.Visible=enumeration;itemType.Visible=type=="list";string scalar=type=="list"?item:type;limits.Visible=boundsCaption.Visible=scalar=="number"||scalar=="integer";defaultValue.Enabled=!each.Checked;};
+                kind.SelectedIndexChanged+=delegate {refresh();};itemType.SelectedIndexChanged+=delegate{refresh();};each.CheckedChanged+=delegate{refresh();};
+                kind.SelectedIndex=0; foreach(Choice choice in kind.Items) if(choice.Code==Str(original,"type","text"))kind.SelectedItem=choice;
+                var scalarSpec=Str(original,"type","")=="list"?Map(original,"items")??new Dictionary<string,object>():original;
+                itemType.SelectedIndex=0;foreach(Choice choice in itemType.Items)if(choice.Code==Str(scalarSpec,"type","text"))itemType.SelectedItem=choice;
+                options.Text=scalarSpec.ContainsKey("values")?InputText(scalarSpec["values"]):"";minimum.Text=scalarSpec.ContainsKey("minimum")?InputText(scalarSpec["minimum"]):"";maximum.Text=scalarSpec.ContainsKey("maximum")?InputText(scalarSpec["maximum"]):"";refresh();
+                Dictionary<string,object> accepted=null;
+                confirm.Click+=delegate {
+                    try {
+                        string type=((Choice)kind.SelectedItem).Code,scalar=type=="list"?((Choice)itemType.SelectedItem).Code:type;
+                        var definition=new Dictionary<string,object>{{"type",scalar}};
+                        if(scalar=="enum") {var values=new List<string>();foreach(string line in options.Text.Replace("\r\n","\n").Split('\n')) {if(line.Length==0||values.Contains(line))throw new ArgumentException("선택 목록은 비어 있거나 중복된 값 없이 작성하세요.");values.Add(line);}if(values.Count>100)throw new ArgumentException("선택 목록은 100개 이내입니다.");definition["values"]=values;}
+                        if(scalar=="number"||scalar=="integer") {if(minimum.Text.Trim().Length>0)definition["minimum"]=ParseInputText(new Dictionary<string,object>{{"type",scalar}},minimum.Text);if(maximum.Text.Trim().Length>0)definition["maximum"]=ParseInputText(new Dictionary<string,object>{{"type",scalar}},maximum.Text);if(definition.ContainsKey("minimum")&&definition.ContainsKey("maximum")&&Convert.ToDouble(definition["minimum"])>Convert.ToDouble(definition["maximum"]))throw new ArgumentException("최소값은 최대값보다 클 수 없습니다.");}
+                        if(type=="list") definition=new Dictionary<string,object>{{"type","list"},{"items",definition},{"max_items",Num(original,"max_items",1000)}};
+                        definition["description"]=label.Text;
+                        if(!each.Checked)definition["default"]=ParseInputText(definition,defaultValue.Text);
+                        accepted=definition;dialog.DialogResult=DialogResult.OK;dialog.Close();
+                    }catch(ArgumentException failure){error.Text=failure.Message;}
+                };
+                Rectangle working=Screen.FromControl(this).WorkingArea;if(dialog.Height>working.Height){dialog.AutoScroll=true;dialog.AutoScrollMinSize=dialog.ClientSize;dialog.Height=working.Height;}
+                if(dialog.ShowDialog(this)==DialogResult.OK&&accepted!=null)Send("input_edit",new Dictionary<string,object>{{"edit",new Dictionary<string,object>{{"action","upsert"},{"name",name},{"spec",accepted}}}},null);
+            }
+        }
         void PopulateActions()
         {
             loadingActions = true; string previous = ActionCode; action.Items.Clear();
@@ -433,7 +804,7 @@ internal static class ProcessEditor
                 dialog.MaximizeBox = dialog.MinimizeBox = false; dialog.BackColor = Color.FromArgb(245,247,251); dialog.Font = Font;
                 bool vision = false;
                 foreach (object value in imageCompletion.Items) { var choice = value as Choice; if (choice != null && choice.Code == "visual") vision = true; }
-                dialog.Controls.Add(new Label { Text = vision ? "이미지 전달: 지원 · 모델이 화면을 판정할 수 있습니다." : "이미지 전달: 미확인 · 채팅에서 이미지 전달 시험을 먼저 완료하세요.", Bounds = Box(20,15,530,45) });
+                dialog.Controls.Add(new Label { Text = vision ? "이미지 전달: 지원 · 모델이 화면을 판정할 수 있습니다." : "로컬 확인: 이미지 전송 없이 이 PC에서 직접 확인합니다.", Bounds = Box(20,15,530,45) });
                 var human = new Button(); ButtonStyle(human,"ReviewHuman","사람 확인 · 로컬 창에서 직접 판정",Box(20,70,530,40),false,dialog);
                 human.Click += delegate { reviewMode="human"; dialog.DialogResult=DialogResult.OK; };
                 var visual = new Button(); ButtonStyle(visual,"ReviewVisual","모델 화면 판정 · 연결된 모델에 이미지 전달",Box(20,120,530,40),true,dialog);
@@ -464,6 +835,12 @@ internal static class ProcessEditor
                     if (dialog.ShowDialog(this) != DialogResult.OK || chosen == null) return;
                     mode = chosen;
                 }
+            }
+            if(mode=="replace_selected" || mode=="replace_all") {
+                var entry=index>=0?steps.Items[index].Tag as Dictionary<string,object>:null;
+                int count=mode=="replace_all"?stepCount:Num(entry,"replacement_step_count",0);
+                string impact=count>0?count.ToString()+"단계": "선택한 동작과 연결된 확인 단계";
+                if(MessageBox.Show(this,impact+"를 새 녹화로 교체합니다. 기존 녹화 원본과 저장 이력은 보존하며, 녹화 취소 시 바꾸지 않습니다. 계속할까요?","녹화 교체 범위",MessageBoxButtons.OKCancel,MessageBoxIcon.Information)!=DialogResult.OK)return;
             }
             var payload = new Dictionary<string, object> { { "review_mode", reviewMode }, { "auto_popup", autoPopup }, { "mode", mode } };
             if (mode == "replace_selected") payload["index"] = index;
@@ -533,6 +910,9 @@ internal static class ProcessEditor
                 }
                 if (editable.ContainsKey("value") || editable.ContainsKey("message")) {
                     heading("입력할 내용"); var variableSpec = Map(editable, "variable_spec");
+                    if(variableSpec!=null && Str(variableSpec,"type","text")!="text") {
+                        heading("형식이 지정된 입력값입니다. ‘입력값’ 탭에서 기본값과 형식을 수정하세요.");
+                    } else {
                     content = input(variableSpec == null ? Str(editable, editable.ContainsKey("message") ? "message" : "value", "") : Str(variableSpec, "default", ""), true);
                     content.Name = content.AccessibleName = "EditedStepValue";
                     if (editable.ContainsKey("value")) {
@@ -541,6 +921,7 @@ internal static class ProcessEditor
                         heading("입력 이름 (예: 조회 조건, 입력할 문구)");
                         variableLabel = input(variableSpec == null ? "입력할 값" : Str(variableSpec, "description", "입력할 값"), false);
                         variableLabel.Name = variableLabel.AccessibleName = "InputVariableLabel";
+                    }
                     }
                 }
                 if (editable.ContainsKey("key") || editable.ContainsKey("keys")) {
@@ -802,6 +1183,14 @@ internal static class ProcessEditor
             if (pendingAction == "pick_completion") { var picked = Map(result, "selection"); if (picked != null) ShowCompletionValue(Num(result, "completion_index", -1), picked); }
             if (result.ContainsKey("steps")) UpdateSteps(List(result, "steps"));
             if (result.ContainsKey("recording_review")) SetRecordingReview(Map(result, "recording_review"));
+            UpdateAuthoring(result);
+            if(pendingAction=="skill_preview") {
+                DisplaySkillPreview(Map(result,"skill_preview"));
+            }
+            if(pendingAction=="skill_export") {
+                var exported=Map(result,"skill_export");
+                result["message"]="스킬 파일을 이 PC에 저장했습니다. "+Str(exported,"path","");
+            }
             if (pendingAction == "preview_step") { var preview = Map(result, "preview"); if (preview != null) { if (pendingPurpose == "edit") ShowStepEdit(preview); else ShowStepPreview(preview); } }
             if (pendingAction == "test_run") {
                 var tested = Map(result, "test_result");
@@ -809,13 +1198,17 @@ internal static class ProcessEditor
             }
             if (pendingAction == "save") {
                 var saved = Map(result, "saved_task");
-                if (saved == null || Str(saved, "id", "").Length == 0) { ShowError("저장 완료를 확인하지 못했습니다. 다시 저장하기 전에 연결 상태를 확인해 주세요."); UpdateButtons(); return; }
-                Finish("saved", new Dictionary<string, object> { { "saved_task", saved } }); return;
+                if (saved == null || Str(saved, "id", Str(saved,"task_id"," ")).Trim().Length == 0) { ShowError("저장 완료를 확인하지 못했습니다. 다시 저장하기 전에 연결 상태를 확인해 주세요."); UpdateButtons(); return; }
+                savedTask=saved;draftDirty=false;savedName=processName.Text.Trim();savedDescription=description.Text;editingExisting=true;
+                saveMode.Enabled=true;saveMode.SelectedIndex=0;InvalidateSkill();
+                skillHelp.Text="저장본 v"+Num(savedTask,"revision",1)+" · 스킬 보기에서 미리보기를 열 수 있습니다.";
+                result["message"]="프로세스를 저장했습니다. 입력값을 시험하거나 스킬 보기에서 내보낼 수 있습니다.";
             }
             status.ForeColor = muted; status.Text = Str(result, "message", pendingAction == "add_step" ? "단계를 추가했습니다. 다음 요소와 동작을 이어서 알려주세요." : "내용을 반영했습니다."); UpdateButtons();
         }
         void UpdateSteps(IEnumerable entries)
         {
+            int selectedIndex=steps.SelectedIndices.Count==1?steps.SelectedIndices[0]:-1;
             steps.BeginUpdate(); steps.Items.Clear(); stepCount = 0; pendingInputs = false;
             if (entries != null) foreach (object raw in entries) {
                 var entry = raw as Dictionary<string, object>; if (entry == null) continue;
@@ -826,6 +1219,7 @@ internal static class ProcessEditor
                 if (Object.Equals(entry.ContainsKey("requires_input") ? entry["requires_input"] : null, true)) { pendingInputs = true; row.ForeColor = Color.FromArgb(173, 48, 38); }
                 steps.Items.Add(row);
             }
+            if(selectedIndex>=0 && selectedIndex<steps.Items.Count)steps.Items[selectedIndex].Selected=true;
             steps.ShowItemToolTips = true; steps.EndUpdate();
         }
         void UpdateButtons()
@@ -844,6 +1238,10 @@ internal static class ProcessEditor
             var entry = index >= 0 ? steps.Items[index].Tag as Dictionary<string, object> : null;
             editInput.Enabled = !busy && entry != null && Object.Equals(entry.ContainsKey("editable_input") ? entry["editable_input"] : null, true);
             up.Enabled = !busy && index > 0; down.Enabled = !busy && index >= 0 && index < stepCount - 1; remove.Enabled = !busy && index >= 0;
+            undo.Enabled=!busy&&canUndo;redo.Enabled=!busy&&canRedo;
+            bool inputSelected=inputList.SelectedItems.Count==1;
+            newInput.Enabled=!busy&&inputDefinitions.Count<30;changeInput.Enabled=removeInput.Enabled=!busy&&inputSelected;bindInput.Enabled=unbindInput.Enabled=!busy&&inputSelected&&index>=0;
+            previewSkill.Enabled=!busy&&savedTask!=null&&!UnsavedChanges;exportSkill.Enabled=!busy&&skillPreview!=null&&!UnsavedChanges;
         }
         void ShowError(string message) { status.ForeColor = Color.FromArgb(173, 48, 38); status.Text = message; }
         void Finish(string outcome, Dictionary<string, object> extra)

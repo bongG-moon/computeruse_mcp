@@ -717,6 +717,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_server_workflow_failure_exposes_checkpoint_and_resume_verification(self):
         config = {"state_dir": self.tmp.name, "programs": self.runtime.programs}
+        config["data_policy"] = "connected"
         manager = ComputerManager(config)
         manager.tasks.save(self.task_without_revision())
         request = {"task_id": self.task["id"], "targets": self.target}
@@ -740,7 +741,7 @@ class WorkflowTests(unittest.TestCase):
         return {key: copy.deepcopy(value) for key, value in self.task.items() if key != "revision"}
 
     def test_server_interrupted_run_returns_recoverable_id_and_progress_without_exception_text(self):
-        manager = ComputerManager({"state_dir": self.tmp.name, "programs": self.runtime.programs})
+        manager = ComputerManager({"data_policy": "connected", "state_dir": self.tmp.name, "programs": self.runtime.programs})
         manager.tasks.save(self.task_without_revision())
         manager.session = self.runtime
         engine = ScriptedOperations([RuntimeError("PRIVATE DRIVER ERROR")])
@@ -759,7 +760,7 @@ class WorkflowTests(unittest.TestCase):
     def test_reconnected_manager_discovers_interrupted_run_without_run_id(self):
         answer = self.run_recipe(ScriptedOperations([RuntimeError("PRIVATE FAILURE")]),
                                  inputs={"value": "PRIVATE INPUT"})
-        manager = ComputerManager({"state_dir": self.tmp.name, "programs": self.runtime.programs})
+        manager = ComputerManager({"data_policy": "connected", "state_dir": self.tmp.name, "programs": self.runtime.programs})
         listed = manager.call("computer_task_progress", {})["structuredContent"]
         self.assertEqual([item["run_id"] for item in listed["runs"]], [answer["run_id"]])
         self.assertEqual(listed["runs"][0]["status"], "interrupted")
@@ -791,7 +792,7 @@ class WorkflowTests(unittest.TestCase):
             path.write_text(contents, encoding="utf-8")
             modified = stamp + (100 + index) * 1_000_000
             os.utime(path, ns=(modified, modified))
-        manager = ComputerManager({"state_dir": self.tmp.name, "programs": self.runtime.programs})
+        manager = ComputerManager({"data_policy": "connected", "state_dir": self.tmp.name, "programs": self.runtime.programs})
         recent = manager.call("computer_task_progress", {})["structuredContent"]
         self.assertEqual([item["run_id"] for item in recent["runs"]], [f"{i:032x}" for i in range(11, 1, -1)])
         self.assertEqual(recent["invalid_records"], 2)
@@ -807,7 +808,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(manager.call("computer_task_progress", {"task_id": "absent"})["structuredContent"]["runs"], [])
 
     def test_recent_on_empty_store_and_invalid_filter_do_not_start_a_session(self):
-        manager = ComputerManager({"state_dir": self.tmp.name, "programs": self.runtime.programs})
+        manager = ComputerManager({"data_policy": "connected", "state_dir": self.tmp.name, "programs": self.runtime.programs})
         self.assertEqual(manager.call("computer_task_progress", {})["structuredContent"],
                          {"runs": [], "invalid_records": 0, "scan_limited": False})
         with self.assertRaises(WorkflowError):
@@ -819,7 +820,7 @@ class WorkflowTaskStoreTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.config = {"state_dir": self.tmp.name, "programs": [{"id": "editor"}]}
+        self.config = {"data_policy": "connected", "state_dir": self.tmp.name, "programs": [{"id": "editor"}]}
         self.store = TaskStore(self.tmp.name, self.config)
         self.text = {"id": "first", "name": "반복 입력", "instructions": "PRIVATE INSTRUCTION",
                      "expected": "PRIVATE EXPECTATION", "program_ids": ["editor"]}

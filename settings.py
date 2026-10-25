@@ -12,7 +12,7 @@ from vendor.guard import check_app, normalize_exe, GuardError
 from vendor.windows import discover
 from program_launch import validate_launch_profile
 
-VERSION = "0.18.8"
+VERSION = "0.19.0"
 PROGRAM_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 
 
@@ -35,7 +35,7 @@ def default_config(config_path: Path | None = None) -> dict:
         if item.get("id") == "excel":
             programs[-1]["hints"] += " 입력 확정 후 셀 주소와 값을 다시 확인하고 저장·재열기 결과까지 확인합니다. UIA 즉시 값 또는 여러 셀 문자열 입력만으로 성공을 판단하지 않습니다."
     return {"version": 1, "driver": "", "programs": programs, "mode": "uia", "tool_profile": "simple",
-            "approval": "client", "log_detail": "metadata", "max_minutes": 10, "max_actions": 120,
+            "approval": "client", "log_detail": "metadata", "data_policy": "local", "max_minutes": 10, "max_actions": 120,
             "approval_timeout_seconds": 300, "observation_timeout_seconds": 20, "state_dir": str(path.parent)}
 
 
@@ -46,6 +46,11 @@ def validate_config(value: dict) -> dict:
     config.setdefault("tool_profile", "simple")
     if config["tool_profile"] not in {"simple", "legacy"}:
         raise ValueError("도구 방식은 simple 또는 legacy여야 합니다.")
+    config.setdefault('data_policy', 'local')
+    if config['data_policy'] not in {'local', 'connected'}:
+        raise ValueError('데이터 전달 정책은 local 또는 connected여야 합니다.')
+    if config['data_policy'] == 'local' and config.get('log_detail', 'metadata') != 'metadata':
+        raise ValueError('로컬 전용에서는 내용 로그를 사용할 수 없습니다.')
     config.setdefault("log_detail", "metadata")
     if not isinstance(config["log_detail"], str) or config["log_detail"] not in {"metadata", "content"}:
         raise ValueError("기록 방식은 기본 정보(metadata) 또는 내용 포함(content)이어야 합니다.")
