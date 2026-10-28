@@ -151,6 +151,42 @@ def _result(snapshot, status, reason=None, **counts):
     return answer
 
 
+def projection_evidence(snapshot):
+    """Read-only counts for a Driver projection, never Provider completeness.
+
+    A rendered row is not an independently observed native element. In
+    particular an empty Driver projection cannot prove an empty Provider peer.
+    This optional diagnostic does not enrich a snapshot or manufacture targets.
+    """
+    result = {"source": "driver_returned_data", "read_only": True,
+              "authorizes_input": False,
+              "provider_completeness": "unknown", "provider_original_count": None}
+    elements = snapshot.get("elements") if isinstance(snapshot, dict) else None
+    result["elements"] = {
+        "status": ("missing" if elements is None else "invalid" if not isinstance(elements, list)
+                   or any(not isinstance(row, dict) for row in elements) else "empty" if not elements else "observed"),
+        "count": len(elements) if isinstance(elements, list) else None,
+        "declared_complete": snapshot.get("elements_complete") if isinstance(snapshot, dict)
+            and type(snapshot.get("elements_complete")) is bool else None,
+    }
+    if not isinstance(snapshot, dict) or "tree_markdown" not in snapshot:
+        result["tree_markdown"] = {"status": "missing", "count": None}
+        return result
+    if snapshot["tree_markdown"] == "":
+        result["tree_markdown"] = {"status": "empty", "count": 0}
+        return result
+    try:
+        nodes = _parse(snapshot["tree_markdown"], projected=snapshot.get("elements_complete") is False)
+    except _Reject as error:
+        result["tree_markdown"] = {"status": "invalid", "count": None, "reason": str(error)}
+        return result
+    indexed = sum(node["index"] is not None for node in nodes)
+    result["tree_markdown"] = {"status": "observed", "count": len(nodes),
+                               "indexed_rows": indexed, "unindexed_rows": len(nodes) - indexed,
+                               "source": "driver.tree_markdown", "native_elements_proven": False}
+    return result
+
+
 def normalize_snapshot(snapshot):
     """Enrich only after the entire rendered tree agrees with structured rows.
 

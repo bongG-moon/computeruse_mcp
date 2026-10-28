@@ -2,6 +2,14 @@
 
 이 문서는 배포 담당자용입니다. 일반 사용자는 [INSTALL.md](INSTALL.md)로 연결합니다.
 
+## 2026-10-28 main 소스 커밋과 Release 구분
+
+현재 main에는 v0.19.1 이후 SmartFX 및 FXMenuAgent의 접근성 진단, 업무 창 문맥, 드롭다운 소유 경로, 메뉴 녹화 및 관찰 최적화가 포함되어 있습니다. 이번 반영은 소스 커밋이며 새 Release ZIP, 태그 및 실행파일을 게시하지 않습니다. 상세 범위와 남은 제한은 [개발 소스 검증](VALIDATION.html#smartfx-source-20261028)과 [업무 창 안내](WINDOW_CONTEXTS.html)를 확인하세요.
+
+`settings.py`의 버전과 `BUILD-MANIFEST.json`, `DRIVER-BUNDLE-MANIFEST.json`, `PUBLICATION-MANIFEST.json`은 마지막으로 게시된 v0.19.1 Release의 기록을 유지합니다. 이 명세를 현재 main 전체의 빌드 증거로 사용하지 않습니다. 현재 main을 예전 Release 자산과 비교하면 체크섬 검사가 실패하는 것이 정상입니다. Release 검증은 해당 태그에서 실행하고, 다음 배포 때 새 버전의 최종 시험 ZIP과 네이티브 도우미를 빌드한 뒤 아래 절차로 명세를 재생성합니다.
+
+사용자 녹화, 캡처, 운영 설정, 실행 기록 및 테스트 출력은 소스 커밋에서 제외합니다. 기존 사용자 데이터나 설치된 MCP 연결을 변경하지 않습니다.
+
 ## 0.19.1 검증과 배포 기준
 
 0.19.1은 로컬 설치 진단과 저장 직후 시험 실행의 팝업 연결 오류 수정 버전입니다. 게시 완료는 아래 절차의 원격 커밋·태그·자산 체크섬 검증으로 판정하며 버전 표기나 문서만으로 주장하지 않습니다. 최종 확인 범위는 [VALIDATION.html](VALIDATION.html)에 반영합니다.

@@ -4,16 +4,20 @@ from __future__ import annotations
 import copy
 import time
 
+from business_windows import (WINDOW_SELECTOR_SCHEMA, BusinessWindowError,
+                              select_business_window, validate_window_selector, window_identity)
+
 
 WINDOW_TRANSITION_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "properties": {
-        "mode": {"enum": ["auto", "same_window", "new_window"]},
+        "mode": {"enum": ["auto", "same_window", "new_window", "business_window"]},
         "title": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "window_selector": WINDOW_SELECTOR_SCHEMA,
         "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 10000,
             "description": "Native candidate discovery wait, default 1500ms. After discovery, a fresh UIA result read uses the step budget and must finish before verification_timeout_ms. Zero makes one discovery attempt."},
     }, "required": ["mode"],
-    "description": "Default auto: after the original window disappears, verify a unique new or owner-related window in the SAME retained process. new_window requires its exact title. Closure uses computer_close, never disappearance as success. timeout_ms defaults to 1500; no input replay.",
+    "description": "Default auto: after the original window disappears, verify a unique new or owner-related window in the SAME retained process. new_window requires its exact title. Explicit business_window uses window_selector for a new OR already-open independent work window, even while the original exists. Closure uses computer_close, never disappearance as success. No input replay.",
 }
 
 
@@ -24,9 +28,18 @@ class TransitionError(ValueError):
 
 
 def validate_transition(value):
-    if (not isinstance(value, dict) or set(value) - {"mode", "title", "timeout_ms"}
-            or value.get("mode") not in ("auto", "same_window", "new_window")):
-        raise TransitionError("창 전환은 auto/same_window/new_window로 지정하세요. 창 또는 프로그램 종료는 computer_close를 사용하세요.", "invalid_operation")
+    if (not isinstance(value, dict) or set(value) - {"mode", "title", "window_selector", "timeout_ms"}
+            or value.get("mode") not in ("auto", "same_window", "new_window", "business_window")):
+        raise TransitionError("창 전환은 auto/same_window/new_window/business_window로 지정하세요. 종료는 computer_close를 사용하세요.", "invalid_operation")
+    if value['mode'] == 'business_window':
+        if 'title' in value or 'window_selector' not in value:
+            raise TransitionError('business_window에는 window_selector로 업무 창 문맥을 지정하세요.', 'invalid_operation')
+        try:
+            validate_window_selector(value['window_selector'])
+        except BusinessWindowError as error:
+            raise TransitionError(str(error), 'invalid_operation') from error
+    elif 'window_selector' in value:
+        raise TransitionError('window_selector는 business_window 전환에서만 사용하세요.', 'invalid_operation')
     if "title" in value and (not isinstance(value["title"], str) or not value["title"].strip() or len(value["title"]) > 1000):
         raise TransitionError("전환할 창의 정확한 제목을 지정하세요.", "invalid_operation")
     if value["mode"] == "new_window" and "title" not in value:
@@ -90,6 +103,8 @@ class WindowTransition:
             self._validate(state)
             if state["process_exited"]:
                 raise TransitionError("원래 프로그램이 종료되었습니다. 정상 완료나 충돌 여부는 확인되지 않았습니다. 종료 목적이면 computer_close를 사용하세요.", "transition_process_exited")
+            if self.spec['mode'] == 'business_window':
+                return self._business_window(state)
             baseline = self.initial["windows"]
             old_ids = {row.get("window_id") for row in baseline}
             previously_visible = {row.get("window_id") for row in baseline if row.get("visible") is True}
@@ -118,6 +133,25 @@ class WindowTransition:
             return rows[0] if rows else None
         finally:
             self.elapsed_ms += (time.monotonic() - began) * 1000
+
+    def _business_window(self, state):
+        # Selection is explicitly requested and still bounded to the retained
+        # approved process. It does not relax owner checks for recorded popups.
+        try:
+            selected = select_business_window(state['windows'], self.spec['window_selector'],
+                                              pid=self.original['pid'])
+        except BusinessWindowError as error:
+            self.candidates = error.candidates
+            raise TransitionError(str(error), error.code) from error
+        self.candidates = [selected] if selected else []
+        if selected is None:
+            return None
+        before = next((row for row in self.initial['windows']
+                       if row.get('window_id') == selected['window_id']), None)
+        if before is not None and window_identity(before) != window_identity(selected):
+            raise TransitionError('기존 업무 창의 종류·스레드·소유 관계가 바뀌었습니다. 새로 연결하세요.',
+                                  'transition_target_identity_changed')
+        return selected
 
     def original_present(self):
         """Cheap precheck also avoids sending a stale HWND to the scoped reader."""

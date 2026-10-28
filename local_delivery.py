@@ -12,7 +12,7 @@ _TASK_ID = re.compile(r"(?:task-)?[a-f0-9]{32}\Z")
 _STATUSES = frozenset(("ok", "connected", "editing", "starting", "saved", "cancelled", "failed", "blocked", "verified", "needs_review", "interrupted", "running", "pending", "awaiting_input", "completed", "choose_window", "window_unavailable", "stopped", "active", "not_required"))
 _COUNTS = ("revision", "completed_steps", "total_steps", "step_count", "pending_step", "enabled_programs", "count", "offset", "limit", "total")
 _FLAGS = ("task_verified", "input_dispatched", "focus_dispatched", "pending", "editor_visible", "runnable", "review_required", "cancelled", "unsaved_changes", "cleanup_pending", "result_visible", "has_more")
-_IDS = ("task_id", "run_id", "editor_id", "review_id", "window_ref", "preview_id", "local_run_id")
+_IDS = ("task_id", "run_id", "editor_id", "review_id", "window_ref", "preview_id", "local_run_id", "diagnostic_id")
 
 
 def enabled(config):

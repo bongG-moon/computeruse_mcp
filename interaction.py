@@ -59,6 +59,15 @@ class InteractionEngine:
             binding['probe'].close()
         self.windows.clear(); self.observations.clear(); self.latest.clear(); self.actions.clear()
 
+    def diagnose(self, window_ref):
+        from accessibility_report import collect
+        target = self.target(window_ref)
+        # A diagnostic never creates target_refs, changes focus or supplies
+        # handles for input. Normal observe remains a separate fast path.
+        answer = collect(self.runtime, target)
+        self.target(window_ref)
+        return _answer(answer)
+
     def bind(self, target):
         """The caller discovers/launches apps; binding proves the current identity."""
         self.runtime.check_active()
@@ -90,9 +99,14 @@ class InteractionEngine:
 
     def _binding(self, ref):
         binding = self.windows[ref]
-        return {'window_ref': ref, 'target': dict(binding['target']),
+        result = {'window_ref': ref, 'target': dict(binding['target']),
                 'app_instance_id': hashlib.sha256(json.dumps({key: binding['identity'][key]
                     for key in ('creation_time', 'executable')}, sort_keys=True).encode()).hexdigest()[:24]}
+        from smartfx_profiles import host_profile
+        profile = host_profile(binding['identity']['executable'])
+        if profile:
+            result['application_profile'] = profile
+        return result
 
     def target(self, window_ref):
         self.runtime.check_active()
@@ -126,7 +140,7 @@ class InteractionEngine:
         answer = inspect_window(self.runtime, target, max_controls=max_controls, max_depth=max_depth,
             max_elements=max_elements, search=search, within=within,
             observation='visual' if capture_only else 'both' if wants_image else 'uia',
-            requested_goal=goal)
+            requested_goal=goal, host_executable=self.windows[window_ref]['identity']['executable'])
         if answer.get('isError'):
             return answer
         self.target(window_ref)

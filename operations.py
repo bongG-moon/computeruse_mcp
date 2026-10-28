@@ -32,6 +32,12 @@ SELECTOR_SCHEMA["properties"]["label"] = {"type": "object", "additionalPropertie
         "text": {"type": "string", "minLength": 1, "maxLength": 200},
         "relation": {"enum": ["uia_labeled_by", "rendered_preceding"]}},
     "description": "Recorded label relationship, resolved anew in a fresh full observation. rendered_preceding requires a named within scope; geometry hints alone are not selectors."}
+SELECTOR_SCHEMA["properties"]["row"] = {"type": "object", "additionalProperties": False,
+    "required": ["key", "property", "equals"], "properties": {
+        "key": copy.deepcopy(ANCESTOR_SELECTOR_SCHEMA),
+        "property": {"enum": ["name", "value"]},
+        "equals": {"type": "string", "minLength": 1, "maxLength": 1000}},
+    "description": "Exact observed key cell and value identify one Row/DataItem/ListItem within the named within scope. The target's name/automation_id identifies its column inside that same row. Requires actual hierarchy; never infers headers or row numbers and never scrolls or realizes a virtual item."}
 ASSERTION_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "properties": {"selector": SELECTOR_SCHEMA,
@@ -73,10 +79,10 @@ OPERATION_SCHEMA = {
 
 
 def validate_selector(selector, allow_within=True):
-    permitted = {"name", "role", "automation_id"} | ({"within", "label"} if allow_within else set())
+    permitted = {"name", "role", "automation_id"} | ({"within", "label", "row"} if allow_within else set())
     if not isinstance(selector, dict) or not selector or set(selector) - permitted:
         raise OperationError("selector에는 정확한 name, role, automation_id 또는 검증된 label 관계와 단일 부모 범위 within을 사용할 수 있습니다.")
-    if any(not isinstance(v, str) or not v.strip() or len(v) > 1000 for k, v in selector.items() if k not in {"within", "label"}):
+    if any(not isinstance(v, str) or not v.strip() or len(v) > 1000 for k, v in selector.items() if k not in {"within", "label", "row"}):
         raise OperationError("선택 기준은 1~1000자의 비어 있지 않은 문자열이어야 합니다.")
     unique_document = allow_within and selector.get("role") == "Document" and set(selector) <= {"role", "within"}
     if "label" in selector:
@@ -92,6 +98,15 @@ def validate_selector(selector, allow_within=True):
         raise OperationError("role만으로는 대상을 선택할 수 없습니다. name 또는 automation_id를 함께 지정하세요.")
     if "within" in selector:
         validate_selector(selector["within"], allow_within=False)
+    if "row" in selector:
+        row = selector["row"]
+        if ("within" not in selector or "label" in selector
+                or not isinstance(row, dict) or set(row) != {"key", "property", "equals"}
+                or not isinstance(row.get("property"), str) or row["property"] not in {"name", "value"}
+                or not isinstance(row.get("equals"), str) or not row["equals"].strip()
+                or len(row["equals"]) > 1000):
+            raise OperationError("row에는 정확한 within 범위와 key/property/equals가 필요합니다. 행 번호·좌표·추정 열 이름은 사용할 수 없습니다.")
+        validate_selector(row["key"], allow_within=False)
     return copy.deepcopy(selector)
 
 
@@ -245,7 +260,7 @@ def _name(element):
 
 def _matches(element, selector):
     for key, value in selector.items():
-        if key in {"within", "label"}:
+        if key in {"within", "label", "row"}:
             continue
         actual = _name(element) if key == "name" else element.get(key)
         if actual != value:
@@ -287,15 +302,75 @@ def _find(snapshot, selector):
         elements = _elements(snapshot)
         parents = {e.get("element_index"): e for e in elements if type(e.get("element_index")) is int}
         found = [e for e in found if _descendant(e, ancestors[0], elements, parents)]
+        if "row" in selector:
+            found = _in_keyed_row(snapshot, found, selector["row"], ancestors[0])
     return found
 
 
 def _unique(snapshot, selector):
+    if "row" in selector and any(snapshot.get(key) is True for key in
+            ("truncated", "max_elements_reached", "max_depth_reached")):
+        raise OperationError("표 관찰이 잘려 행 키의 유일성을 확인할 수 없습니다.", "incomplete_observation")
     found = _find(snapshot, selector)
     if len(found) != 1:
         raise OperationError("일치하는 화면 요소가 없습니다." if not found else "같은 조건의 화면 요소가 여러 개입니다. 선택 기준을 더 구체적으로 지정하세요.",
                              "selector_not_found" if not found else "ambiguous_selector")
     return found[0]
+
+
+def _in_keyed_row(snapshot, candidates, row_spec, scope):
+    """Use only real hierarchy and property evidence from this observation.
+
+    No spatial row/column inference, stale RuntimeIds or list indices. This is
+    resolution of existing Driver elements, not a Grid.GetItem implementation.
+    """
+    elements = _elements(snapshot)
+    indices = [e.get("element_index") for e in elements if type(e.get("element_index")) is int]
+    if len(indices) != len(set(indices)):
+        raise OperationError("표의 요소 식별자가 중복되어 행 관계를 확인하지 못했습니다.", "ambiguous_row_structure")
+    parents = {e["element_index"]: e for e in elements if type(e.get("element_index")) is int}
+    keys = [e for e in elements if _matches(e, row_spec["key"])
+            and (_name(e) if row_spec["property"] == "name" else e.get("value")) == row_spec["equals"]
+            and e.get("synthetic_ancestor") is not True
+            and not any(e.get(key) is True for key in ("is_password", "protected", "is_protected", "password"))
+            and e.get("role") != "Password" and _descendant(e, scope, elements, parents)]
+    if len(keys) > 1:
+        raise OperationError("같은 행 키가 여러 곳에 있어 특정 행을 선택하지 않았습니다.", "ambiguous_row_key")
+    if not keys:
+        return []
+    seen = set()
+    parent = keys[0].get("parent_index")
+    while type(parent) is int and parent not in seen and parent in parents:
+        seen.add(parent)
+        row = parents[parent]
+        if row is scope:
+            break
+        if row.get("role") in {"Row", "DataItem", "ListItem"}:
+            # Synthetic ancestors can delimit an already observed row; they
+            # never become an input target or invent missing cells/values.
+            return [e for e in candidates if _descendant(e, row, elements, parents)]
+        parent = row.get("parent_index")
+    raise OperationError("행 키의 실제 행 계층이 없습니다. 표/편집기를 연 뒤 다시 관찰하세요. 자동 스크롤이나 좌표 추정은 하지 않았습니다.", "grid_row_structure_unavailable")
+
+
+def supports_set_value(element):
+    """Keep legacy edit support; extend only with explicit writable evidence."""
+    if (element.get("read_only") is True or element.get("is_read_only") is True
+            or element.get("role") == "Password"
+            or any(element.get(key) is True for key in ("is_password", "protected", "is_protected", "password"))):
+        return False
+    actions = element.get("actions")
+    if element.get("role") in {"Edit", "Document", "TextBox"}:
+        return "actions" not in element or isinstance(actions, list) and "set_value" in actions
+    if element.get("role") not in {"Custom", "DataItem", "Cell", "Pane", "Text"}:
+        return False
+    patterns = element.get("patterns")
+    value = patterns.get("Value") if isinstance(patterns, dict) else None
+    if not isinstance(value, dict) or value.get("status") != "supported":
+        return False
+    evidence = [item[key] for item in (element, value) for key in ("read_only", "is_read_only") if key in item]
+    return (isinstance(actions, list) and "set_value" in actions
+            and bool(evidence) and all(item is False for item in evidence))
 
 
 def _descendant(element, ancestor, elements, parents=None):
@@ -402,6 +477,7 @@ class _Execution:
         self.action_evidence = []
         self.action_acknowledgement_error = None
         self.scoped_fallback_reason = None
+        self.combo_popup = None
 
     def _progress(self, stage):
         report = getattr(self.runtime, "report_progress", None)
@@ -570,8 +646,25 @@ class _Execution:
         except OperationError:
             return []
         return [e for e in _elements(snapshot) if _name(e) == value
-                and e.get("role") in ("ListItem", "MenuItem", "Option")
+                and self._option_role(e)
                 and _descendant(e, combo, _elements(snapshot))]
+
+    @staticmethod
+    def _option_role(element):
+        if element.get("role") in {"ListItem", "MenuItem", "Option"}:
+            return True
+        # A table row is not a generic combobox item. Accept only the actual
+        # selectable-row contract, never an anonymous grid/editor container.
+        return (element.get("role") in {"DataItem", "Row"}
+                and isinstance(element.get("actions"), list) and "select" in element["actions"]
+                and type(element.get("selected")) is bool)
+
+    @staticmethod
+    def _multi_selection(element):
+        patterns = element.get("patterns", {})
+        selection = patterns.get("Selection", {}) if isinstance(patterns, dict) else {}
+        return (element.get("can_select_multiple") is True or element.get("selection_can_select_multiple") is True
+                or isinstance(selection, dict) and selection.get("can_select_multiple") is True)
 
     def _visible_windows(self):
         data = self._call("list_windows", {"pid": self.target["pid"], "on_screen_only": True})
@@ -592,8 +685,8 @@ class _Execution:
 
     def _popup_options(self, snapshot, value):
         elements = _elements(snapshot)
-        containers = [e for e in elements if e.get("role") in ("List", "ListBox", "Menu")]
-        return [e for e in elements if _name(e) == value and e.get("role") in ("ListItem", "MenuItem", "Option")
+        containers = [e for e in elements if e.get("role") in ("List", "ListBox", "Menu", "DataGrid", "Table")]
+        return [e for e in elements if _name(e) == value and self._option_role(e)
                 and any(_descendant(e, container, elements) for container in containers)]
 
     def _select_known_order(self, snapshot, element):
@@ -754,6 +847,11 @@ class _Execution:
 
     def _read_scoped_assertions(self, assertions, scoped):
         selectors = [item["selector"] for item in assertions]
+        if any("row" in selector for selector in selectors):
+            # The compact native property helper does not return whole rows.
+            # Resolve once through the Driver instead of dropping the row key
+            # or paying for a doomed native request followed by a second read.
+            return None
         started = time.monotonic()
         available = True
         try:
@@ -793,7 +891,7 @@ class _Execution:
         self.observation_deadline = deadline if timeout else None  # zero means one bounded read
         first = True
         try:
-            if self.dispatched and self.transition_spec["mode"] == "new_window":
+            if self.dispatched and self.transition_spec["mode"] in {"new_window", "business_window"}:
                 initial = self._recover_transition(assertions, deadline if timeout else self.deadline)
             while True:
                 self._remaining()
@@ -897,6 +995,9 @@ class _Execution:
         self.metrics["elapsed_ms"] = round((time.monotonic() - self.started) * 1000, 2)
         if self.transition_tracker is not None:
             self.metrics["transition_probe_ms"] = round(self.transition_tracker.elapsed_ms, 2)
+        if self.combo_popup is not None:
+            self.metrics["combo_popup_probe_ms"] = round(self.combo_popup.elapsed_ms, 2)
+            self.metrics["combo_popup_native_reads"] = self.combo_popup.reads
         diagnostic = {"code": code, "message": message, "automatic_replay": False}
         if self.strategy:
             diagnostic["selection_strategy"] = self.strategy
@@ -962,13 +1063,11 @@ class _Execution:
                     self.transition_tracker = WindowTransition(self.runtime, self.target, self.transition_spec)
                     self.transition_tracker.prepare()
                     self._remaining()
-                    if self.transition_spec["mode"] == "new_window" and self.transition_tracker.error:
+                    if self.transition_spec["mode"] in {"new_window", "business_window"} and self.transition_tracker.error:
                         raise OperationError("창 전환의 실행 프로세스 정보를 확보하지 못해 입력하지 않았습니다.", "transition_identity_unavailable")
                 if operation == "set_value":
-                    if element.get("role") not in ("Edit", "Document", "TextBox") or element.get("read_only") is True or element.get("is_read_only") is True:
-                        raise OperationError("set_value는 편집 가능한 입력칸에만 사용할 수 있습니다. 선택 상자는 select_option을 사용하세요.", "unsupported_control")
-                    if "actions" in element and "set_value" not in element["actions"]:
-                        raise OperationError("이 입력칸은 값 변경 기능을 제공하지 않습니다.", "unsupported_control")
+                    if not supports_set_value(element):
+                        raise OperationError("값 변경 기능과 쓰기 가능 상태를 확인하지 못했습니다. 동적 셀은 실제 편집기를 연 뒤 다시 관찰하고, 선택 상자는 select_option을 사용하세요.", "unsupported_control")
                     if element.get("value") == self.step["value"] and "value" in element and not requires_change:
                         passed = self._verify(assertions, snapshot)
                         return self._result("verified" if passed else "failed", "already_satisfied" if passed else "verification_failed", "현재 값과 완료 조건을 확인했습니다.")
@@ -994,7 +1093,7 @@ class _Execution:
                         self._mutate(operation, element, snapshot, **arguments)
                 elif operation in ("set_checked", "select_item"):
                     desired = self.step["checked"] if operation == "set_checked" else True
-                    roles = ("CheckBox", "ToggleButton", "Button") if operation == "set_checked" else ("ListItem", "TabItem", "TreeItem", "RadioButton")
+                    roles = ("CheckBox", "ToggleButton", "Button") if operation == "set_checked" else ("ListItem", "TabItem", "TreeItem", "RadioButton", "DataItem", "Row")
                     action = "toggle" if operation == "set_checked" else "select"
                     actions = element.get("actions")
                     if (element.get("role") not in roles or not isinstance(actions, list) or action not in actions
@@ -1007,7 +1106,9 @@ class _Execution:
                     self._mutate("click", element, snapshot)
                 else:
                     if element.get("role") != "ComboBox":
-                        raise OperationError("select_option은 ComboBox 선택 상자에만 사용할 수 있습니다. 목록·탭·트리의 항목은 select_item과 해당 항목의 selector로 지정하세요.", "unsupported_control")
+                        raise OperationError("일반 ComboBox 구조를 확인하지 못했습니다. 표 기반 콤보·속성 편집기는 실제 펼침 버튼을 한 번 조작한 뒤 새 목록/편집기를 관찰하고, 행 키와 열 selector로 선택 및 선택값 검증을 지정하세요. 검색 모달이나 다중 체크를 일반 드롭다운으로 추정하지 않습니다.", "unsupported_control")
+                    if self._multi_selection(element):
+                        raise OperationError("여러 항목을 체크하는 콤보는 단일 선택으로 처리하지 않습니다. 현재 체크 요소와 원하는 상태를 각각 지정하세요.", "multi_selection_requires_explicit_state")
                     if element.get("value") == self.step["value"] and "value" in element and not requires_change:
                         passed = self._verify(assertions, snapshot)
                         return self._result("verified" if passed else "failed", "already_satisfied" if passed else "verification_failed", "현재 선택값과 완료 조건을 확인했습니다.")
@@ -1037,24 +1138,49 @@ class _Execution:
                     options = self._options(snapshot, selector, self.step["value"])
                     option_target = self.target
                     if not options:
-                        before = self._visible_windows()
+                        if callable(getattr(self.runtime, 'create_transition_probe', None)):
+                            from combo_popup import ComboPopupDiscovery
+                            retained = self.transition_tracker.probe if self.transition_tracker is not None else None
+                            self.combo_popup = ComboPopupDiscovery(self.runtime, self.target, probe=retained)
+                            self.combo_popup.prepare()
+                            before = None
+                        else:
+                            before = self._visible_windows()
+                        # Keep an uncertain expansion out of parent recovery:
+                        # observing the main window can dismiss a real dropdown.
+                        self.no_parent_recovery = True
                         self._mutate("click", element, snapshot)
-                        popup = self._new_owned_popup(before, self._visible_windows())
+                        popup = (self.combo_popup.discover() if self.combo_popup is not None else
+                                 self._new_owned_popup(before, self._visible_windows()))
                         if popup is not None:
                             self.strategy = "owned_popup"
                             # Some Drivers cannot observe untitled native popups.
                             # Parent UIA can block while that popup is open, so do
                             # not fall back to a parent read after this route fails.
                             self.no_parent_recovery = True
-                            snapshot = self._observe([{"name": self.step["value"]}], target=popup)
+                            try:
+                                snapshot = self._observe([{"name": self.step["value"]}], target=popup)
+                            except OperationError as error:
+                                if self.combo_popup is not None:
+                                    self.combo_popup.confirm()
+                                    raise OperationError('네이티브 관찰에서 관련 목록이 존재하지만 Driver 요소를 읽지 못했습니다. '
+                                        '목록이 열리지 않았다고 단정하거나 클릭을 반복하지 않습니다. 원인: ' + error.code,
+                                        'combo_popup_driver_unavailable') from error
+                                raise
                             options = self._popup_options(snapshot, self.step["value"])
                             option_target = popup
                         else:
+                            self.no_parent_recovery = False
                             self.strategy = "combo_descendants"
                             snapshot = self._observe([selector], option=(selector, self.step["value"]))
                             options = self._options(snapshot, selector, self.step["value"])
                     if len(options) != 1:
                         raise OperationError("해당 선택 상자에 속한 항목을 유일하게 확인하지 못했습니다. 임의 키 입력이나 다른 위치의 같은 이름을 클릭하지 않습니다.", "unsupported_option_structure")
+                    if any(self._multi_selection(e) and _descendant(options[0], e, _elements(snapshot))
+                           for e in _elements(snapshot)):
+                        raise OperationError("열린 목록이 다중 선택을 지원합니다. 단일 선택을 추정하지 말고 체크값을 지정하세요.", "multi_selection_requires_explicit_state")
+                    if option_target != self.target and self.combo_popup is not None:
+                        self.combo_popup.confirm()
                     self._mutate("click", options[0], snapshot, target=option_target)
                     self.no_parent_recovery = False
                 passed = self._verify(assertions)
@@ -1094,5 +1220,7 @@ class _Execution:
                     pass
             return self._result("needs_target" if code.startswith("transition_") and self.dispatched else "unknown" if self.dispatched else "failed", code, str(error)[:1000])
         finally:
+            if self.combo_popup is not None:
+                self.combo_popup.close()
             if self.transition_tracker is not None:
                 self.transition_tracker.close()

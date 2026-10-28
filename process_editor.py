@@ -158,6 +158,10 @@ class ProcessDraft:
         self.selections = {}
         self.steps = copy.deepcopy((task or {}).get("steps", []))
         self.variables = copy.deepcopy((task or {}).get("variables", {}))
+        self.window_contexts = copy.deepcopy((task or {}).get('window_contexts', {}))
+        for program in programs:
+            if program.get('window_ref', 'main') == 'main' and program.get('window_context'):
+                self.window_contexts[program['program_id']] = copy.deepcopy(program['window_context'])
         self.task_id = (task or {}).get("id")
         self.revision = (task or {}).get("revision", 1)
         self.labels = []
@@ -285,8 +289,12 @@ class ProcessDraft:
     def _semantic_step(self, event, target, snapshots, final_values=None, *, historical=False):
         native, after = event.get("native_target"), event.get("after")
         action = event.get("operation")
-        button = action == "click" and isinstance(native, dict) and native.get("element", {}).get("role") == "Button"
-        if not isinstance(native, dict) or (not button and (not isinstance(after, dict) or set(after) != {"property", "equals"})):
+        # The native recorder captures these physical pointer roles without a
+        # value change. Reconcile them with the fresh Driver snapshot below;
+        # their observed identity alone does not prove click support or result.
+        pointer_click = (action == "click" and isinstance(native, dict)
+                         and native.get("element", {}).get("role") in {"Button", "MenuItem", "ListItem", "DataItem"})
+        if not isinstance(native, dict) or (not pointer_click and (not isinstance(after, dict) or set(after) != {"property", "equals"})):
             raise OperationError("녹화한 요소의 관찰 증거가 없습니다.", "recording_semantic_evidence_missing")
         snapshot = snapshots.get((target["program_id"], target.get("window_ref", "main")))
         if not isinstance(snapshot, dict): raise OperationError("녹화 후 Driver 관찰이 없습니다.", "recording_snapshot_missing")
@@ -294,9 +302,9 @@ class ProcessDraft:
         element = _unique(snapshot, matched["expected_selector"])
         if action not in suggested_operations(element): raise OperationError("Driver가 해당 요소 동작을 지원하지 않습니다.", "recording_action_unsupported")
         selector = stable_selector(snapshot, element)
-        if button:
+        if pointer_click:
             return {"operation": "click", "program_id": target["program_id"], "window_ref": target.get("window_ref", "main"),
-                    "selector": selector, "completion_mode": "human"}, _name(element) or "녹화한 버튼"
+                    "selector": selector, "completion_mode": "human"}, _name(element) or "녹화한 요소"
         prop = after.get("property")
         expected = event.get("checked") if action == "set_checked" else event.get("value")
         final_expected = expected
@@ -1009,9 +1017,10 @@ class ProcessEditors:
         runtime.check_active()
         if runtime.mode != "uia":
             raise OperationError("프로세스 만들기는 UIA 세션에서 시작하세요.", "unsupported_mode")
+        task = self.tasks.get(args["task_id"]) if args.get("task_id") else None
         programs, hosted_targets = [], {}
         for target in args["targets"]:
-            if (not isinstance(target, dict) or set(target) - {"program_id", "pid", "window_id", "window_ref"}
+            if (not isinstance(target, dict) or set(target) - {"program_id", "pid", "window_id", "window_ref", "window_context"}
                     or not {"program_id", "pid", "window_id"} <= set(target)
                     or not isinstance(target["program_id"], str)
                     or any(type(target[k]) is not int or target[k] < 1 for k in ("pid", "window_id"))
@@ -1019,12 +1028,20 @@ class ProcessEditors:
                     or not WINDOW_REF.fullmatch(target.get("window_ref", "main"))):
                 raise OperationError("프로그램과 현재 창을 정확히 지정하세요.")
             self.library._program(runtime, target["program_id"], {k: target[k] for k in ("pid", "window_id")})
+            target = copy.deepcopy(target)
+            from window_contexts import validate_contexts, inferred_menuagent_context
+            context = target.get('window_context')
+            if context is not None:
+                context = validate_contexts({target['program_id']: context}, [target['program_id']])[target['program_id']]
+            elif task is None and target.get('window_ref', 'main') == 'main':
+                context = inferred_menuagent_context(runtime, {k: target[k] for k in ('pid', 'window_id')})
+            if context:
+                target['window_context'] = context
             hosted_targets[(target["pid"], target["window_id"])] = self._hosted_identity(runtime, {k: target[k] for k in ("pid", "window_id")})
             label = next(p["name"] for p in runtime.programs if p["id"] == target["program_id"])
             programs.append({**target, "label": label + " · " + target.get("window_ref", "main")})
         if not 1 <= len(programs) <= 10 or len({(p["program_id"], p.get("window_ref", "main")) for p in programs}) != len(programs):
             raise OperationError("중복 없는 프로그램/창을 1~10개 연결하세요.")
-        task = self.tasks.get(args["task_id"]) if args.get("task_id") else None
         draft = ProcessDraft(programs, task)
         visual_enabled = callable(getattr(self, "visual_review_enabled", None)) and self.visual_review_enabled(runtime) is True
         with self.lock:
@@ -1098,6 +1115,22 @@ class ProcessEditors:
         draft, runtime = job["draft"], job["runtime"]
         extra = {}
         message = "반영했습니다."
+        if action == 'diagnose':
+            if set(payload) - {'program_id', 'pid', 'window_id', 'window_ref'}:
+                raise OperationError('진단할 연결 창만 지정하세요.')
+            target = draft.target(payload)
+            exact = {key: target[key] for key in ('pid', 'window_id')}
+            self._program(job, target['program_id'], exact)
+            from accessibility_report import collect
+            with runtime.execution_lock:
+                answer = collect(runtime, exact)
+                self._program(job, target['program_id'], exact)
+            # Native editor IPC is bounded. Keep the full report in its local
+            # file; large provider trees must not close the authoring window.
+            preview = json.dumps(answer.pop('diagnostic_report', {}), ensure_ascii=False, indent=2)
+            answer['diagnostic_preview'] = preview[:160000] + (
+                '\n\n미리보기 크기를 제한했습니다. 전체 결과는 위 JSON 저장 파일에 있습니다.' if len(preview) > 160000 else '')
+            return answer
         if action == 'input_edit':
             from authoring_inputs import edit_inputs
             draft.steps, draft.variables = edit_inputs(draft.steps, draft.variables, payload.get('edit', payload))
@@ -1383,6 +1416,9 @@ class ProcessEditors:
                     "instructions": _text(payload["description"], "설명", 4000, empty=True), "expected": "설정한 완료 조건 확인",
                     "program_ids": list(dict.fromkeys(s["program_id"] for s in _leaf_steps(draft.steps))),
                     "steps": copy.deepcopy(draft.steps), "variables": copy.deepcopy(draft.variables)}
+            if draft.window_contexts:
+                task['window_contexts'] = {key: copy.deepcopy(value) for key, value in draft.window_contexts.items()
+                                           if key in task['program_ids']}
             targets = self._trial_targets(job, task)
             from local_delivery import require_local_task
             if getattr(self, 'local_only', False): require_local_task(task)
@@ -1422,6 +1458,9 @@ class ProcessEditors:
                 "expected": "각 단계에 지정한 완료 조건과 화면 확인 기준을 확인합니다.",
                 "program_ids": list(dict.fromkeys(s["program_id"] for s in _leaf_steps(draft.steps))),
                 "steps": draft.steps, "variables": draft.variables, **review}
+            if draft.window_contexts:
+                save_args['window_contexts'] = {key: copy.deepcopy(value) for key, value in draft.window_contexts.items()
+                                                if key in save_args['program_ids']}
             readiness = draft.readiness()
             if not readiness["runnable"]: save_args["draft"] = draft.draft_metadata()
             if draft.task_id and save_mode == "update":

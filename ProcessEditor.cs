@@ -386,7 +386,7 @@ internal static class ProcessEditor
         readonly ListView inputList = new ListView();
         readonly TextBox skillText = new TextBox();
         readonly Label inputHelp = new Label(), skillHelp = new Label();
-        readonly Button newInput = new Button(), changeInput = new Button(), removeInput = new Button(), bindInput = new Button(), unbindInput = new Button(), previewSkill = new Button(), exportSkill = new Button(), undo = new Button(), redo = new Button();
+        readonly Button diagnose = new Button(), newInput = new Button(), changeInput = new Button(), removeInput = new Button(), bindInput = new Button(), unbindInput = new Button(), previewSkill = new Button(), exportSkill = new Button(), undo = new Button(), redo = new Button();
         readonly List<Dictionary<string, object>> inputDefinitions = new List<Dictionary<string, object>>();
         Dictionary<string, object> savedTask, skillPreview;
         bool draftDirty, canUndo, canRedo, loadingDraft;
@@ -463,11 +463,13 @@ internal static class ProcessEditor
             Controls.Add(new Label { Text = "요소·이미지로 단계를 만들거나, 직접 하는 동작을 녹화하세요. 녹화 후 목록을 검토하고 저장합니다.", ForeColor = muted, Bounds = Box(26, 66, 1006, 30) });
             var left = new Panel { BackColor = Color.White, Bounds = Box(24, 110, 444, 562) }; Controls.Add(left);
             fields.Bounds = Box(20, 18, 420, 476); fields.AutoScroll = true; fields.FlowDirection = FlowDirection.TopDown; fields.WrapContents = false; fields.BackColor = Color.White; left.Controls.Add(fields);
-            var targetSection = Section(188); Caption("대상 프로그램과 창", 0, targetSection); ConfigureCombo(program); Input(program, "TargetProgram", Box(0, 29, 394, 34), targetSection);
+            var targetSection = Section(230); Caption("대상 프로그램과 창", 0, targetSection); ConfigureCombo(program); Input(program, "TargetProgram", Box(0, 29, 394, 34), targetSection);
             ButtonStyle(record, "RecordActions", "● 동작 녹화", Box(0, 72, 194, 34), false, targetSection);
             ButtonStyle(reanalyzeRecording, "ReanalyzeRecording", "최근 녹화 다시 분석", Box(204, 72, 190, 34), false, targetSection); reanalyzeRecording.Visible = false;
             ButtonStyle(reviewRecording, "ReviewRecordingWarnings", "누락 경고 확인", Box(0, 112, 394, 32), false, targetSection); reviewRecording.Visible = false;
-            targetSection.Controls.Add(new Label { Text = "시작 버튼을 누른 뒤 실제 클릭·입력을 기록합니다.\n마우스만 올려 모은 요소 목록은 동작 기록이 아닙니다.", ForeColor = muted, Font = new Font(Font.FontFamily, 8), Bounds = Box(0, 149, 394, 34) });
+            targetSection.Controls.Add(new Label { Text = "시작 버튼을 누른 뒤 실제 클릭·입력을 기록합니다.\n마우스만 올려 모은 요소 목록은 동작 기록이 아닙니다.", ForeColor = muted, Font = new Font(Font.FontFamily, 8), Bounds = Box(0, 190, 394, 34) });
+            ButtonStyle(diagnose, "DiagnoseElements", "요소 진단 · 이 PC에만 저장", Box(0, 150, 394, 32), false, targetSection);
+            diagnose.Click += delegate { Send("diagnose", Target(), null); };
             var elementSection = Section(184); Caption("1  동작할 요소", 0, elementSection);
             selected.Text = "아직 선택한 요소가 없습니다"; selected.AutoEllipsis = true; selected.Bounds = Box(0, 28, 394, 28); elementSection.Controls.Add(selected); Identify(selected, "SelectedElement", "현재 선택한 요소");
             ButtonStyle(pick, "PickElement", "화면에서 선택", Box(0, 63, 394, 34), false, elementSection);
@@ -1180,6 +1182,7 @@ internal static class ProcessEditor
                 string purpose = Str(result, "purpose", pendingPurpose ?? "action"); string caption = Str(picked, "label", "이름 없는 요소") + "  ·  " + (Str(picked, "recognition", "") == "image" ? "이미지 인식" : Str(picked, "role", "") + " / 요소 인식");
                 if (purpose == "expect") { expectation = picked; expectSelected.Text = caption; } else { selection = picked; selected.Text = caption; ShowThumbnail(picked); PopulateActions(); }
             }
+            if (pendingAction == "diagnose") ShowDiagnostic(result);
             if (pendingAction == "pick_completion") { var picked = Map(result, "selection"); if (picked != null) ShowCompletionValue(Num(result, "completion_index", -1), picked); }
             if (result.ContainsKey("steps")) UpdateSteps(List(result, "steps"));
             if (result.ContainsKey("recording_review")) SetRecordingReview(Map(result, "recording_review"));
@@ -1222,13 +1225,27 @@ internal static class ProcessEditor
             if(selectedIndex>=0 && selectedIndex<steps.Items.Count)steps.Items[selectedIndex].Selected=true;
             steps.ShowItemToolTips = true; steps.EndUpdate();
         }
+        void ShowDiagnostic(Dictionary<string, object> result)
+        {
+            using (var dialog = new Form()) {
+                dialog.Text = "요소 진단 · 읽기 전용 · 이 PC에만 저장"; dialog.StartPosition = FormStartPosition.CenterParent;
+                dialog.Font = Font; dialog.ClientSize = new Size(Px(760), Px(560)); dialog.MinimumSize = new Size(Px(540), Px(360));
+                var heading = new Label { Text = "원본 Provider / Driver / MCP를 각각 확인합니다. 진단 정보는 실행 대상이 아닙니다.", Dock = DockStyle.Top, Height = Px(54), Padding = new Padding(Px(12)) };
+                var report = new TextBox { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, Dock = DockStyle.Fill, Font = new Font("Consolas", 9) };
+                report.Text = Str(result, "diagnostic_preview", "진단 파일을 확인하세요.");
+                var footer = new TextBox { Text = "JSON 저장 위치: " + Str(result, "report_path", "") + "  (종료된 실행의 진단은 7일 뒤 자동 정리)", ReadOnly = true, Multiline = true, Dock = DockStyle.Bottom, Height = Px(60) };
+                dialog.Controls.Add(report); dialog.Controls.Add(heading); dialog.Controls.Add(footer);
+                dialog.ShowDialog(this);
+            }
+        }
+
         void UpdateButtons()
         {
             program.Enabled = action.Enabled = value.Enabled = checkedValue.Enabled = optionOrder.Enabled = seconds.Enabled = expectProperty.Enabled = expected.Enabled = expectBoolean.Enabled = imageCompletion.Enabled = processName.Enabled = description.Enabled = !busy;
             var targetProgram = program.SelectedItem as Choice;
             bool connected = targetProgram != null && Long(targetProgram.Data, "window_id", 0) > 0;
             pick.Enabled = pickImage.Enabled = pickExpect.Enabled = record.Enabled = !busy && connected;
-            reanalyzeRecording.Enabled = !busy && connected;
+            reanalyzeRecording.Enabled = diagnose.Enabled = !busy && connected;
             add.Enabled = !busy && stepCount < maximumSteps && ActionCode.Length > 0 && (!NeedsElement || selection != null) && (!NeedsExpect || expectation != null);
             save.Enabled = !busy && stepCount > 0 && processName.Text.Trim().Length > 0;
             save.Text = pendingInputs || pendingRecordingReview ? "초안 저장 · 실행 불가" : editingExisting && saveMode.SelectedIndex == 0 ? "기존 작업 저장" : "새 작업 저장";

@@ -254,7 +254,19 @@ class NativeClosureProbe:
                         if len(seen) > 4096:
                             raise ProbeError("transition_scan_limit")
                         if self.user.IsWindow(hwnd) and self._window_pid(hwnd) == self.pid:
-                            children.append(self._window(hwnd))
+                            # EnumChildWindows supplies descendants, not owned
+                            # top-level popups. Recheck GA_ROOT around the row
+                            # read before publishing that distinction: GA_PARENT
+                            # may return the desktop for a top-level window.
+                            child_root = int(self.user.GetAncestor(hwnd, 2) or 0)
+                            expected_root = int(self.user.GetAncestor(root["window_id"], 2) or 0)
+                            if not child_root or child_root == hwnd or child_root != expected_root:
+                                raise ProbeError("window_changed_during_read")
+                            child = self._window(hwnd)
+                            if int(self.user.GetAncestor(hwnd, 2) or 0) != child_root:
+                                raise ProbeError("window_changed_during_read")
+                            child["is_child"] = True
+                            children.append(child)
                         return True
                     except Exception as error:
                         if isinstance(error, ProbeError) and not self.user.IsWindow(hwnd):

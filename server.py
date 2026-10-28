@@ -93,6 +93,8 @@ MANAGEMENT["computer_save_task"]["inputSchema"]["properties"]["recording_review"
                       "items": {"type": "string", "enum": RECORDING_WARNINGS}}}, ["partial", "acknowledged", "warning_codes"])
 MANAGEMENT["computer_save_task"]["inputSchema"]["properties"]["draft"] = {
     "type": "object", "description": "Local process editor draft metadata. Drafts are saved but cannot execute until repaired and saved as ready."}
+MANAGEMENT["computer_save_task"]["inputSchema"]["properties"]["window_contexts"] = {
+    "type": "object", "description": "Optional program_id to stable window_selector and ready_when. No saved HWND/PID or hidden-process main-window assumptions."}
 MANAGEMENT["computer_save_task"]["description"] += " Optional declarative steps and variables enable computer_run_task; saved text is never evaluated as code."
 MANAGEMENT_TOOLS.extend([
     tool("computer_prepare_close", "Read-only: capture one live approved window and retain its original process identity BEFORE any close/menu/keyboard action. Returns a session-local close_id for computer_verify_closed, usable even after the process exits. scope=window verifies that window and related dialogs are gone; scope=process requires the exact original process to exit, not all same-name application instances. Hidden/minimized is not closed. No UI input. Works in UIA and visual sessions.",
@@ -113,6 +115,7 @@ MANAGEMENT_TOOLS.extend([
                         "max_elements": {"type": "integer", "minimum": 1, "maximum": 5000},
                         "search": {"type": "string", "maxLength": 200}, "within": SELECTOR_SCHEMA,
                         "observation": {"type": "string", "enum": ["auto", "uia", "visual", "both"]},
+                        "diagnostics": {"type": "boolean", "description": "Explicit local provider/Driver/MCP comparison. Use only pid/window_id and diagnostics:true; never returns input handles."},
                         "offset": {"type": "integer", "minimum": 0, "maximum": 5000},
                         "actionable_only": {"type": "boolean"}}, ["pid", "window_id"]), True),
     tool("computer_perform", "UIA: observe, resolve exactly one control (optionally within one unique ancestor), perform a typed operation and verify its postconditions. Supports text, combo selection, checkbox/toggle state, list/tab/tree/radio selection, clicks and keys using observed capabilities in any configured program. Keys/clicks/assert require expect. No automatic input retry. Use background by default, foreground only intentionally; explicit foreground may activate an initially unready window once before input. Default window_transition auto verifies a unique related window if the original disappears; for a known next window use new_window with exact title. Closure uses computer_close. Never replay uncertain input. Results include target, transition, delivery and phase timings; pointer movement is not guaranteed.",
@@ -213,7 +216,7 @@ for item in [
     tool("computer_process_editor", "Open a visible native process editor. The human uses one screen picker, with verified UIA or image fallback, and chooses actions and completion conditions, waits/delays and screenshot-review checkpoints, reorders and saves. If UIA matching fails, a visible image picker offers a fallback. Record actions captures human interactions in approved windows and uniquely related same-process owned popups; unresolved windows/input remain warnings. Stop returns an editable draft, never saves or replays automatically. Image input can use explicit automatic UIA completion with a required before/after change; otherwise it pauses for human screenshot review. Returns editor_id; poll computer_process_status using the same ID, do not repeatedly reopen. Optional task_id edits the same process with a checked new revision; existing steps and assets are preserved. Manual picking/editing does not execute steps. Recording observes real human clicks and typing: these DO affect the business app.",
          object_schema({"targets": {"type": "array", "minItems": 1, "maxItems": 10, "items": object_schema({
              "program_id": STRING, "pid": {"type": "integer", "minimum": 1}, "window_id": {"type": "integer", "minimum": 1},
-             "window_ref": STRING}, ["program_id", "pid", "window_id"])}, "name": {"type": "string", "minLength": 1, "maxLength": 100},
+             "window_ref": STRING, "window_context": {"type": "object"}}, ["program_id", "pid", "window_id"])}, "name": {"type": "string", "minLength": 1, "maxLength": 100},
              "task_id": STRING, "timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 1800}}, ["targets"])),
     tool("computer_process_status", "Read native process-editor state, ordered steps and saved_task. saved confirms local storage, never execution. Wait until pending=false before running the saved process; pending includes owned-helper cleanup. wait_ms up to 5000; cancel closes the editor without saving unfinished steps. A previously saved process stays saved. Available after session end for this MCP connection.",
          object_schema({"editor_id": STRING, "wait_ms": {"type": "integer", "minimum": 0, "maximum": 5000},
@@ -285,7 +288,7 @@ class TaskStore:
     MAX_TASKS = 1000
     LOCK_TIMEOUT = 5
     TASK_FIELDS = {"id", "name", "instructions", "expected", "program_ids", "updated_at"}
-    OPTIONAL_FIELDS = {"steps", "variables", "revision", "recording_review", "revision_history", "draft"}
+    OPTIONAL_FIELDS = {"steps", "variables", "revision", "recording_review", "revision_history", "draft", "window_contexts"}
 
     def __init__(self, state_dir, config):
         self.path = Path(state_dir) / "tasks.json"
@@ -303,6 +306,9 @@ class TaskStore:
             raise SessionError("저장된 작업 항목의 필수 내용 또는 형식이 올바르지 않습니다. 기존 파일은 보존됩니다.")
         cls._validate_id(item["id"])
         validate_management("computer_save_task", {k: v for k, v in item.items() if k not in {"updated_at", "revision", "revision_history"}})
+        if 'window_contexts' in item:
+            from window_contexts import validate_contexts
+            validate_contexts(item['window_contexts'], item['program_ids'])
         from task_revision import validate_history
         validate_history(item.get("revision_history", []))
         if type(item.get("revision", 1)) is not int or item.get("revision", 1) < 1:
@@ -448,7 +454,7 @@ class TaskStore:
             tasks = self._read()
             previous = next((item for item in tasks if item["id"] == task_id), {})
             # The existing human editor edits text only; retain its stored workflow.
-            for key in ("steps", "variables", "recording_review", "draft"):
+            for key in ("steps", "variables", "recording_review", "draft", "window_contexts"):
                 if key in args or key in previous:
                     entry[key] = copy.deepcopy(args.get(key, previous.get(key)))
             entry["revision"] = (previous.get("revision", 1) if previous else 0) + 1
@@ -788,7 +794,8 @@ class ComputerManager:
                     return filter_response(result({'status': 'blocked', 'diagnostic': {'code': 'local_use_editor'}}, True))
             if args.get('image_delivery') == 'vision':
                 return filter_response(result({'status': 'blocked', 'diagnostic': {'code': 'local_vision_disabled'}}, True))
-            if name in {'computer_export_skill', 'computer_update_task', 'computer_act', 'computer_observe'}:
+            if (name in {'computer_export_skill', 'computer_update_task', 'computer_act'}
+                    or name == 'computer_observe' and args.get('diagnostics') is not True):
                 return filter_response(result({'status': 'blocked', 'diagnostic': {'code': 'local_use_editor'}}, True))
             if (name == 'computer_process_editor' and args.get('action', 'open') == 'open'
                     and not args.get('program_ids') and not args.get('window_refs') and self.session is None):
@@ -974,6 +981,12 @@ class ComputerManager:
                 if self.session is None:
                     raise SessionError("먼저 computer_begin으로 화면 작업을 시작하세요.")
                 try:
+                    if args.get('diagnostics') is True:
+                        if set(args) != {'pid', 'window_id', 'diagnostics'}:
+                            raise OperationError('진단할 pid/window_id와 diagnostics:true만 지정하세요.')
+                        from accessibility_report import collect
+                        with self.session.execution_lock:
+                            return result(collect(self.session, {key: args[key] for key in ('pid', 'window_id')}))
                     return inspect_window(self.session, {k: args[k] for k in ("pid", "window_id")},
                                           **{k: args[k] for k in ("max_controls", "max_depth", "max_elements", "search", "within", "offset", "actionable_only", "observation") if k in args})
                 except OperationError as exc:

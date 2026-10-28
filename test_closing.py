@@ -509,7 +509,26 @@ class NativeProbeTests(unittest.TestCase):
         user.EnumChildWindows = WinFunction(callback=lambda hwnd, cb, arg: cb(200, arg) and cb(300, arg))
         self.capture(probe)
         self.assertEqual([r["window_id"] for r in probe.snapshot()["windows"]], [100])
-        self.assertEqual([r["window_id"] for r in probe.transition_snapshot()["windows"]], [100, 200, 300])
+        rows = probe.transition_snapshot()["windows"]
+        self.assertEqual([r["window_id"] for r in rows], [100, 200, 300])
+        self.assertIsNot(rows[0].get("is_child"), True)
+        self.assertTrue(all(row.get("is_child") is True for row in rows[1:]))
+
+    def test_transition_never_marks_top_level_or_reparented_window_as_child(self):
+        for changing in (False, True):
+            probe, _, user = self.make_probe()
+            user.EnumChildWindows = WinFunction(callback=lambda hwnd, cb, arg: cb(200, arg))
+            self.capture(probe)
+            reads = []
+            def ancestor(hwnd, flag):
+                if flag != 2 or hwnd == 100:
+                    return 100
+                reads.append(hwnd)
+                return (100 if len(reads) == 1 else 999) if changing else 200
+            user.GetAncestor.callback = ancestor
+            with self.assertRaises(ProbeError) as error:
+                probe.transition_snapshot()
+            self.assertEqual(error.exception.code, 'window_changed_during_read')
 
     def test_transition_excludes_foreign_children_and_deduplicates(self):
         probe, _, user = self.make_probe()

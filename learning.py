@@ -229,10 +229,16 @@ class ElementLibrary:
         if not isinstance(item["program_binding"], str) or not re.fullmatch(r"[0-9a-f]{64}", item["program_binding"]):
             raise LearningError("저장된 프로그램 연결 정보가 올바르지 않습니다.", "invalid_store")
         validate_selector(item["selector"])
-        for selector in (item["selector"], item["selector"].get("within", {})):
-            for key, value in selector.items():
-                if key != "within":
+        # validate_selector checks strings and nested label/row contracts.
+        # Re-running the old flat-string check rejects valid semantic selectors
+        # and must not flatten those relations when persisting an element.
+        def text_leaves(selector):
+            for value in selector.values():
+                if isinstance(value, dict):
+                    text_leaves(value)
+                else:
                     _text(value, "요소 선택 기준", 1000)
+        text_leaves(item["selector"])
         fp = item["fingerprint"]
         if not isinstance(fp, dict) or set(fp) != {"role", "actions"} or _fingerprint(fp) != fp or item["selector"].get("role") != fp["role"]:
             raise LearningError("저장된 요소 종류 또는 기능 정보가 올바르지 않습니다.", "invalid_store")

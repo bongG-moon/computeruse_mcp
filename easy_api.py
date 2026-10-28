@@ -19,7 +19,13 @@ INSTRUCTIONS += " In the process editor, recording explicitly offers append, rep
 INSTRUCTIONS += " For select_option, foreground execution activates and reobserves the window, then uses targeted background dropdown/item clicks to avoid foreground click toggling. Delivery evidence reports this distinction; do not promise visible pointer movement. No failed input is automatically replayed."
 INSTRUCTIONS += " For saved visual reviews, copy observation_review_template exactly, then add verdict, evidence and evidence_regions covering ALL stated conditions; do not replace it with IDs from an unrelated computer_observe. Review submission already rechecks those pixels. Do not poll computer_status or dump UIA between receiving a review and submitting it. If still processing, use a declared read-only wait condition; never approve a processing screen as completion. Use computer_status(run_id=...) for lightweight saved-run progress. Repeated invalid submissions require correcting the returned template, not repeated capture or clicks. For requested form setup optimization, computer_update_task supports group_reviews with checkpoint_ids and condition: it defers only generated visual reviews to the final cumulative review in a NEW revision, preserving human confirmations and all actions. Never group irreversible actions or remove a required completion condition for speed. For requested existing-recording optimization, use_popup_image_conditions explicitly changes eligible visual open-popup checks to saved next-target conditions without rerecording; this proves popup/target presence only, preserves old reviews in the prior revision, and never bypasses human or required checks."
 
+INSTRUCTIONS += " If element recognition is unclear, computer_observe(window_ref, diagnostics=true) performs an explicit read-only Provider/Driver/MCP comparison without focus or input. Use only these two arguments. It saves a local diagnostic; local policy returns a content-free diagnostic ID, and the process editor has an element diagnostic button. Do not run this inventory on every step, infer controls from static field names, or use diagnostic node IDs as action targets. For visible grid cells use a unique observed within scope plus selector.row key/property/equals and the target column identity; never guess row numbers, code values or unsupported Realize/ScrollItem actions."
+INSTRUCTIONS += " One process may have a hidden resident and multiple independent business windows. For a stable observed business title use computer_open window_selector with title or title_prefix and optional class_name; ambiguity requires an explicit observed window_id. Never treat a launcher registration or same PID as authorization for an unrelated window. For delayed control creation use optional ready_when containing only required observed selectors (with within for duplicate toolbar/body labels); ready means window preparation, not business success. To verify an action that opens or reselects an independent business window while the original remains, explicitly use window_transition.mode=business_window with window_selector and concrete result conditions. Owned dropdowns still use their proven owner relationships. Authoring may save a stable observed MenuAgent business title without its user suffix; existing saved revisions and input receipts are never silently rewritten."
+
+
 def schemas(legacy):
+    from business_windows import WINDOW_SELECTOR_SCHEMA
+    from window_readiness import READY_WHEN_SCHEMA
     from server import tool, object_schema, STRING, PROGRAM_IDS, SELECTOR_SCHEMA
     from operations import OPERATION_SCHEMA
     enum = lambda *values: {"type": "string", "enum": list(values)}
@@ -38,8 +44,8 @@ def schemas(legacy):
     return [
         tool("computer_programs", "List registered apps or currently open candidates. Use action=candidates when the path is unknown; registration needs no config editing.", object_schema({"action": enum("list", "candidates")}), True),
         copy.deepcopy(legacy["computer_register_program"]),
-        tool("computer_open", "Attach to a registered app's current window, or launch it once if absent. Manages bounded session automatically. Multiple windows return choices; supply window_id from those choices. Returns window_ref used by observe/act. No file search.", object_schema({"program_id": STRING, "task_description": STRING, "window_id": pos, "title": STRING, "launch_if_missing": {"type": "boolean"}, "image_delivery": enum("text", "vision")}, ["program_id"])),
-        tool("computer_observe", "Read a bound current window once. Image capture may bring that window forward. UIA controls and optional screenshot use one coordinate/frame contract. Use search/within to narrow results. Sparse UIA in a vision connection returns the image for visual reasoning.", object_schema({"window_ref": STRING, "goal": STRING, "search": STRING, "observation": enum("auto", "uia", "both", "visual"), "within": SELECTOR_SCHEMA}, ["window_ref"])),
+        tool("computer_open", "Attach to a registered app's current window, or launch it once if absent. Multiple windows return choices. Optional window_selector identifies a unique independent business window by observed stable title context; it never selects a hidden resident or owned popup. ready_when explicitly waits for required scoped controls, without input or assuming a toolbar. Returns window_ref used by observe/act.", object_schema({"program_id": STRING, "task_description": STRING, "window_id": pos, "title": STRING, "window_selector": WINDOW_SELECTOR_SCHEMA, "ready_when": READY_WHEN_SCHEMA, "launch_if_missing": {"type": "boolean"}, "image_delivery": enum("text", "vision")}, ["program_id"])),
+        tool("computer_observe", "Read a bound current window once. Image capture may bring that window forward. UIA controls and optional screenshot use one coordinate/frame contract. Use search/within to narrow results. Sparse UIA in a vision connection returns the image for visual reasoning.", object_schema({"window_ref": STRING, "goal": STRING, "search": STRING, "observation": enum("auto", "uia", "both", "visual"), "within": SELECTOR_SCHEMA, "diagnostics": {"type": "boolean", "description": "Explicit provider/Driver/MCP read-only comparison; use only window_ref and diagnostics:true. Saves a local JSON report. No focus, screenshots or input; local policy returns only receipt."}}, ["window_ref"])),
         tool("computer_act", "Perform one foreground action and verify its result, or review the exact post-action observation. Provide step with operation/selector/value/expect; alternatively target_ref or image_region from a delivered observation. completion describes visible success when no deterministic expect is available. type_text/scroll require an image_region; set_value works with UIA or images. Never repeat input after unknown/needs_observation_review. close/verify_closed handle actual termination and remaining dialogs.", object_schema({"action": enum("execute", "review", "close", "verify_closed"), "window_ref": STRING, "step": step_schema, "target_ref": STRING, "observation_id": STRING, "image_region": region, "scope_region": region, "completion": STRING, "action_id": STRING, "frame_id": STRING, "verdict": enum("pass", "fail", "uncertain"), "evidence": STRING, "evidence_regions": {"type": "array", "items": region, "maxItems": 8}, "scope": enum("window", "process"), "close_id": STRING, "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 10000}}, ["window_ref"])),
         tool("computer_process_editor", "The ONE human teaching entry: select on screen, record real actions, edit values/conditions and trial-run, then save. App windows attach automatically. Reopening task_id edits the SAME version using conflict checks. Poll computer_status(editor_id). For a trial's visual_review use action=resume_test with editor_id and the bound observation_review; it resumes the unchanged draft without saving or replaying completed input.", object_schema({"action": enum("open", "resume_test"), "editor_id": STRING, "observation_review": obj, "acknowledge_checkpoint": STRING, "program_ids": PROGRAM_IDS, "task_id": STRING, "name": STRING, "window_refs": {"type": "object", "description": "Optional program_id to window_ref returned by computer_open."}, "timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 1800}})),
         tool("computer_tasks", "List/get/history for saved processes; run_local opens a local input form and executes a pinned revision; resume_local continues its same local_run_id. In local policy only opaque receipts leave the computer.", object_schema({"action": enum("list", "get", "history", "run_local", "resume_local"), "task_id": STRING, "local_run_id": STRING, "revision": pos, "query": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}})),
@@ -76,6 +82,7 @@ class EasyApi:
         self.engine = None
         self.runtime = None
         self.bindings = {}
+        self.window_contexts = {}
         self.pending_launches = {}
         self.editor_reviews = {}
         self.run_bindings = {}
@@ -84,6 +91,7 @@ class EasyApi:
         if self.engine: self.engine.close()
         self.engine = self.runtime = None
         self.bindings.clear()
+        self.window_contexts.clear()
         self.pending_launches.clear()
         self.editor_reviews.clear()
         self.run_bindings.clear()
@@ -226,7 +234,16 @@ class EasyApi:
         self.pending_launches.update(pending)
         return True
 
-    def _attach(self, program_id, *, window_id=None, title=None, launch_if_missing=True, cancel_event=None):
+    def _attach(self, program_id, *, window_id=None, title=None, window_selector=None, ready_when=None,
+                launch_if_missing=True, cancel_event=None):
+        if title is not None and window_selector is not None:
+            raise SessionError('정확한 title 또는 window_selector 중 하나만 지정하세요.')
+        if window_selector is not None:
+            from business_windows import validate_window_selector
+            window_selector = validate_window_selector(window_selector)
+        if ready_when is not None:
+            from window_readiness import validate_ready_when
+            ready_when = validate_ready_when(ready_when)
         self._refresh_hosted_scope(cancel_event)
         rows = self._windows(program_id)
         launch = None
@@ -241,28 +258,78 @@ class EasyApi:
             self.pending_launches.pop(program_id, None)
         if window_id is not None: rows = [r for r in rows if r["window_id"] == window_id]
         if title is not None: rows = [r for r in rows if r["title"] == title]
+        if window_selector is not None and rows:
+            from business_windows import discover_business_windows, BusinessWindowError
+            try:
+                selected = discover_business_windows(self.manager.session, rows, window_selector,
+                    explicit_target={k: rows[0][k] for k in ('pid', 'window_id')}
+                    if window_id is not None and len(rows) == 1 else None)
+            except BusinessWindowError as error:
+                if error.code != 'business_window_ambiguous':
+                    raise
+                return {'status': 'choose_window', 'program_id': program_id,
+                        'candidates': error.candidates, 'task_verified': False, 'input_dispatched': False,
+                        'diagnostic': {'code': error.code}, 'launch': launch,
+                        'next_step': '같은 조건의 업무 창이 여러 개입니다. 관찰한 창을 window_id로 명시해 선택하세요.'}
+            rows = [selected] if selected else []
         if len(rows) != 1:
             return {"status": "choose_window" if rows else "window_unavailable", "program_id": program_id,
                     "candidates": rows, "launch": launch, "task_verified": False,
                     "next_step": "현재 창을 선택해 computer_open에 window_id를 전달하세요." if rows else "프로그램 창이 표시되는지 확인하세요. 실행 요청을 자동 반복하지 않았습니다."}
         row = rows[0]
         bound = self._engine().bind({k: row[k] for k in ("pid", "window_id")})
+        if window_selector is not None:
+            # Selection and binding use independent retained probes. Compare
+            # their evidence before exposing the ref, not just the HWND.
+            identity = self.engine.windows[bound['window_ref']]['identity']
+            if any(key in row and row[key] != identity.get(key)
+                   for key in ('creation_time', 'executable', 'class_name', 'thread_id', 'owner_window_id')):
+                self.engine.windows.pop(bound['window_ref'])['probe'].close()
+                raise OperationError('선택한 업무 창이 연결 중 바뀌었습니다.', 'business_window_identity_changed')
         self.bindings[bound["window_ref"]] = program_id
-        return {"status": "connected", "program_id": program_id, "title": row["title"], **bound, "launch": launch}
+        if window_selector is not None:
+            self.window_contexts[bound['window_ref']] = {'window_selector': copy.deepcopy(window_selector),
+                **({'ready_when': copy.deepcopy(ready_when)} if ready_when is not None else {})}
+        answer = {"status": "connected", "program_id": program_id, "title": row["title"], **bound, "launch": launch}
+        if ready_when is not None:
+            from window_readiness import wait_ready
+            readiness = wait_ready(self.manager.session, bound['target'], ready_when)
+            answer['readiness'] = readiness
+            if readiness.get('ready') is not True:
+                answer.update(status='window_not_ready', task_verified=False, input_dispatched=False)
+        return answer
 
-    def _targets(self, ids, refs, cancel_event=None):
+    def _targets(self, ids, refs, cancel_event=None, *, contexts=None, check_ready=True, for_editor=False):
         if not isinstance(refs, dict) or set(refs)-set(ids): raise SessionError("작업에 필요한 프로그램의 창만 지정하세요.")
         targets = []
+        from window_contexts import validate_contexts
+        contexts = validate_contexts(contexts or {}, ids)
         for program in ids:
+            context = contexts.get(program, {})
             if program in refs:
                 ref = refs[program]
                 if self.bindings.get(ref) != program: raise SessionError("다른 프로그램의 창 참조를 사용할 수 없습니다.")
                 target = self._engine().target(ref)
+                context = context or self.window_contexts.get(ref, {})
+                if context:
+                    from business_windows import discover_business_windows
+                    if discover_business_windows(self.manager.session, [target], context['window_selector'],
+                                                  explicit_target=target) is None:
+                        raise OperationError('현재 창이 저장한 업무 화면 조건과 다릅니다.', 'business_window_context_mismatch')
+                if check_ready and context.get('ready_when'):
+                    from window_readiness import wait_ready
+                    readiness = wait_ready(self.manager.session, target, context['ready_when'])
+                    if not readiness.get('ready'):
+                        return None, {'status': 'window_not_ready', 'program_id': program, 'readiness': readiness,
+                                      'input_dispatched': False, 'task_verified': False}
             else:
-                answer = self._attach(program, cancel_event=cancel_event)
+                answer = self._attach(program, cancel_event=cancel_event,
+                    window_selector=context.get('window_selector'),
+                    ready_when=context.get('ready_when') if check_ready else None)
                 if answer["status"] != "connected": return None, answer
                 target = answer["target"]
-            targets.append({"program_id": program, **target})
+            targets.append({"program_id": program, **target,
+                            **({'window_context': copy.deepcopy(context)} if for_editor and context else {})})
         return targets, None
 
     def _run_refs(self, run_id, explicit):
@@ -407,7 +474,7 @@ class EasyApi:
                 self._session([args["program_id"]], args.get("task_description", "요청한 프로그램의 화면 작업"), cancel_event)
                 if "image_delivery" in args: m.image_delivery.configure(args["image_delivery"])
                 with m.session.execution_lock:
-                    return result(self._attach(args["program_id"], cancel_event=cancel_event, **{k:args[k] for k in ("window_id", "title", "launch_if_missing") if k in args}))
+                    return result(self._attach(args["program_id"], cancel_event=cancel_event, **{k:args[k] for k in ("window_id", "title", "window_selector", "ready_when", "launch_if_missing") if k in args}))
             if name == "computer_process_editor" or name == "computer_run_task":
                 if name == "computer_process_editor" and args.get("action") == "resume_test":
                     if not args.get("editor_id") or set(args) - {"action", "editor_id", "observation_review", "acknowledge_checkpoint"}:
@@ -446,7 +513,9 @@ class EasyApi:
                     refs = args.get("window_refs", {})
                     if name == "computer_run_task":
                         refs = self._run_refs(args.get("resume_run_id"), refs)
-                    targets, pending = self._targets(ids, refs, cancel_event)
+                    targets, pending = self._targets(ids, refs, cancel_event,
+                        contexts=(task or {}).get('window_contexts'), check_ready=not bool(args.get('resume_run_id')),
+                        for_editor=name == 'computer_process_editor')
                     if pending: return result(pending)
                     if name == "computer_process_editor":
                         return result(m.process_editors.start(m.session, {"targets": targets, **{k:args[k] for k in ("name", "task_id", "timeout_seconds") if k in args}}, cancel_event))
@@ -477,11 +546,19 @@ class EasyApi:
                     response = result(answer)
                     response["content"].extend(content)
                     return response
-            if m.process_editors.pending(m.session): raise SessionError("편집 또는 녹화 중입니다. 편집창을 마친 뒤 채팅 동작을 실행하세요.")
+            if (m.process_editors.pending(m.session)
+                    and not (name == 'computer_observe' and args.get('diagnostics') is True)):
+                raise SessionError("편집 또는 녹화 중입니다. 편집창을 마친 뒤 채팅 동작을 실행하세요.")
             engine = self._engine()
             with m.session.execution_lock:
                 vision = m.image_delivery.status()["delivery_mode"] == "vision"
-                if name == "computer_observe": return engine.observe(**args, image_delivery_enabled=vision)
+                if name == "computer_observe":
+                    options = dict(args)
+                    if options.pop('diagnostics', False):
+                        if set(options) != {'window_ref'}:
+                            raise OperationError('요소 진단은 window_ref와 diagnostics:true만 지정하세요. 화면 입력이나 캡처는 하지 않습니다.')
+                        return engine.diagnose(options['window_ref'])
+                    return engine.observe(**options, image_delivery_enabled=vision)
                 action = args.get("action", "execute")
                 ref = args["window_ref"]
                 if action == "review":

@@ -295,7 +295,7 @@ def _scan(path, offset, deadline, maximum):
 
 
 def _helper_kind(name):
-    if name in {"im", "visual", "learning", "process-editor", "image-crops", "recording-receipts"}:
+    if name in {"im", "visual", "learning", "process-editor", "image-crops", "recording-receipts", "accessibility-diagnostics"}:
         return name
     if re.fullmatch("checkpoint-review-" + _HEX, name):
         return "checkpoint"
@@ -305,6 +305,7 @@ def _helper_kind(name):
 def _allowed_file(kind, name):
     atomic = r"(?:\.tmp(?:-[a-f0-9]{32})?)?"
     patterns = {
+        "accessibility-diagnostics": _HEX + r"\.json",
         "im": _SHORT + r"\.(?:air\.)?(?:in|out)" + atomic,
         "visual": _SHORT + r"\.(?:req\.json|res\.json(?:\.(?:ready|progress)\.json)?)" + atomic,
         "learning": _SHORT + r"\.(?:request\.json|response\.json(?:\.ready\.json)?)" + atomic,
@@ -381,6 +382,9 @@ def _clean_directory(run, folder, kind, value, marker_identity, session_identity
                 value["saved_recordings"].pop(name[:-5], None)
             elif _allowed_file(kind, name):
                 identity = _identity(path)
+                if kind == 'accessibility-diagnostics' and now - path.stat().st_mtime < RECEIPT_RETENTION_SECONDS:
+                    result["preserved_files"] += 1
+                    continue
                 _unlink(path, run, marker_identity, session_identity, identity, result)
             else:
                 result["preserved_files"] += 1

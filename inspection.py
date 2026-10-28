@@ -4,8 +4,9 @@ from __future__ import annotations
 import copy
 import json
 import math
+import time
 
-from operations import OperationError, _descendant, _elements, _name, _payload, _unique, validate_selector
+from operations import OperationError, _descendant, _elements, _name, _payload, _unique, validate_selector, supports_set_value
 
 
 def _protected(element):
@@ -74,13 +75,13 @@ def suggested_operations(element):
     actions = set(a for a in actions if isinstance(a, str)) if isinstance(actions, list) else set()
     role = element.get("role")
     supported = ["assert"]
-    if role in {"Edit", "Document", "TextBox"} and "set_value" in actions and element.get("read_only") is not True and element.get("is_read_only") is not True:
+    if "set_value" in actions and supports_set_value(element):
         supported.append("set_value")
     if role == "ComboBox" and actions & {"expand", "select", "set_value"}:
         supported.append("select_option")
     if role in {"CheckBox", "ToggleButton", "Button"} and "toggle" in actions and type(element.get("selected")) is bool:
         supported.append("set_checked")
-    if role in {"ListItem", "TabItem", "TreeItem", "RadioButton"} and "select" in actions and type(element.get("selected")) is bool:
+    if role in {"ListItem", "TabItem", "TreeItem", "RadioButton", "DataItem", "Row"} and "select" in actions and type(element.get("selected")) is bool:
         supported.append("select_item")
     if actions & {"invoke", "click", "toggle", "select", "expand"}:
         supported.append("click")
@@ -288,8 +289,197 @@ def control_display_label(snapshot, element, default):
     return label + " (" + source + ")" + (" · " + group if group else "")
 
 
+_DIAGNOSTIC_PATTERNS = ("Invoke", "Value", "RangeValue", "Text", "Text2", "Toggle", "Selection",
+    "SelectionItem", "ExpandCollapse", "Grid", "GridItem", "Table", "TableItem", "ItemContainer",
+    "VirtualizedItem", "Scroll", "ScrollItem", "LegacyIAccessible", "Window", "Transform")
+_DIAGNOSTIC_METADATA = {
+    "framework_id": ("framework_id", "frameworkId", "FrameworkId"),
+    "class_name": ("class_name", "className", "ClassName"),
+    "provider_description": ("provider_description", "providerDescription", "ProviderDescription"),
+    "native_window_handle": ("native_window_handle", "nativeWindowHandle", "NativeWindowHandle"),
+    "runtime_id": ("runtime_id", "runtimeId", "RuntimeId"),
+}
+
+
+def _pattern_diagnostics(element):
+    """Unknown is distinct from unsupported; Driver actions are not UIA patterns."""
+    result = {name: {"status": "unknown", "source": "not_reported"} for name in _DIAGNOSTIC_PATTERNS}
+    def canonical(name):
+        if not isinstance(name, str):
+            return None
+        compact = name.removesuffix("Pattern").replace("_", "").casefold()
+        return next((item for item in result if item.casefold() == compact), None)
+    for field in ("supported_patterns", "unsupported_patterns"):
+        rows = element.get(field)
+        if not isinstance(rows, list):
+            continue
+        for name in rows:
+            key = canonical(name)
+            if key is not None:
+                result[key] = {"status": "supported" if field == "supported_patterns" else "unsupported",
+                               "source": "driver." + field}
+    for field in ("patterns", "pattern_support"):
+        rows = element.get(field)
+        if not isinstance(rows, dict):
+            continue
+        for name, value in rows.items():
+            key = canonical(name)
+            if key is None:
+                continue
+            status = ("supported" if value is True else "unsupported" if value is False else
+                      value if isinstance(value, str) and value in {"supported", "unsupported", "unknown"} else
+                      value.get("status") if isinstance(value, dict) else None)
+            if not isinstance(status, str) or status not in {"supported", "unsupported", "unknown"}:
+                status = "unknown"
+            entry = {"status": status, "source": "driver." + field}
+            if isinstance(value, dict):
+                for error_field in ("hresult", "timeout", "error_code"):
+                    error = value.get(error_field)
+                    if type(error) in (int, bool) or isinstance(error, str) and len(error) <= 160:
+                        entry[error_field] = error
+            result[key] = entry
+    return result
+
+
+def _diagnostic_node(element, ordinal, reason):
+    protected = _protected(element)
+    node = {"observation_ordinal": ordinal, "source": "driver.elements",
+            "projection": reason, "read_only": True, "authorizes_input": False,
+            "identifiers_lifetime": "this_observation_only", "protected": protected}
+    if element.get("synthetic_ancestor") is True:
+        node["source"] = "driver.tree_markdown_synthetic_ancestor"
+    for key in ("element_index", "parent_index", "depth", "role", "enabled", "offscreen", "is_offscreen"):
+        value = element.get(key)
+        if type(value) in (int, bool) or isinstance(value, str) and len(value) <= 256:
+            node[key] = value
+    # Password metadata can itself contain user text; do not serialize a whole
+    # protected node or raw provider exception simply because this is diagnostic.
+    if protected:
+        node["metadata_status"] = "redacted_protected"
+        node["patterns"] = {name: {"status": "unknown", "source": "redacted_protected"}
+                            for name in _DIAGNOSTIC_PATTERNS}
+        return node
+    for key, value in (("name", _name(element)), ("value", element.get("value")),
+                       ("automation_id", element.get("automation_id"))):
+        if type(value) in (bool, int, float) and (type(value) is not float or math.isfinite(value)):
+            node[key] = value
+        elif isinstance(value, str):
+            node[key] = value[:2000]
+            if len(value) > 2000:
+                node[key + "_truncated"] = True
+    metadata, missing = {}, []
+    for name, aliases in _DIAGNOSTIC_METADATA.items():
+        field = next((key for key in aliases if key in element), None)
+        value = element.get(field) if field is not None else None
+        valid = (isinstance(value, str) and len(value) <= 2000 or type(value) is int
+                 or name == "runtime_id" and isinstance(value, list) and len(value) <= 64
+                 and all(type(part) is int for part in value))
+        if valid:
+            metadata[name] = {"value": copy.deepcopy(value), "source": "driver." + field}
+        else:
+            missing.append(name)
+    node.update(metadata=metadata, metadata_unreported=missing, patterns=_pattern_diagnostics(element))
+    node["actions"] = [action for action in element.get("actions", [])
+                       if isinstance(action, str) and len(action) <= 80] if isinstance(element.get("actions"), list) else []
+    node["actions_are_pattern_support"] = False
+    return node
+
+
+def projection_diagnostics(snapshot, inspection, *, original_snapshot=None, max_nodes=5000):
+    """Compare observable projection boundaries without claiming native UIA access.
+
+    The optional native diagnostic helper is an independent observation. It can
+    be joined by the caller, but node counts alone cannot prove identical state
+    or attribute a missing Provider child to the Driver.
+    """
+    from accessibility_tree import projection_evidence
+    if type(max_nodes) is not int or not 1 <= max_nodes <= 5000:
+        raise OperationError("진단 요소 수는 1~5000 범위여야 합니다.")
+    original = original_snapshot if isinstance(original_snapshot, dict) else snapshot
+    evidence = projection_evidence(original)
+    rows = snapshot.get("elements", [])
+    rows = rows if isinstance(rows, list) else []
+    rows = [row for row in rows if isinstance(row, dict)]
+    filters = inspection.get("filters", {})
+    within, search = filters.get("within"), str(filters.get("search", "")).casefold().strip()
+    scope = _unique(snapshot, within) if within is not None else None
+    parents = {row.get("element_index"): row for row in rows if type(row.get("element_index")) is int}
+    offset = inspection.get("offset", 0)
+    page_size = len(inspection.get("controls", []))
+    scoped = inspection.get("observation_scope", {}).get("kind") == "native_selected_subtree"
+    candidates, records, reasons = 0, [], {}
+    for ordinal, row in enumerate(rows):
+        actions = row.get("observed_patterns" if scoped else "actions", [])
+        actions = actions if isinstance(actions, list) else []
+        if not (_base_selector(row) or actions):
+            reason = "no_identity_or_actions"
+        elif scope is not None and not _descendant(row, scope, rows, parents):
+            reason = "outside_requested_scope"
+        elif filters.get("actionable_only") and not actions:
+            reason = "actionable_filter"
+        else:
+            searchable = str(row.get("role", "")) if _protected(row) else " ".join(
+                str(value) for value in (_name(row) or "", row.get("role", ""), row.get("automation_id", "")))
+            if search and search not in searchable.casefold():
+                reason = "search_filter"
+            else:
+                candidates += 1
+                reason = ("before_page_offset" if candidates <= offset else "after_page_limit"
+                          if candidates > offset + page_size else "returned_control")
+        reasons[reason] = reasons.get(reason, 0) + 1
+        if len(records) < max_nodes:
+            records.append(_diagnostic_node(row, ordinal, reason))
+    flags = {key: snapshot[key] for key in ("truncated", "max_depth_reached", "max_elements_reached")
+             if type(snapshot.get(key)) is bool}
+    nested_error = snapshot.get("diagnostic", snapshot.get("error", {}))
+    nested_error = nested_error if isinstance(nested_error, dict) else {}
+    code = snapshot.get("diagnostic_code", snapshot.get("error_code", snapshot.get("code", nested_error.get("code"))))
+    code = code if isinstance(code, str) and len(code) <= 160 else None
+    status = ("timeout" if code and "timeout" in code else "provider_error" if code and "provider" in code
+              else "observation_error" if code else "truncated" if any(flags.values())
+              else evidence["elements"]["status"] if evidence["elements"]["status"] in {"empty", "missing", "invalid"}
+              else "observed")
+    counts = {"provider_original": None, "driver_elements": evidence["elements"]["count"],
+              "tree_markdown_rows": evidence["tree_markdown"]["count"], "normalized_elements": len(rows),
+              "mcp_controls_returned": page_size, "mcp_controls_filtered": len(rows) - reasons.get("returned_control", 0)}
+    report = {"format": "computer-accessibility-projection/v1", "read_only": True, "authorizes_input": False,
+              "status": status, "backend": "driver_projection", "counts": counts,
+              "provider_original": {"status": "not_observed", "count": None,
+                                    "reason": "independent_native_probe_required"},
+              "driver_elements": evidence["elements"], "tree_markdown": evidence["tree_markdown"],
+              "normalization": copy.deepcopy(snapshot.get("accessibility_normalization", {"status": "not_reported"})),
+              "filter_reasons": reasons, "nodes": records, "diagnostic_nodes_omitted": max(0, len(rows) - len(records)),
+              "traversal_flags": flags, "completeness": "limited" if any(flags.values())
+                  or inspection.get("traversal_may_be_limited") else "unknown",
+              "view_membership": {"raw": "unknown", "control": "unknown", "content": "unknown"},
+              "scope": copy.deepcopy(inspection.get("observation_scope", {})),
+              "input_dispatched": False, "task_verified": False}
+    if code is not None:
+        report["diagnostic_code"] = code
+    return report
+
+
+def _unmodified_payload(answer):
+    structured = answer.get("structuredContent")
+    if isinstance(structured, dict) and "elements" in structured:
+        return structured
+    for item in answer.get("content", []):
+        if isinstance(item, dict) and item.get("type") == "text":
+            try:
+                parsed = json.loads(item.get("text", ""))
+            except (TypeError, ValueError):
+                continue
+            if isinstance(parsed, dict) and "elements" in parsed:
+                return {**parsed, **(structured if isinstance(structured, dict) else {})}
+    return structured if isinstance(structured, dict) else {}
+
+
 def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elements=600,
-                   search="", within=None, offset=0, actionable_only=False, observation="auto", requested_goal=""):
+                   search="", within=None, offset=0, actionable_only=False, observation="auto", requested_goal="",
+                   diagnostics=False, host_executable=None):
+    if type(diagnostics) is not bool:
+        raise OperationError("diagnostics는 true 또는 false여야 합니다.")
+    diagnostic_started = time.perf_counter() if diagnostics else None
     if (not isinstance(target, dict) or set(target) != {"pid", "window_id"}
             or any(type(v) is not int or v < 1 for v in target.values())):
         raise OperationError("관찰할 현재 창의 pid/window_id를 지정하세요.")
@@ -339,6 +529,13 @@ def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elemen
                 args.update(max_depth=max_depth, max_elements=max_elements)
             answer = runtime.call("get_window_state", args)
     if answer.get("isError"):
+        if diagnostics:
+            answer = copy.deepcopy(answer)
+            raw = _unmodified_payload(answer)
+            details = projection_diagnostics(raw, {}, original_snapshot=raw)
+            details.update(observed_at=time.time(), elapsed_ms=round((time.perf_counter()-diagnostic_started)*1000, 3))
+            answer["structuredContent"] = {**raw, "accessibility_diagnostics": details}
+            answer["content"] = [{"type": "text", "text": json.dumps(answer["structuredContent"], ensure_ascii=False)}]
         return answer
     snapshot = _payload(answer)
     if any(k in snapshot and snapshot[k] != v for k, v in target.items()):
@@ -363,6 +560,11 @@ def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elemen
             elements = _elements(snapshot)
         except OperationError:
             elements = []
+        # Internal identity from InteractionEngine's live binding, not a public
+        # app-name option. Reuse this snapshot; no diagnostic traversal is added.
+        from smartfx_profiles import host_profile, ObservedStrategy
+        profile = host_profile(host_executable)
+        strategy = ObservedStrategy(profile, snapshot) if profile and elements else None
         controls = []
         targetability = {"scope": "returned_controls", "actionable_controls": 0,
                          "unique_actionable_controls": 0, "ambiguous_actionable_controls": 0,
@@ -424,7 +626,11 @@ def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elemen
                 item.pop("element_index", None)
                 item.pop("parent_index", None)
             else:
-                item["selector"] = control_selector(snapshot, element)
+                item["selector"] = (strategy.selector(element) if strategy else None) or control_selector(snapshot, element)
+            if strategy:
+                application_context = strategy.context(element)
+                if application_context:
+                    item["application_context"] = application_context
             item["selector_unique"] = item["selector"] is not None
             item["suggested_operations"] = suggested_operations({**element, "actions": actions}) if item["selector_unique"] else []
             item["targeting_state"] = ("protected" if protected else "scope_incomplete" if scoped and snapshot.get("truncated") else
@@ -480,6 +686,9 @@ def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elemen
             inspection["next_step"] = ("일부 조작 요소를 고유하게 구분하지 못했습니다. 같은 이름의 첫 항목을 임의로 선택하지 마세요. "
                 "computer_observe의 현재 이미지와 읽기 전용 라벨 문맥을 함께 확인하고, computer_act에는 고유 target_ref 또는 "
                 "관찰한 image_region과 구별할 라벨이 포함된 scope_region을 사용하세요. 직접 선택·녹화·저장은 computer_process_editor에서 진행하세요.")
+        if profile:
+            inspection["application_strategy"] = strategy.summary() if strategy else {
+                **profile, "observed_regions": {}, "structure_status": "not_exposed", "extra_tree_reads": 0}
     if scope_fallback:
         inspection["scope_fallback"] = scope_fallback
     images = [copy.deepcopy(c) for c in answer.get("content", [])
@@ -562,6 +771,11 @@ def inspect_window(runtime, target, *, max_controls=80, max_depth=12, max_elemen
         if capture_failed:
             inspection["next_step"] = image_state.get("next_step", "이 창의 화면 이미지가 반환되지 않았습니다. 입력 전에 화면을 다시 확인하세요.")
     inspection["observed_modalities"] = (["uia"] if uia else []) + (["visual"] if images else [])
+    if diagnostics:
+        details = projection_diagnostics(snapshot, inspection, original_snapshot=_unmodified_payload(answer))
+        details.update(observed_at=time.time(), elapsed_ms=round((time.perf_counter()-diagnostic_started)*1000, 3),
+                       target=dict(target), observation_backend="native_scoped_uia" if scoped else "driver")
+        inspection["diagnostics"] = details
     data = {**target, "inspection": inspection}
     for key in ("window_title", "snapshot_id", "computer_use_metrics", "screenshot_width", "screenshot_height", "window_bounds", "capture_coverage", "accessibility_normalization"):
         if key in snapshot:

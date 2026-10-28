@@ -30,9 +30,11 @@ class SelectorReuseTests(unittest.TestCase):
         with self.assertRaises(OperationError):
             _unique({"elements": controls}, selected)
 
-    def test_numeric_resource_with_no_name_remains_exact_not_guessed(self):
+    def test_numeric_resource_with_no_name_is_not_saved_as_durable_identity(self):
         item = {"element_index": 0, "role": "Button", "automation_id": "1001", "actions": ["click"]}
-        self.assertEqual(stable_selector({"elements": [item]}, item), {"automation_id": "1001", "role": "Button"})
+        with self.assertRaises(LearningError) as caught:
+            stable_selector({"elements": [item]}, item)
+        self.assertEqual(caught.exception.code, "unstable_control_identity")
 
     def test_saved_learning_survives_restart_only_after_new_driver_identity_checks(self):
         from test_learning import Runtime, TARGET

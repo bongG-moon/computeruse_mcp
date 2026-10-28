@@ -115,7 +115,7 @@ class ScopedControls {
         var row = new Dictionary<string, object> { { "element_index", index }, { "parent_index", parent },
             { "name", current.Name }, { "automation_id", current.AutomationId },
             { "role", current.ControlType.ProgrammaticName.Replace("ControlType.", "") },
-            { "enabled", current.IsEnabled }, { "verification_only", true } };
+            { "enabled", current.IsEnabled }, { "offscreen", current.IsOffscreen }, { "verification_only", true } };
         if (current.IsPassword) { row["protected"] = true; return row; }
         object raw;
         if (inspect) {

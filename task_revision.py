@@ -177,7 +177,7 @@ class TaskRevisions:
     def save(self, args, *, expected_revision):
         """Full raw draft save for the native editor; chat uses update instead."""
         if not isinstance(args, dict) or not args.get("id"): raise TaskRevisionError("기존 작업 ID가 필요합니다.")
-        if set(args)-{"id", "name", "instructions", "expected", "program_ids", "steps", "variables", "recording_review", "draft"}:
+        if set(args)-{"id", "name", "instructions", "expected", "program_ids", "steps", "variables", "recording_review", "draft", "window_contexts"}:
             raise TaskRevisionError("지원하지 않는 작업 저장 필드입니다.")
         with self.store._locked():
             tasks = self.store._read()

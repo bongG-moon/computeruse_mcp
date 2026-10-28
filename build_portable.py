@@ -48,30 +48,32 @@ SCOPED_CONTROLS_NAME = "Computer Use MCP 빠른 확인.exe"
 CHECKPOINT_REVIEW_NAME = "Computer Use MCP 화면 확인.exe"
 APP_FILES = (
     "authoring_inputs.py", "local_skill.py", "local_delivery.py", "local_runs.py", "local_task_ids.py",
-    "msaa_dropdown.py",
+    "msaa_dropdown.py", "accessibility_diagnostics.py", "accessibility_report.py",
     "artifact_lifecycle.py",
     "semantic_targets.py",
-    
+
     "airtest_backend.py", "AIRTEST-NOTICES.md", "APPREF_GUIDE.md",
     "easy_api.py", "interaction.py", "image_pixels.py", "task_inputs.py", "task_revision.py", "checkpoint_groups.py", "visual_review.py", "visual_targets.py", "builtin_programs.py", "hosted_windows.py",
     "server.py", "settings.py", "setup.py", "consent.py", "register.py", "README.html", "VALIDATION.html",
     "maintenance.py", "diagnostics.py", "install.py", "programs.py", "INSTALL.md", "vendor/__init__.py", "vendor/guard.py", "vendor/windows.py",
     "session_runtime.py", "configuration_state.py", "operations.py", "workflows.py", "inspection.py", "accessibility_tree.py", "closing.py", "close_actions.py", "privileges.py",
     "program_launch.py", "learning.py", "learning_picker.py", "teaching_sessions.py", "teaching_support.py", "process_editor.py", "process_steps.py", "image_targets.py", "image_steps.py",
-    "README.md", "DRIVER-BUNDLE.md", "CUA-DRIVER-LICENSE.md", "PROCESS_GUIDE.html", "CHANGES.html",
-    "scoped_controls.py", "repeat_profiles.py", "result_files.py", 
-    "window_transitions.py", "program_registration.py",
-    "execution_progress.py", "image_delivery.py", 
+    "README.md", "DRIVER-BUNDLE.md", "CUA-DRIVER-LICENSE.md", "PROCESS_GUIDE.html", "CHANGES.html", "ACCESSIBILITY_DIAGNOSTICS.html", "WINDOW_CONTEXTS.html",
+    "scoped_controls.py", "repeat_profiles.py", "result_files.py", "business_windows.py", "window_readiness.py", "window_contexts.py", "smartfx_profiles.py",
+    "window_transitions.py", "program_registration.py", "combo_popup.py",
+    "execution_progress.py", "image_delivery.py",
     "recording_windows.py", "transient_popup.py",
-    "replay_preflight.py", "checkpoint_review.py", 
+    "replay_preflight.py", "checkpoint_review.py",
 )
 OPTIONAL_APP_FILES = ()
 SOURCE_SUPPORT_FILES = (
     "test_local_install_contract.py", "test_editor_trial_windows.py",
     "test_authoring_inputs.py", "test_local_skill.py", "test_local_delivery.py", "test_authoring_editor.py", "test_local_runs.py", "test_local_task_ids.py", "test_local_authoring_native.py", "fixtures/LocalAuthoringFixture.cs", "tools/benchmark_local_authoring.py",
     "test_transient_popup.py", "test_hover_matching.py", "test_loaded_code_identity.py", "fixtures/PopupExportFixture.cs",
-    "MsaaDropdown.cs", "test_msaa_dropdown.py", "fixtures/MsaaListFixture.cs", "tools/test_msaa_native.py",
-    "test_semantic_targets.py",
+    "AccessibilityDiagnostics.cs", "fixtures/AccessibilityDiagnosticFixture.cs", "fixtures/AccessibilityMatrixFixture.cs", "tools/benchmark_accessibility.py", "test_accessibility_diagnostics.py", "test_accessibility_report.py", "test_inspection_diagnostics.py", "test_grid_targeting.py", "MsaaDropdown.cs", "test_msaa_dropdown.py", "fixtures/MsaaListFixture.cs", "tools/test_msaa_native.py",
+    "fixtures/MenuAgentFixture.cs", "tools/benchmark_menuagent.py", "test_business_windows.py", "test_window_readiness.py", "test_window_contexts.py",
+    "test_semantic_targets.py", "test_smartfx_profiles.py", "test_recorded_menu_semantics.py", "test_combo_popup.py",
+    "fixtures/ComboPopupProofFixture.cs", "tools/check_combo_popup_native.py", "tools/benchmark_smartfx_profiles.py",
     "test_artifact_lifecycle.py", "test_artifact_integration.py", "test_capture_temp_scope.py",
     "fixtures/ComplexBusiness018.cs", "fixtures/ComplexWeb018.html", "fixtures/RecordingCanvas018.cs",
     "tools/build_complex_business018.ps1", "tools/build_recording_canvas018.ps1", "tools/serve_complex_web018.py",
@@ -130,7 +132,8 @@ APPLICATION_IMPORT_CHECK = (
     "import server,settings,consent,register,maintenance,diagnostics,install,programs,"
     "learning,learning_picker,teaching_sessions,process_editor,process_steps,image_targets,image_steps,"
     "checkpoint_review,image_delivery,replay_preflight,vendor.guard,vendor.windows,"
-    "authoring_inputs,local_skill,local_delivery,local_runs,local_task_ids; "
+    "authoring_inputs,local_skill,local_delivery,local_runs,local_task_ids,accessibility_diagnostics,accessibility_report,"
+    "business_windows,window_readiness,window_contexts,smartfx_profiles,combo_popup; "
     "print('Application imports passed')"
 )
 IMAGE_BACKEND_CHECK = r'''
@@ -359,6 +362,14 @@ def compile_msaa(destination: Path) -> None:
                 '/out:' + str(destination), str(SOURCE / 'MsaaDropdown.cs')], cwd=SOURCE)
 
 
+def compile_accessibility_diagnostics(destination: Path) -> None:
+    references = ["System.dll", "System.Core.dll", "System.Web.Extensions.dll", str(COMPILER.parent / "Accessibility.dll")]
+    references.extend(str(COMPILER.parent / "WPF" / name) for name in ("WindowsBase.dll", "UIAutomationClient.dll", "UIAutomationTypes.dll"))
+    run_hidden([str(COMPILER), '/nologo', '/target:exe', '/platform:anycpu', '/optimize+', '/codepage:65001',
+                *['/reference:' + ref for ref in references], '/out:' + str(destination),
+                str(SOURCE / 'AccessibilityDiagnostics.cs')], cwd=SOURCE)
+
+
 def write_bundle_manifest(bundle: Path) -> None:
     entries = []
     for path in sorted(bundle.rglob("*")):
@@ -432,6 +443,7 @@ def main() -> int:
         compile_visual_tools(staging / VISUAL_TOOLS_NAME)
         compile_scoped_controls(staging / SCOPED_CONTROLS_NAME)
         compile_msaa(staging / 'Computer Use MCP MSAA 목록.exe')
+        compile_accessibility_diagnostics(staging / 'Computer Use MCP 접근성 진단.exe')
         compile_checkpoint_review(staging / CHECKPOINT_REVIEW_NAME)
         result = run_hidden([str(python_root / "python.exe"), "-B", "-s", "-c", IMPORT_CHECK], cwd=staging, env=runtime_environment(python_root))
         print(result.stdout.strip())
@@ -468,6 +480,7 @@ def main() -> int:
     compile_visual_tools(bundle / VISUAL_TOOLS_NAME)
     compile_scoped_controls(bundle / SCOPED_CONTROLS_NAME)
     compile_msaa(bundle / 'Computer Use MCP MSAA 목록.exe')
+    compile_accessibility_diagnostics(bundle / 'Computer Use MCP 접근성 진단.exe')
     compile_checkpoint_review(bundle / CHECKPOINT_REVIEW_NAME)
     result = run_hidden([str(runtime / "python.exe"), "-B", "-s", "-c", IMPORT_CHECK], cwd=bundle, env=runtime_environment(runtime))
     proof = json.loads(result.stdout)
