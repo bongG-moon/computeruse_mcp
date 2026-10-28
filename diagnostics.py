@@ -278,11 +278,18 @@ def connection_issues(initialized: dict, names: set, status: dict) -> list[str]:
                     "computer_observe", "computer_act", "computer_process_editor", "computer_tasks",
                     "computer_update_task", "computer_run_task", "computer_export_skill", "computer_stop"}
     issues = []
+    if status.get('data_policy') == 'local':
+        if status.get('tool_profile') != 'simple':
+            issues.append('로컬 연결의 도구 프로파일 정보를 확인하지 못했습니다. 연결 정책을 바꾸지 말고 수정된 배포본으로 갱신하세요.')
+        for key, label in (('screen_session_present', '화면 세션'),
+                           ('driver_schema_error_present', 'Driver 오류')):
+            if type(status.get(key)) is not bool:
+                issues.append(f'로컬 연결의 {label} 진단 정보가 없습니다. 정보 누락을 정상으로 판단하지 않았습니다.')
     server = initialized.get("serverInfo", {})
     if server.get("name") != "company-computer-use" or server.get("version") != VERSION or status.get("version") != VERSION:
         issues.append(f"연결된 MCP 버전이 현재 배포 {VERSION}과 다릅니다. 새 배포 폴더로 연결을 갱신하고 클라이언트를 다시 연결하세요.")
     if required - names:
-        issues.append("필수 학습 도구가 없습니다: " + ", ".join(sorted(required - names)))
+        issues.append("필수 연결 도구가 없습니다: " + ", ".join(sorted(required - names)))
     support = status.get("teaching_support", {})
     if not isinstance(support, dict):
         support = {}
@@ -310,14 +317,18 @@ def probe_connection(config: dict) -> dict:
             client.initialized()
             tools = client.request("tools/list").get("tools", [])
             status = _structured(client.request("tools/call", {"name": "computer_status", "arguments": {}}))
-            if status.get("session") is not None:
+            local = status.get('data_policy') == 'local'
+            session_present = status.get('screen_session_present') if local else status.get('session') is not None
+            if session_present is True:
                 raise RuntimeError("연결 확인 중 예상하지 못한 화면 세션이 감지되었습니다.")
             names = {item.get("name") for item in tools if isinstance(item, dict)}
             issues = connection_issues(initialized, names, status)
-            result = {"ok": not issues and not status.get("driver_schema_error"), "tool_count": len(names),
+            schema_error = ('Driver 오류가 보고되었습니다. 상세 내용은 로컬 진단에서 확인하세요.'
+                            if status.get('driver_schema_error_present') is True else '') if local else status.get('driver_schema_error', '')
+            result = {"ok": not issues and not schema_error, "tool_count": len(names),
                     "server": initialized.get("serverInfo", {}), "status": status,
                     "compatibility_issues": issues,
-                    "schema_error": status.get("driver_schema_error", ""), "screen_session_started": False}
+                    "schema_error": schema_error, "screen_session_started": False}
         except Exception as exc:
             primary_error = exc
             raise

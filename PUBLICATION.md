@@ -2,32 +2,32 @@
 
 이 문서는 배포 담당자용입니다. 일반 사용자는 [INSTALL.md](INSTALL.md)로 연결합니다.
 
-## 0.19.0 검증과 배포 기준
+## 0.19.1 검증과 배포 기준
 
-0.19.0은 로컬 녹화 편집·입력값 분리·스킬 미리보기 개선의 배포 대상 버전입니다. **시험 앱의 실제 녹화·저장·앱 재시작 후 재생·Excel 결과를 확인했습니다.** 게시 완료는 아래 절차의 원격 커밋·태그·자산 체크섬 검증으로 판정하며 버전 표기나 문서만으로 주장하지 않습니다. 최종 확인 범위는 [VALIDATION.html](VALIDATION.html)에 반영합니다.
+0.19.1은 로컬 설치 진단과 저장 직후 시험 실행의 팝업 연결 오류 수정 버전입니다. 게시 완료는 아래 절차의 원격 커밋·태그·자산 체크섬 검증으로 판정하며 버전 표기나 문서만으로 주장하지 않습니다. 최종 확인 범위는 [VALIDATION.html](VALIDATION.html)에 반영합니다.
 
-새 기본 정책 `data_policy=local`은 업무 내용이 공개 MCP 응답으로 나가지 않도록 제한합니다. 기존 설정에 정책이 없을 때도 적용되므로, 기존 모델 화면 판정 작업이 첫 입력 전에 중지될 수 있음을 출시 안내에 명시합니다. 기존 녹화·이미지·revision·실행 기록을 자동 변경하지 않으며 connected는 관리자가 명시한 별도 연결 정책입니다.
+`data_policy=local`을 유지한 채 도구 구성·고정된 도우미 파일명·존재 여부·버전만 설치 진단에 전달합니다. 진단 정보가 없으면 정상 연결로 처리하지 않습니다. 시험 실행은 필요한 기본 창만 먼저 연결하고, 동적 팝업은 `wait_for_window`에서 새로 찾습니다. 기존 설정·녹화·이미지·revision·실행 기록을 자동 변경하지 않습니다. connected는 관리자가 명시한 별도 연결 정책이며 이번 오류를 해결하기 위한 필수 설정이 아닙니다.
 
 현재 출시 명세가 이전 Release를 가리키면 그대로 새 소스의 증거로 사용하지 않습니다. **시험을 마친 최종 ZIP으로 BUILD-MANIFEST, DRIVER-BUNDLE-MANIFEST, PUBLICATION-MANIFEST를 함께 다시 생성**합니다. 버전 숫자만 수동 수정하지 않습니다.
 
 ## 포함할 검증 기록
 
-- 영향 경로 회귀 검사 381개 중 380개 통과, 시험 환경의 하드링크 권한 제한으로 1개 제외. 배율·미리보기 관련 추가 검사 9개 통과.
-- 실제 MCP 읽기 전용 요청 6회: 프로세스 재시작 후 별칭 유지, 원본 작업 바이트 보존, 공개 응답에서 시험 업무 내용 제외.
-- 실제 시험 앱의 두 단계 녹화, 보이는 편집창에서 입력 변수 연결, revision 1 저장, 로컬 스킬 미리보기·내보내기 확인.
-- 시험 앱 완전 종료·새 프로세스 재시작 후 다른 입력값으로 두 단계 저장 작업을 재생했습니다. 2/2 verified와 새 XLSX의 실제 셀 내용을 확인했고 내보내기는 1회였습니다. 드롭다운 선택을 포함한 운영 업무 전체의 시험이 아닙니다.
-- 실제 Driver 재생 active 시간은 12,320.35ms(동작 12,288.6ms, 창 연결 29.81ms)였으며 사용자 입력 대기는 제외했습니다. 기존 버전과 통제한 실제 앱 성능 비교나 10초 업무 완료 보장은 아닙니다.
-- 가상 UIA 화면 기반 엔진 비교 120회: 최초 실행 중앙값 +2.73%, 반복 실행 +0.45%, 입력·관찰 횟수 동일. 실제 Driver·모델·운영 서버의 성능 보장은 아닙니다.
-- 외부 모델 API·원격 OCR·업로드를 작성 기능에 추가하지 않았습니다. OS 전체의 사외 통신 차단을 검증한 것은 아닙니다.
+- 최종 0.19.1 통합 검사 292개 중 291개 통과, 1개 제외. 설치·로컬 응답·편집·창 연결·패키징·배포 도구를 함께 확인했습니다. 아래 경로별 검사 수와 합산하지 않습니다.
+- 설치 진단·로컬 응답·설치 계약 검사 76개 통과. 새 회귀 검사 11개를 포함합니다.
+- 실제 MCP stdio 연결 비교: 게시된 0.19.0은 local에서 오류를 재현했고 수정 소스는 local·connected 모두 통과했습니다. 각각 기본 도구 12개를 확인했습니다.
+- 격리된 export-only 폴더의 실제 prepare → apply가 Driver 버전 검사와 MCP 연결을 통과했습니다. 내보낸 설정은 `data_policy=local`, `tool_profile=simple`을 유지했습니다. 사용자 클라이언트 등록·운영 설정·앱 실행은 하지 않았습니다.
+- 시험 실행 관련 검사 192개 중 191개 통과, 1개 제외. 새 대상·창 수명 검사 7개를 포함하며, 실제 숨김 Win32 창의 생성·종료와 실제 재생 엔진을 사용했습니다. 팝업 탐색 화면과 입력 엔진은 시험 대역이므로 운영 앱 재생 성공을 뜻하지 않습니다.
+- 닫힌 기본 창은 입력 전에 중지하며, 저장된 작업·이미지·revision·실행 기록을 바꾸지 않는 것을 확인했습니다.
+- 이번 수정에서 실제 운영 PC 앱 재생이나 UIA를 통한 업무 입력을 새로 수행하지 않았습니다. 0.19.0의 시험 앱 재생·XLSX 검증은 아래 과거 기록과 구분합니다. 최종 ZIP·명세·원격 자산 검증은 아래 절차로 별도 수행합니다.
 
 ## 배포 절차
 
 1. 실제 검증을 마치고 소스 버전, 사용자 문서와 결과 범위를 확정합니다. `build_portable.py`로 기본 ZIP과 소스 ZIP을 만들고, `bundle_driver.py`로 검토된 Driver를 포함한 ZIP을 만듭니다. 새 네이티브 소스는 최종 도우미 실행파일로 다시 빌드합니다.
 2. 전용 배포 자산 폴더에 정확히 아래 7개 파일을 준비합니다. 다른 문서나 과거 ZIP을 섞지 않습니다.
 
-   - Computer-Use-MCP-0.19.0.zip
-   - Computer-Use-MCP-0.19.0-source.zip
-   - Computer-Use-MCP-0.19.0-with-driver.zip
+   - Computer-Use-MCP-0.19.1.zip
+   - Computer-Use-MCP-0.19.1-source.zip
+   - Computer-Use-MCP-0.19.1-with-driver.zip
    - cua-driver.exe
    - CUA-DRIVER-LICENSE.md
    - DRIVER-BUNDLE-MANIFEST.json
@@ -39,7 +39,7 @@
 4. 아래 명령으로 최종 자산에서 세 명세를 생성합니다.
 
 ```powershell
-python tools/publication.py prepare --repo . --assets release/assets-0.19.0
+python tools/publication.py prepare --repo . --assets release/assets-0.19.1
 ```
 
 소스 ZIP, 런타임, Driver 파일의 재고·버전·체크섬과 저장소 소스를 검사한 뒤 명세를 씁니다. 불일치 파일을 덮어써서 숨기지 않고 실패합니다. PUBLICATION-MANIFEST 자신은 순환 해시를 피하기 위해 해시 목록에서 제외합니다. 별도 게시 도구는 `publication_support_files`로 구분합니다.
@@ -47,13 +47,13 @@ python tools/publication.py prepare --repo . --assets release/assets-0.19.0
 5. 소스와 명세를 명시적으로 stage하고 diff를 확인해 커밋합니다. 커밋된 Git 바이트도 검사합니다.
 
 ```powershell
-python tools/publication.py check --repo . --assets release/assets-0.19.0 --git-ref HEAD
+python tools/publication.py check --repo . --assets release/assets-0.19.1 --git-ref HEAD
 ```
 
 6. 커밋을 푸시하고 원격 브랜치 SHA가 같은지 확인합니다. Release notes는 7개 자산 폴더 밖에 둡니다. 다음 명령은 검사된 자산 사본만 게시하며 기존 태그·Release를 덮어쓰지 않습니다.
 
 ```powershell
-python tools/publication.py publish --repo . --assets release/assets-0.19.0 --github-repo bongG-moon/computeruse_mcp --notes-file release-notes.md
+python tools/publication.py publish --repo . --assets release/assets-0.19.1 --github-repo bongG-moon/computeruse_mcp --notes-file release-notes.md
 ```
 
 게시 후 태그가 검사한 커밋을 가리키는지, 원격 7개 자산의 크기·SHA-256이 일치하는지 다시 검사합니다. GitHub Release 이벤트의 자동 검사는 업로드 전 검사를 대신하지 않습니다. 시험판이라면 prepare/check/publish 모두에 `--release-status prerelease`를 지정합니다.
@@ -63,9 +63,9 @@ python tools/publication.py publish --repo . --assets release/assets-0.19.0 --gi
 <a id="main-source-validation-20261024"></a>
 ## 이전 검증 기록과 구분
 
-2026-10-24의 main 소스 커밋은 당시 마지막 Release v0.18.8 이후 팝업 좌표·입력, 선택색, 확인 구간 묶기와 같은 실행 재개 개선을 포함했습니다. 그 소스 커밋은 당시 새 Release ZIP으로 게시된 상태가 아니었습니다. 이번 0.19.0에서는 이 소스 개선과 로컬 작성 기능을 함께 최종 빌드·검증한 뒤 명세를 새로 생성합니다. 이전 Release 명세를 새 main 전체의 증거로 사용하지 않습니다.
+2026-10-24의 main 소스 커밋은 당시 마지막 Release v0.18.8 이후 팝업 좌표·입력, 선택색, 확인 구간 묶기와 같은 실행 재개 개선을 포함했습니다. 그 소스 커밋은 당시 새 Release ZIP으로 게시된 상태가 아니었습니다. 0.19.0에서는 이 소스 개선과 로컬 작성 기능을 함께 빌드·검증했습니다. 이전 Release 명세를 새 main 전체의 증거로 사용하지 않습니다.
 
-기존 22단계 중첩 팝업 재생과 XLSX 데이터 5행 확인은 이전 시험 앱 검증입니다. 그 성공을 이번 입력폼·편집창·스킬 경로의 전체 재생 성공으로 대신하지 않습니다.
+0.19.0에서는 시험 앱의 두 단계 녹화·입력 변수 연결·저장·스킬 내보내기와 앱 재시작 후 다른 값으로 2/2 재생, 새 XLSX 셀 내용을 확인했습니다. 기존 22단계 중첩 팝업 재생과 XLSX 데이터 5행 확인도 과거 시험 앱 검증입니다. 이 기록을 0.19.1의 운영 앱 재생 증거로 사용하지 않습니다.
 
 ## 0.16.0 기록 정정
 

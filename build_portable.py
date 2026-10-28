@@ -67,6 +67,7 @@ APP_FILES = (
 )
 OPTIONAL_APP_FILES = ()
 SOURCE_SUPPORT_FILES = (
+    "test_local_install_contract.py", "test_editor_trial_windows.py",
     "test_authoring_inputs.py", "test_local_skill.py", "test_local_delivery.py", "test_authoring_editor.py", "test_local_runs.py", "test_local_task_ids.py", "test_local_authoring_native.py", "fixtures/LocalAuthoringFixture.cs", "tools/benchmark_local_authoring.py",
     "test_transient_popup.py", "test_hover_matching.py", "test_loaded_code_identity.py", "fixtures/PopupExportFixture.cs",
     "MsaaDropdown.cs", "test_msaa_dropdown.py", "fixtures/MsaaListFixture.cs", "tools/test_msaa_native.py",

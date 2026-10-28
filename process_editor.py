@@ -974,6 +974,37 @@ class ProcessEditors:
         identities[key] = hosted
         return binding
 
+    def _trial_targets(self, job, task):
+        """Only initial windows are bindings; recorded popups are observations.
+
+        A recorder keeps closed popup HWNDs for editing and provenance. Passing
+        them as explicit workflow targets both requires them before the opening
+        click and pins future popup resolution to the old HWND. The workflow's
+        wait_for_window must rediscover those windows using its owner checks.
+        """
+        steps = list(_leaf_steps(task['steps']))
+        dynamic = {(s['program_id'], s['window_ref']) for s in steps
+                   if s['operation'] == 'wait_for_window'}
+        needed = ({(s['program_id'], s.get('window_ref', 'main')) for s in steps}
+                  | {(s['program_id'], s['owner_ref']) for s in steps
+                     if s['operation'] == 'wait_for_window'}) - dynamic
+        targets = [
+            {key: target[key] for key in ('program_id', 'pid', 'window_id', 'window_ref') if key in target}
+            for target in job['draft'].programs
+            if (target['program_id'], target.get('window_ref', 'main')) in needed]
+        if ({(target['program_id'], target.get('window_ref', 'main')) for target in targets} != needed
+                or any(target.get('window_id', 0) <= 0 for target in targets)):
+            raise OperationError('시험할 주 창이 연결되지 않았습니다. 대상 앱을 열고 저장한 프로세스를 편집창에서 다시 여세요. 녹화를 다시 만들 필요는 없습니다.',
+                                 'editor_target_unavailable')
+        from vendor.guard import GuardError
+        for target in targets:
+            try:
+                self._program(job, target['program_id'], {key: target[key] for key in ('pid', 'window_id')})
+            except (GuardError, OSError) as error:
+                raise OperationError('시험 실행 전에 대상 창 연결을 확인하지 못했습니다. 입력은 보내지 않았으며 저장한 프로세스는 유지됩니다. 대상 앱을 열고 같은 프로세스를 편집창에서 다시 여세요.',
+                                     'editor_target_unavailable') from error
+        return targets
+
     def start(self, runtime, args, cancel_event=None):
         runtime.check_active()
         if runtime.mode != "uia":
@@ -1352,8 +1383,7 @@ class ProcessEditors:
                     "instructions": _text(payload["description"], "설명", 4000, empty=True), "expected": "설정한 완료 조건 확인",
                     "program_ids": list(dict.fromkeys(s["program_id"] for s in _leaf_steps(draft.steps))),
                     "steps": copy.deepcopy(draft.steps), "variables": copy.deepcopy(draft.variables)}
-            targets = [{key: target[key] for key in ("program_id", "pid", "window_id", "window_ref") if key in target}
-                       for target in draft.programs if target["window_id"] > 0]
+            targets = self._trial_targets(job, task)
             from local_delivery import require_local_task
             if getattr(self, 'local_only', False): require_local_task(task)
             frozen_task, frozen_targets, frozen_inputs = copy.deepcopy(task), copy.deepcopy(targets), copy.deepcopy(trial_inputs)

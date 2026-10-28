@@ -21,6 +21,29 @@ def enabled(config):
     return config.get("data_policy", "local") != "connected"
 
 
+def _teaching_receipt(support):
+    """Installation metadata only: fixed helper names and presence booleans."""
+    from teaching_support import TEACHING_HELPER_FILES
+    if not isinstance(support, dict):
+        return {}
+    version = support.get('version')
+    if (support.get('format') != 'computer-teaching-capabilities/v1'
+            or not isinstance(version, str)
+            or not re.fullmatch(r'[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}', version)):
+        return {}
+    def helper(value):
+        if (isinstance(value, dict) and value.get('filename') in TEACHING_HELPER_FILES
+                and type(value.get('file_present')) is bool):
+            return {key: value[key] for key in ('filename', 'file_present')}
+        return {}
+    direct = support.get('direct_picker', {})
+    image = support.get('image_process', {})
+    items = image.get('helpers', []) if isinstance(image, dict) else []
+    return {'format': 'computer-teaching-capabilities/v1', 'version': version,
+            'direct_picker': {'helper': helper(direct.get('helper')) if isinstance(direct, dict) else {}},
+            'image_process': {'helpers': [helper(item) for item in items[:3]] if isinstance(items, list) else []}}
+
+
 def receipt(value, task_alias=None):
     out = {"data_policy": "local", "details_location": "local_editor"}
     if not isinstance(value, dict):
@@ -29,6 +52,20 @@ def receipt(value, task_alias=None):
     version = value.get('version')
     if isinstance(version, str) and re.fullmatch(r'[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}', version):
         out['version'] = version
+    if value.get('tool_profile') in ('simple', 'legacy'):
+        out['tool_profile'] = value['tool_profile']
+    if 'teaching_support' in value:
+        out['teaching_support'] = _teaching_receipt(value['teaching_support'])
+    # Omission is unknown, not healthy. Preserve these through repeated filtering
+    # without ever forwarding session details or the Driver's raw error text.
+    for key in ('screen_session_present', 'driver_schema_error_present'):
+        if type(value.get(key)) is bool:
+            out[key] = value[key]
+    if 'session' in value:
+        out['screen_session_present'] = value['session'] is not None
+    if 'driver_schema_error' in value:
+        error = value['driver_schema_error']
+        out['driver_schema_error_present'] = not isinstance(error, str) or bool(error)
     for key in _COUNTS:
         if type(value.get(key)) is int and 0 <= value[key] <= 10**9:
             out[key] = value[key]

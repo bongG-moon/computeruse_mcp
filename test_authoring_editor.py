@@ -129,6 +129,52 @@ class LocalAuthoringEditorTests(unittest.TestCase):
             self.assertEqual(answer["status"], "error", answer)
         self.editors.test_runner.assert_not_called()
 
+    def test_saved_recording_trial_does_not_bind_closed_popup_hwnds(self):
+        from vendor.guard import GuardError
+        opened, job = self.open_delay()
+        main = self.args['targets'][0]
+        popup = main['window_id'] + 100
+        job['draft'].recorded([
+            {**fixture.image_choice(), 'operation': 'click', 'program_id': 'editor'},
+            {**fixture.image_choice(window_id=popup), 'operation': 'click',
+             'program_id': 'editor', 'window_ref': 'recorded_popup'}], windows=[
+            {'program_id': 'editor', 'window_ref': 'recorded_popup', 'owner_ref': 'main',
+             'pid': main['pid'], 'window_id': popup, 'owner_window_id': main['window_id'],
+             'owner_verified': True, 'closed': True, 'title': '', 'class_name': 'ComboLBox'}])
+        saved = self.save('recorded dropdown')
+        before = copy.deepcopy(self.manager.tasks.get(saved['id']))
+        self.assertTrue(any(row['window_id'] == popup for row in job['draft'].programs))
+        def trial(runtime, task, targets, **kwargs):
+            if any(target['window_id'] == popup for target in targets):
+                raise GuardError('Window no longer exists.')
+            self.assertEqual(targets, [main])
+            self.assertTrue(any(step['operation'] == 'wait_for_window' for step in task['steps']))
+            return {'status': 'needs_review', 'task_verified': False, 'run_id': 'dropdown-trial'}
+        self.editors.test_runner = mock.Mock(side_effect=trial)
+        answer = self.command('test_run', {'name': 'recorded dropdown', 'description': ''})
+        self.assertEqual(answer['status'], 'ok', answer)
+        self.assertEqual(job['test_targets'], [main])
+        with mock.patch.object(self.editors, '_trial_signal'):
+            self.editors.resume_test(opened['editor_id'], self.runtime,
+                observation_review={'token': 'fresh-result'})
+        self.assertEqual(self.editors.test_runner.call_count, 2)
+        self.assertEqual(self.manager.tasks.get(saved['id']), before)
+
+    def test_closed_main_trial_keeps_saved_task_and_reports_reconnect_without_input(self):
+        from vendor.guard import GuardError
+        _, job = self.open_delay()
+        saved = self.save('main closed')
+        before = copy.deepcopy(self.manager.tasks.get(saved['id']))
+        self.runtime.guard.window_resolver = mock.Mock(side_effect=GuardError('Window no longer exists.'))
+        self.editors.test_runner = mock.Mock()
+        answer = self.command('test_run', {'name': 'main closed', 'description': ''})
+        self.assertEqual(answer['status'], 'error', answer)
+        self.assertEqual(answer['code'], 'editor_target_unavailable')
+        self.assertNotIn('Window no longer exists', answer['message'])
+        self.editors.test_runner.assert_not_called()
+        self.assertEqual(self.manager.tasks.get(saved['id']), before)
+        self.assertFalse(job['done'].is_set())
+
     def test_skill_preview_requires_saved_draft_and_exports_exact_bytes(self):
         _, job = self.open_delay()
         denied = self.command("skill_preview", {})
