@@ -70,8 +70,17 @@ class SettingsTests(unittest.TestCase):
             value = self.config(Path(tmp))
             value["log_detail"] = "content"
             path = Path(tmp) / "config.json"
+            for policy in (None, "local"):
+                local = dict(value)
+                if policy is not None:
+                    local["data_policy"] = policy
+                with self.subTest(policy=policy), self.assertRaises(ValueError):
+                    save_config(path, local)
+                self.assertFalse(path.exists())
+            value["data_policy"] = "connected"
             save_config(path, value)
             self.assertEqual(load_config(path)["log_detail"], "content")
+            self.assertEqual(load_config(path)["data_policy"], "connected")
             for invalid in ("all", True, [], None):
                 with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                     validate_config(dict(value, log_detail=invalid))

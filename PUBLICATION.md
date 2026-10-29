@@ -2,13 +2,13 @@
 
 이 문서는 배포 담당자용입니다. 일반 사용자는 [INSTALL.md](INSTALL.md)로 연결합니다.
 
-## 2026-10-28 main 소스 커밋과 Release 구분
+## 0.19.2 배포 기준
 
-현재 main에는 v0.19.1 이후 SmartFX 및 FXMenuAgent의 접근성 진단, 업무 창 문맥, 드롭다운 소유 경로, 메뉴 녹화 및 관찰 최적화가 포함되어 있습니다. 이번 반영은 소스 커밋이며 새 Release ZIP, 태그 및 실행파일을 게시하지 않습니다. 상세 범위와 남은 제한은 [개발 소스 검증](VALIDATION.html#smartfx-source-20261028)과 [업무 창 안내](WINDOW_CONTEXTS.html)를 확인하세요.
+이번 배포는 SmartFX와 FXMenuAgent의 관찰 전략, 관련 팝업 소유 경로, 안정적인 메뉴 요소 녹화, 로컬 접근성 진단 및 업무 창 문맥을 포함합니다. 기본 데이터 정책과 기존 녹화, 이미지 및 revision은 유지합니다. 별도 프로그램으로 나누지 않고 공통 엔진에서 실제 실행파일과 현재 관찰 근거에 따라 전략을 선택합니다.
 
-`settings.py`의 버전과 `BUILD-MANIFEST.json`, `DRIVER-BUNDLE-MANIFEST.json`, `PUBLICATION-MANIFEST.json`은 마지막으로 게시된 v0.19.1 Release의 기록을 유지합니다. 이 명세를 현재 main 전체의 빌드 증거로 사용하지 않습니다. 현재 main을 예전 Release 자산과 비교하면 체크섬 검사가 실패하는 것이 정상입니다. Release 검증은 해당 태그에서 실행하고, 다음 배포 때 새 버전의 최종 시험 ZIP과 네이티브 도우미를 빌드한 뒤 아래 절차로 명세를 재생성합니다.
+소스의 영향권 회귀 342개와 실제 offscreen WinForms HWND 조건 12개를 통과한 범위는 [검증 안내](VALIDATION.html#smartfx-source-20261028)에 기록했습니다. 이는 사내 운영 앱의 전체 재생 또는 Excel 생성 성공을 뜻하지 않습니다. 독립 업무 창의 녹화 중 자동 편입, 가상 표 셀의 Realize/ScrollItem 실행과 임의 PropertyGrid 편집은 남은 범위입니다.
 
-사용자 녹화, 캡처, 운영 설정, 실행 기록 및 테스트 출력은 소스 커밋에서 제외합니다. 기존 사용자 데이터나 설치된 MCP 연결을 변경하지 않습니다.
+새 네이티브 도우미를 현재 C# 소스로 컴파일하고, 최종 ZIP의 bundled Python, 이미지 엔진 및 실제 stdio 연결을 검사한 뒤 게시합니다. 세 명세는 최종 자산에서 생성하며, 원격 태그와 익명 다운로드 체크섬을 확인해야 게시 완료입니다. 과거 검증 수치는 아래에 구분해 보존합니다. 사용자 설정과 원본 녹화, 캡처 및 실행 기록은 배포에 넣지 않습니다.
 
 ## 0.19.1 검증과 배포 기준
 
@@ -33,9 +33,9 @@
 1. 실제 검증을 마치고 소스 버전, 사용자 문서와 결과 범위를 확정합니다. `build_portable.py`로 기본 ZIP과 소스 ZIP을 만들고, `bundle_driver.py`로 검토된 Driver를 포함한 ZIP을 만듭니다. 새 네이티브 소스는 최종 도우미 실행파일로 다시 빌드합니다.
 2. 전용 배포 자산 폴더에 정확히 아래 7개 파일을 준비합니다. 다른 문서나 과거 ZIP을 섞지 않습니다.
 
-   - Computer-Use-MCP-0.19.1.zip
-   - Computer-Use-MCP-0.19.1-source.zip
-   - Computer-Use-MCP-0.19.1-with-driver.zip
+   - Computer-Use-MCP-0.19.2.zip
+   - Computer-Use-MCP-0.19.2-source.zip
+   - Computer-Use-MCP-0.19.2-with-driver.zip
    - cua-driver.exe
    - CUA-DRIVER-LICENSE.md
    - DRIVER-BUNDLE-MANIFEST.json
@@ -47,7 +47,7 @@
 4. 아래 명령으로 최종 자산에서 세 명세를 생성합니다.
 
 ```powershell
-python tools/publication.py prepare --repo . --assets release/assets-0.19.1
+python tools/publication.py prepare --repo . --assets release/assets-0.19.2
 ```
 
 소스 ZIP, 런타임, Driver 파일의 재고·버전·체크섬과 저장소 소스를 검사한 뒤 명세를 씁니다. 불일치 파일을 덮어써서 숨기지 않고 실패합니다. PUBLICATION-MANIFEST 자신은 순환 해시를 피하기 위해 해시 목록에서 제외합니다. 별도 게시 도구는 `publication_support_files`로 구분합니다.
@@ -55,13 +55,13 @@ python tools/publication.py prepare --repo . --assets release/assets-0.19.1
 5. 소스와 명세를 명시적으로 stage하고 diff를 확인해 커밋합니다. 커밋된 Git 바이트도 검사합니다.
 
 ```powershell
-python tools/publication.py check --repo . --assets release/assets-0.19.1 --git-ref HEAD
+python tools/publication.py check --repo . --assets release/assets-0.19.2 --git-ref HEAD
 ```
 
 6. 커밋을 푸시하고 원격 브랜치 SHA가 같은지 확인합니다. Release notes는 7개 자산 폴더 밖에 둡니다. 다음 명령은 검사된 자산 사본만 게시하며 기존 태그·Release를 덮어쓰지 않습니다.
 
 ```powershell
-python tools/publication.py publish --repo . --assets release/assets-0.19.1 --github-repo bongG-moon/computeruse_mcp --notes-file release-notes.md
+python tools/publication.py publish --repo . --assets release/assets-0.19.2 --github-repo bongG-moon/computeruse_mcp --notes-file release-notes.md
 ```
 
 게시 후 태그가 검사한 커밋을 가리키는지, 원격 7개 자산의 크기·SHA-256이 일치하는지 다시 검사합니다. GitHub Release 이벤트의 자동 검사는 업로드 전 검사를 대신하지 않습니다. 시험판이라면 prepare/check/publish 모두에 `--release-status prerelease`를 지정합니다.

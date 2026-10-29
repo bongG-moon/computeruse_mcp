@@ -1,10 +1,10 @@
-# Computer Use MCP 0.19.1
+# Computer Use MCP 0.19.2
 
-> **main 개발 소스:** 2026-10-28의 SmartFX 및 FXMenuAgent 관찰, 창 연결, 드롭다운 및 메뉴 녹화 개선을 포함합니다. 이 개선은 아직 Release ZIP에 반영되지 않았습니다. 아래 0.19.1 배포 정보와 구분하고, 적용 범위는 [업무 창 안내](WINDOW_CONTEXTS.html)와 [검증 기록](VALIDATION.html#smartfx-source-20261028)을 확인하세요. BUILD/DRIVER/PUBLICATION 매니페스트는 마지막 Release v0.19.1의 기록이며 현재 main 전체의 빌드 증거가 아닙니다.
+> **0.19.2 개선:** SmartFX 및 FXMenuAgent의 관찰, 업무 창 연결, 드롭다운 및 메뉴 녹화 개선을 배포에 포함합니다. 기존 녹화와 revision을 유지합니다. 적용 범위와 남은 제한은 [업무 창 안내](WINDOW_CONTEXTS.html)와 [검증 기록](VALIDATION.html#smartfx-source-20261028)을 확인하세요.
 
 Windows 프로그램의 반복 작업을 녹화하고, 바꿀 값만 지정해 다시 실행하는 로컬 MCP입니다. **단계 → 입력값 → 스킬 보기**를 하나의 편집창에서 사용합니다.
 
-> **배포 정보:** 이 문서는 0.19.1 기준입니다. 로컬 모드의 설치 진단 오판과 저장 직후 시험 실행에서 닫힌 팝업을 찾던 오류를 수정했습니다. 회귀·실제 MCP 연결 검증 범위는 [검증 안내](VALIDATION.html), 배포 파일과 실제 게시 상태는 [GitHub Releases](https://github.com/bongG-moon/computeruse_mcp/releases)에서 확인하세요.
+> **배포 정보:** 이 문서는 0.19.2 기준입니다. 0.19.1의 로컬 설치 진단 및 저장 직후 시험 실행 수정도 유지합니다. 새 ZIP은 기존 MCP 연결을 다시 시작해야 적용됩니다. 빌드 파일은 동봉된 매니페스트, 실제 게시 상태는 [GitHub Release](https://github.com/bongG-moon/computeruse_mcp/releases/tag/v0.19.2)에서 확인하세요.
 
 [연결 안내](INSTALL.md) · [처음 따라 하기](PROCESS_GUIDE.html) · [변경 내용](CHANGES.html) · [검증 범위](VALIDATION.html)
 

@@ -50,6 +50,23 @@ class ImageRuntimeBuildCheckTests(unittest.TestCase):
 
 
 class PackageSourceTests(unittest.TestCase):
+    def test_smoke_generated_bytecode_is_not_distributed_or_hashed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            kept = {"server.py", "runtime/python.exe", "runtime/Lib/os.py"}
+            generated = {"__pycache__/server.cpython-313.pyc", "old.pyo",
+                         "runtime/Lib/__pycache__/os.cpython-313.pyc",
+                         "image_backend_runtime/numpy/__pycache__/generated.pyc"}
+            for name in kept | generated:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"synthetic package smoke fixture")
+            build_portable.write_bundle_manifest(root)
+            hashes = (root / "SHA256SUMS.txt").read_text().splitlines()
+            self.assertEqual({row.split("  ", 1)[1] for row in hashes}, kept)
+            self.assertEqual({p.relative_to(root).as_posix() for p in build_portable.payload_files(root)},
+                             kept | {"SHA256SUMS.txt"})
+
     def test_sources_include_new_modules_all_tests_and_no_private_artifacts(self):
         files = set(build_portable.archive_source_files())
         required = {"easy_api.py", "interaction.py", "image_pixels.py", "task_inputs.py", "task_revision.py",
