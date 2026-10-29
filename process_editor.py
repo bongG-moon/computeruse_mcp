@@ -18,6 +18,7 @@ from teaching_sessions import _Cancellation
 from workflows import validate_recipe, validate_draft_recipe, validate_draft_metadata, WINDOW_REF
 from recording_windows import validate_window_wait
 from task_inputs import MAX_RECIPE_STEPS, MAX_RECORDING_EVENTS, MAX_RECORDED_WINDOWS
+from recorded_menus import recorded_menu_step
 
 
 HELPER_NAME = "Computer Use MCP 프로세스 만들기.exe"
@@ -96,6 +97,7 @@ ACTION_LABELS = {"click": "클릭", "double_click": "두 번 클릭", "right_cli
     "checkpoint": "화면 이미지 확인", "scroll": "스크롤"}
 ACTION_LABELS["wait_for_state"] = "완료 조건이 될 때까지 대기"
 ACTION_LABELS["wait_for_window"] = "관련 팝업 연결"
+ACTION_LABELS["expand_menu"] = "하위 메뉴 펼치기"
 ACTION_LABELS.update({mapped: ACTION_LABELS.get(action, "스크롤") + " (이미지)" for action, mapped in IMAGE_ACTIONS.items()})
 ACTION_LABELS["manual_entry"] = "기록 내용 확인 필요"
 MANUAL_REASONS = {"unknown_input": "입력할 내용을 직접 지정하세요.",
@@ -110,6 +112,8 @@ MANUAL_REASONS = {"unknown_input": "입력할 내용을 직접 지정하세요."
 MANUAL_REASONS["semantic_target_unverified"] = "기록한 요소나 최종값을 재확인하지 못했습니다. 이 단계를 삭제하고 요소와 동작을 직접 추가하세요."
 MANUAL_REASONS["recording_method_unverified"] = "콤보 입력과 확정 방법을 확인하지 못했습니다. 이 단계를 삭제하고 검증한 입력·확정 동작을 직접 추가하세요."
 MANUAL_REASONS["image_replay_unavailable"] = "이 창의 이미지 재생 좌표를 확인하지 못했습니다. ‘이 단계만 다시 지정’에서 요소를 선택하거나 창의 배율·위치를 확인하세요."
+MANUAL_REASONS["menu_expansion_unverified"] = "부모 메뉴를 펼치는 동작과 자식 등장 관계를 확인하지 못했습니다. 이 메뉴 구간만 다시 녹화해 교체하세요. 일반 클릭으로 자동 변환하지 않습니다."
+RECORDING_WARNINGS["menu_expansion_unverified"] = "일부 하위 메뉴의 펼침 증거가 부족합니다. 해당 메뉴 구간을 보완해야 실행할 수 있습니다."
 MANUAL_REASONS["recording_payload_limit"] = "이미지 기록 용량이 부족해 이 단계의 이미지를 보관하지 못했습니다. 동작 순서는 남아 있습니다. ‘이 단계만 다시 지정’에서 대상을 보완하세요."
 for _repair_reason in ("image_capture_required", "focus_target_requires_selection", "image_occluded_requires_selection", "template_low_detail", "semantic_target_unverified"):
     MANUAL_REASONS[_repair_reason] = MANUAL_REASONS[_repair_reason].split("이 단계를 삭제하고", 1)[0] + "‘이 단계만 다시 지정’을 눌러 대상을 선택하세요. 다른 단계와 팝업 연결은 유지됩니다."
@@ -364,8 +368,9 @@ class ProcessDraft:
         last_event = {(event.get("program_id"), event.get("window_ref", "main")): index for index, event in enumerate(events) if isinstance(event, dict)}
         closed = {(row["program_id"], row["window_ref"]): row["owner_ref"] for row in windows if row.get("closed") is True}
         owner_graph = {(row["program_id"], row["window_ref"]): row["owner_ref"] for row in windows}
-        # A hover-only intermediary has no replay step. Keep its proven owner
-        # path, but bind descendants to the nearest owner used by this recipe.
+        # Legacy receipts may have no input for an intermediary. Preserve the
+        # owner graph only; never invent a hover. New proven expand_menu events
+        # make their parent a used window and retain its separate replay step.
         used_windows = set(self.targets) | set(last_event)
         for key, (target, binding) in discovered.items():
             owner = (key[0], binding["owner_ref"])
@@ -426,8 +431,24 @@ class ProcessDraft:
                     check.update(opened_from=opening_source[1], message="관련 팝업 화면에서 앞선 동작의 결과를 확인한 뒤 계속하세요.")
                     proposed.append(check); labels.append("열린 팝업 확인")
             kind = event.get("operation")
-            if kind not in {*IMAGE_ACTIONS, "manual_entry", "select_option", "set_checked"}:
+            if kind not in {*IMAGE_ACTIONS, "manual_entry", "select_option", "set_checked", "expand_menu"}:
                 raise OperationError("지원하지 않는 녹화 동작입니다.", "recording_invalid_events")
+            if kind == "expand_menu":
+                try:
+                    expansion, label = recorded_menu_step(event, event_index, events, target, discovered, snapshots or {})
+                    proposed.append(expansion); labels.append(label)
+                    # Child visibility is a concrete automatic condition. Do
+                    # not interrupt a transient menu with a human review here.
+                    continue
+                except OperationError as error:
+                    menu_evidence = event.get("menu_evidence")
+                    import_diagnostics.append({"event_index": event_index, "recorded_operation": kind,
+                        "code": error.code, "parent_expansion_recorded": False,
+                        "child_representation": menu_evidence.get("child_representation", "unknown") if isinstance(menu_evidence, dict) else "unknown"})
+                    event = {key: value for key, value in event.items() if key != "native_target"}
+                    event.update(operation="manual_entry", reason="menu_expansion_unverified")
+                    kind = "manual_entry"
+                    if "menu_expansion_unverified" not in warnings: warnings.append("menu_expansion_unverified")
             semantic_failed = False
             semantic_error = None
             method_unverified = event.get("input_method") == "keyboard_unverified" or event.get("reason") == "recording_method_unverified"
@@ -484,7 +505,7 @@ class ProcessDraft:
                 kind, reason = "manual_entry", "recording_method_unverified"
             if image is None:
                 kind = "manual_entry"
-                if reason not in {"template_low_detail", "image_occluded_requires_selection", "focus_target_requires_selection", "protected_input", "drag_requires_manual_setup", "shortcut_requires_manual_setup", "semantic_target_unverified", "recording_method_unverified", "image_replay_unavailable", "recording_payload_limit"}:
+                if reason not in {"template_low_detail", "image_occluded_requires_selection", "focus_target_requires_selection", "protected_input", "drag_requires_manual_setup", "shortcut_requires_manual_setup", "semantic_target_unverified", "recording_method_unverified", "image_replay_unavailable", "recording_payload_limit", "menu_expansion_unverified"}:
                     reason = "image_capture_required"
             step = {"operation": IMAGE_ACTIONS.get(kind, kind), "program_id": target["program_id"],
                     "window_ref": target.get("window_ref", "main")}
@@ -608,12 +629,26 @@ class ProcessDraft:
         if type(index) is not int or not 0 <= index < len(self.steps):
             raise OperationError("다시 지정할 동작 단계를 선택하세요.")
         previous = self.steps[index]
+        if previous.get("manual_reason") == "menu_expansion_unverified":
+            raise OperationError(MANUAL_REASONS["menu_expansion_unverified"], "menu_expansion_unverified")
         if previous.get("manual_reason") == "protected_input":
             raise OperationError("보호된 입력은 녹화 단계로 복구하지 않습니다. 해당 입력은 직접 처리하세요.")
         if previous["operation"] != "manual_entry" and not any(k in previous for k in ("image_target", "selector")):
             raise OperationError("동작할 대상이 있는 단계를 선택하세요.")
         target = self.targets[(previous["program_id"], previous.get("window_ref", "main"))]
         selected = self.selection(selection["selection_id"], target)
+        if previous["operation"] == "expand_menu":
+            if action not in (None, "expand_menu"):
+                raise OperationError("메뉴 펼침을 최종 명령 클릭으로 바꿀 수 없습니다.")
+            if selected.get("recognition") != "image" or "image_target" not in previous:
+                raise OperationError("메뉴 계층을 유지하려면 부모 메뉴의 이미지를 다시 지정하거나 해당 메뉴 구간을 녹화하세요.")
+            proposed = copy.deepcopy(self.steps)
+            if "child_window" in previous: proposed[index].pop("selector", None)
+            proposed[index]["image_target"] = copy.deepcopy(selected["image_target"])
+            self._sync_popup_condition(proposed, index)
+            self.validate(proposed, allow_pending=True)
+            self.steps, self.labels[index] = proposed, selected["label"]
+            return
         original = next((name for name, mapped in IMAGE_ACTIONS.items() if mapped == previous["operation"]), previous.get("repair_action", previous["operation"]))
         chosen = action or original
         if chosen not in {"click", "double_click", "right_click", "set_value", "select_option", "set_checked", "press_key", "hotkey", "scroll", "wait_for_element"}:
@@ -652,6 +687,16 @@ class ProcessDraft:
     @staticmethod
     def _sync_popup_condition(proposed, index):
         """Retarget the generated precondition with its next action atomically."""
+        if index >= 2:
+            expansion, wait, action = proposed[index-2:index+1]
+            if (expansion.get("operation") == "expand_menu" and wait.get("operation") == "wait_for_window"
+                    and action.get("image_target") and action.get("operation") != "manual_entry"
+                    and expansion.get("program_id") == wait.get("program_id") == action.get("program_id")
+                    and wait.get("window_ref") == action.get("window_ref", "main")
+                    and expansion.get("child_window") == {key: wait.get(key) for key in ("title", "class_name")}):
+                # Keep the observed child condition tied to the retargeted
+                # next input, in this draft/revision only.
+                expansion["child_image_target"] = copy.deepcopy(action["image_target"])
         if index < 1: return
         check, action = proposed[index-1], proposed[index]
         if (check.get("operation") != "checkpoint" or check.get("review_mode") != "popup_image"
@@ -909,6 +954,10 @@ class ProcessDraft:
                                else check["selector"].get("name", check["selector"].get("automation_id", "요소")))
                 detail += " → 확인: " + str(check_label) + " = " + str(check["equals"])
             action_label = ACTION_LABELS.get(action, action)
+            if action == "expand_menu":
+                detail = ("부모 펼침 → 자식 메뉴 재관찰 (" + step["expansion_method"] + ") · "
+                          + ("별도 팝업" if "child_window" in step else "같은 창의 논리 자식")
+                          + " · 최종 명령과 파일 생성은 별도 확인")
             if step.get("review_mode") == "deferred_visual":
                 final_index = next((i+1 for i, row in enumerate(self.steps) if row.get("step_id") == step.get("review_after")), "?")
                 action_label = "조건 묶음 확인 대기"
@@ -922,7 +971,7 @@ class ProcessDraft:
             rows.append({"index": index, "program": target["label"], "label": label, "action": action,
                          "action_label": action_label, "recognition": "image_candidate" if candidate else "image" if "image_target" in step else "unresolved" if action == "manual_entry" else "uia",
                          "requires_input": action == "manual_entry", "editable_input": editable_input, "detail": detail,
-                         "repairable": (action == "manual_entry" or "image_target" in step or "selector" in step) and step.get("manual_reason") != "protected_input",
+                         "repairable": (action == "manual_entry" or "image_target" in step or "selector" in step) and step.get("manual_reason") not in {"protected_input", "menu_expansion_unverified"},
                          "repair_action": step.get("repair_action", ""),
                          **({"input_target_candidate": copy.deepcopy(INPUT_CANDIDATE_PROOF)} if candidate else {}),
                          "summary": f"{index+1}. {action_label} · {label} · {detail}"})
@@ -1195,14 +1244,15 @@ class ProcessEditors:
             if set(payload) - {"index", "action", "value", "method"} or payload.get("method", "auto") not in ("auto", "image") or type(index) is not int or not 0 <= index < len(draft.steps) or not draft.summaries()[index]["repairable"]:
                 raise OperationError("보완이 필요한 단계 또는 이미지 동작을 선택하세요.")
             step = draft.steps[index]
+            image_only = payload.get("method", "auto") == "image" or step["operation"] == "expand_menu"
             target = draft.targets[(step["program_id"], step.get("window_ref", "main"))]
             exact = {k: target[k] for k in ("pid", "window_id")}
             self._program(job, target["program_id"], exact)
             native = self._visual(job, "pick", {**exact, "label": "이 단계의 대상을 다시 선택하세요", "auto_capture": True,
-                                                   "include_native": payload.get("method", "auto") != "image"}, 120)
+                                                   "include_native": not image_only}, 120)
             self._program(job, target["program_id"], exact)
             selected = None
-            if isinstance(native.get("native_target"), dict) and payload.get("method", "auto") != "image":
+            if isinstance(native.get("native_target"), dict) and not image_only:
                 try:
                     with runtime.execution_lock:
                         self._check(job)
@@ -1616,7 +1666,12 @@ class ProcessEditors:
         result["task_id"] = task["id"]
         result["input_dispatched"] = tested.get("input_dispatched")
         last = tested.get("last_result", {})
+        from menu_expansion import local_menu_summary
+        result.update(local_menu_summary(tested))
+        if "menu_expansion" in result: result["business_result_verified"] = False
         diagnostic = last.get("diagnostic", {})
+        if isinstance(last.get("menu_expansion"), dict) and diagnostic:
+            result["diagnostic"] = copy.deepcopy(diagnostic)
         if diagnostic.get("code") in {"start_screen_not_ready", "image_not_found", "image_ambiguous"}:
             result["diagnostic"] = copy.deepcopy(diagnostic)
             result["repair_step_index"] = tested.get("pending_step", 0)
@@ -1873,9 +1928,9 @@ class ProcessEditors:
                     raise OperationError("이전 녹화 프레임 진단을 확인하지 못했습니다.", "recording_invalid_progress")
             result["start_diagnostic"] = copy.deepcopy(diagnostic)
         last = value.get("last_event")
-        if isinstance(last, dict) and last.get("operation") in {*IMAGE_ACTIONS, "manual_entry", "select_option", "set_checked"}:
+        if isinstance(last, dict) and last.get("operation") in {*IMAGE_ACTIONS, "manual_entry", "select_option", "set_checked", "expand_menu"}:
             result["last_event"] = {"operation": last["operation"], "recognition": "uia_candidate" if last.get("recognition") == "uia_candidate" else "image_or_manual"}
-        result.update(hover_is_action=False, task_verified=False)
+        result.update(hover_is_action=False, menu_expansion_is_action=True, task_verified=False)
         return result
 
     @staticmethod

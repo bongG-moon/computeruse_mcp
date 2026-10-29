@@ -165,8 +165,10 @@ def _disambiguate_windows(runtime, probe, owner, candidates, image_hint):
     return chosen
 
 
-def execute_window_wait(runtime, step, bindings, *, image_hint=None):
+def execute_window_wait(runtime, step, bindings, *, image_hint=None, exclude_window_ids=()):
     validate_window_wait(step)
+    if not isinstance(exclude_window_ids, (tuple, list, set, frozenset)) or any(type(value) is not int or value < 1 for value in exclude_window_ids):
+        raise OperationError("제외할 창의 현재 식별자를 확인하세요.", "invalid_window_wait")
     began = time.monotonic()
     owner = bindings.get((step["program_id"], step["owner_ref"]))
     probe = None
@@ -200,6 +202,7 @@ def execute_window_wait(runtime, step, bindings, *, image_hint=None):
                 if row.get("pid") != owner["pid"] or row.get("window_id") == owner["window_id"]:
                     continue
                 reasons = []
+                if row.get("window_id") in exclude_window_ids: reasons.append("parent_menu_excluded")
                 if row.get("visible") is not True: reasons.append("not_visible")
                 if row.get("title") != step["title"]: reasons.append("title_mismatch")
                 if not popup_class_matches(step["class_name"], row.get("class_name")): reasons.append("class_mismatch")
@@ -252,6 +255,8 @@ def execute_window_wait(runtime, step, bindings, *, image_hint=None):
                     if fresh.get("process_exited") or not fresh.get("target_present") or (fresh.get("creation_time"), fresh.get("executable")) != identity:
                         raise OperationError("MSAA 확인 중 원래 창이 바뀌었습니다.", "window_owner_unavailable")
                     if recovered:
+                        if recovered.get("window_id") in exclude_window_ids:
+                            raise OperationError("접근성 복구 결과가 부모 메뉴와 같은 창입니다. 별도 팝업으로 연결하지 않았습니다.", "recording_window_representation_mismatch")
                         result.update(status="verified", task_verified=True, target=recovered,
                                       accessibility_scope="msaa_list", verification_scope="msaa_list_and_saved_image",
                                       business_result_verified=False)

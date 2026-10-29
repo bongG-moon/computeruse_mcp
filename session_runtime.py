@@ -26,7 +26,8 @@ SAFE_TOOLS = COMMON_TOOLS | MODE_TOOLS["uia"] | MODE_TOOLS["visual"]
 ACTION_LABELS = {"click": "선택한 버튼 또는 위치 누르기", "double_click": "두 번 누르기",
                  "right_click": "오른쪽 버튼 메뉴 열기", "type_text": "글자 입력", "set_value": "입력칸 값 변경",
                  "press_key": "키보드 키 누르기", "hotkey": "단축키 누르기", "scroll": "화면 스크롤",
-                 "drag": "선택한 위치 끌기", "bring_to_front": "선택한 창 앞으로 가져오기", "invoke_menu": "프로그램 메뉴 실행"}
+                 "drag": "선택한 위치 끌기", "bring_to_front": "선택한 창 앞으로 가져오기", "invoke_menu": "프로그램 메뉴 실행",
+                 "expand_menu": "선택한 부모 메뉴의 하위 메뉴 펼치기"}
 
 def loaded_code_identity():
     """Hash loaded function code, not potentially newer source files on disk."""
@@ -171,6 +172,9 @@ class SessionRuntime:
         self.programs = copy.deepcopy(programs)
         self.mode = mode
         self.task = copy.deepcopy(task)
+        # Include the actual menu dispatcher in the session-start code receipt,
+        # even when this run has not reached its first expansion yet.
+        import menu_expansion  # noqa: F401
         self.code_identity = loaded_code_identity()
         self.minutes = max_minutes if max_minutes is not None else config["max_minutes"]
         self.max_actions = max_actions if max_actions is not None else config["max_actions"]
@@ -492,6 +496,24 @@ class SessionRuntime:
             if self._driver_ended():
                 self.stop("Cua Driver 연결이 종료되어 이미지 작업을 중지했습니다. 미확인 입력을 반복하지 마세요.")
             self.check_active()
+            return answer
+
+    def expand_menu_once(self, target, step, *, parent_bounds=None, parent_revalidate=None):
+        """One guarded semantic expansion; the caller verifies child appearance."""
+        from image_targets import match_image
+        from transient_popup import proven_popup
+        with self.execution_lock:
+            self.check_active()
+            self.report_progress("acting")
+            def compare(image_target, png):
+                return match_image(self, image_target, png,
+                    allow_selection_normalization=proven_popup(target))
+            answer = self.guard.expand_menu_once(step, target, compare, self.check_active,
+                parent_bounds=parent_bounds, parent_revalidate=parent_revalidate)
+            if self._driver_ended():
+                self.stop("Cua Driver 연결이 종료되어 메뉴 펼침을 중지했습니다. 미확인 입력을 반복하지 마세요.")
+            # Preserve the delivery receipt when cancellation follows movement.
+            # The caller checks stop before its read-only child verification.
             return answer
 
     def launch(self, program_id):

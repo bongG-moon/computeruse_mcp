@@ -28,9 +28,9 @@ def use_popup_image_conditions(steps, checkpoint_ids):
             raise ValueError("열린 팝업의 모델 확인만 자동 이미지 조건으로 바꿀 수 있습니다. 사람·필수 확인과 업무 결과 확인은 유지하세요.")
         following = proposed[index+1]
         key = lambda row: (row.get("program_id"), row.get("window_ref", "main"))
-        if (following.get("operation") not in {"image_click", "image_right_click"}
+        if (following.get("operation") not in {"image_click", "image_right_click", "expand_menu"}
                 or key(item) != key(following) or not following.get("image_target")):
-            raise ValueError("같은 팝업의 바로 다음 이미지 클릭 대상이 저장되어 있어야 합니다.")
+            raise ValueError("같은 팝업의 바로 다음 이미지 클릭 또는 메뉴 펼침 대상이 저장되어 있어야 합니다.")
         validate_image_target(following["image_target"])
         if item.get("review_origin") is None:
             item["review_origin"] = "user_grouped"

@@ -2,7 +2,7 @@
 
 Driver 포함판은 Computer Use MCP와 필요한 Cua Driver 파일을 함께 묶어, 사용자가 Driver를 따로 찾는 단계를 줄이는 배포 형식입니다. 이 문서는 **Driver 포함판의 구성과 사용 방법**을 설명합니다. 현재 버전과 실제 내려받을 파일은 [GitHub Releases](https://github.com/bongG-moon/computeruse_mcp/releases), 검증한 작업은 [검증 기록](VALIDATION.html)에서 확인하세요. 받은 파일의 정확한 MCP 버전은 함께 제공되는 BUILD-MANIFEST.json에 기록됩니다.
 
-0.19.2 포함판은 새 접근성 진단 도우미와 SmartFX 및 FXMenuAgent 개선 소스를 함께 제공합니다. Driver 자체는 기존 0.28.2를 유지합니다. 기존 녹화와 설정을 옮기거나 초기화하지 말고, 새 폴더로 연결을 갱신한 후 MCP를 다시 시작하세요.
+0.19.3 포함판은 메뉴 펼침 녹화와 자식 메뉴 재탐색을 개선한 Python 소스 및 새 네이티브 도우미를 함께 제공합니다. 0.19.2의 접근성 진단과 업무 창 연결 개선을 유지하며 Driver 자체는 기존 0.28.2를 사용합니다. 기존 녹화와 설정을 옮기거나 초기화하지 말고, 새 폴더로 연결을 갱신한 후 MCP를 다시 시작하세요.
 
 ## 파일 구성
 

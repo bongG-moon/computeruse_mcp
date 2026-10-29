@@ -47,6 +47,7 @@ VISUAL_TOOLS_NAME = "Computer Use MCP 이미지 도구.exe"
 SCOPED_CONTROLS_NAME = "Computer Use MCP 빠른 확인.exe"
 CHECKPOINT_REVIEW_NAME = "Computer Use MCP 화면 확인.exe"
 APP_FILES = (
+    "menu_expansion.py", "recorded_menus.py",
     "authoring_inputs.py", "local_skill.py", "local_delivery.py", "local_runs.py", "local_task_ids.py",
     "msaa_dropdown.py", "accessibility_diagnostics.py", "accessibility_report.py",
     "artifact_lifecycle.py",
@@ -67,6 +68,8 @@ APP_FILES = (
 )
 OPTIONAL_APP_FILES = ()
 SOURCE_SUPPORT_FILES = (
+    "fixtures/MenuExpansionRecorderTests.cs", "tools/test_menu_recording_native.py", "tools/test_local_menu_diagnostics.py",
+    "test_menu_expansion.py", "test_recorded_menu_expansion.py", "test_menu_hover_guard.py", "test_menu_workflow_integration.py",
     "test_local_install_contract.py", "test_editor_trial_windows.py",
     "test_authoring_inputs.py", "test_local_skill.py", "test_local_delivery.py", "test_authoring_editor.py", "test_local_runs.py", "test_local_task_ids.py", "test_local_authoring_native.py", "fixtures/LocalAuthoringFixture.cs", "tools/benchmark_local_authoring.py",
     "test_transient_popup.py", "test_hover_matching.py", "test_loaded_code_identity.py", "fixtures/PopupExportFixture.cs",
@@ -133,7 +136,7 @@ APPLICATION_IMPORT_CHECK = (
     "learning,learning_picker,teaching_sessions,process_editor,process_steps,image_targets,image_steps,"
     "checkpoint_review,image_delivery,replay_preflight,vendor.guard,vendor.windows,"
     "authoring_inputs,local_skill,local_delivery,local_runs,local_task_ids,accessibility_diagnostics,accessibility_report,"
-    "business_windows,window_readiness,window_contexts,smartfx_profiles,combo_popup; "
+    "business_windows,window_readiness,window_contexts,smartfx_profiles,combo_popup,menu_expansion,recorded_menus; "
     "print('Application imports passed')"
 )
 IMAGE_BACKEND_CHECK = r'''

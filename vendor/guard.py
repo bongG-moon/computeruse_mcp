@@ -922,7 +922,7 @@ def metadata_event(kind, fields):
     safe = {key: value for key, value in fields.items() if key in {
         "request_id", "route", "targeting", "mode", "action_count", "success", "pid", "exe", "discovery_source", "approval_id", "driver_tool"}}
     tool = fields.get("tool")
-    safe["tool"] = tool if tool in COMMON_TOOLS | MODE_TOOLS["uia"] | MODE_TOOLS["visual"] | {"computer_launch"} else "unavailable"
+    safe["tool"] = tool if tool in COMMON_TOOLS | MODE_TOOLS["uia"] | MODE_TOOLS["visual"] | {"computer_launch", "expand_menu"} else "unavailable"
     for key in METRIC_FIELDS:
         value = fields.get(key)
         if type(value) in (int, float) and 0 <= value <= 2**63 - 1 and math.isfinite(value):
@@ -1623,6 +1623,26 @@ class Guard:
             self.observed_targets.clear()
 
     def image_action(self, step, target, matcher, check_active):
+        return self._image_action(step, target, matcher, check_active)
+
+    def expand_menu_once(self, step, target, matcher, check_active, *, parent_bounds=None, parent_revalidate=None):
+        """Private saved-image menu hover; not a public coordinate tool."""
+        if (step.get("expansion_method") != "hover" or not step.get("image_target")):
+            return {"operation": "expand_menu", "status": "needs_review", "task_verified": False,
+                "input_dispatched": False, "diagnostic": {"code": "menu_expand_method_unsupported",
+                    "message": "이 실행 경로는 이미지로 확인한 관련 팝업의 메뉴 펼침만 지원합니다.",
+                    "automatic_replay": False}}
+        if "selector" in step and (not callable(parent_revalidate) or parent_bounds is None):
+            return {"operation": "expand_menu", "status": "needs_review", "task_verified": False,
+                "input_dispatched": False, "diagnostic": {"code": "menu_parent_bounds_unverified",
+                    "message": "같은 창의 논리 메뉴는 새 요소 경계와 이미지의 대응을 확인해야 합니다.",
+                    "automatic_replay": False}}
+        return self._image_action({"operation": "expand_menu", "image_target": step["image_target"]},
+            target, matcher, check_active, menu_hover=True,
+            parent_bounds=parent_bounds, parent_revalidate=parent_revalidate)
+
+    def _image_action(self, step, target, matcher, check_active, *, menu_hover=False,
+                      parent_bounds=None, parent_revalidate=None):
         """Private saved-image entry; never grants arbitrary coordinates to UIA callers.
 
         The matcher receives only the current Driver PNG. A match is used once
@@ -1632,7 +1652,12 @@ class Guard:
         from image_targets import png_dimensions
         from operations import OperationError
         from replay_preflight import validate_geometry, input_coordinate_contract
-        step = validate_image_step(step)
+        if menu_hover:
+            from image_targets import validate_image_target
+            validate_image_target(step.get("image_target"))
+            step = copy.deepcopy(step)
+        else:
+            step = validate_image_step(step)
         before = self.action_count
         visual = None
         expected_focus = None
@@ -1659,12 +1684,24 @@ class Guard:
                         **({"coordinate_contract": copy.deepcopy(coordinate_contract)} if coordinate_contract else {})}}
         try:
             check_active()
+            if parent_bounds is not None and (not menu_hover or not isinstance(parent_bounds, dict)
+                    or set(parent_bounds) != {"x", "y", "width", "height"}
+                    or any(type(value) not in (int, float) or not math.isfinite(value) or abs(value) > 2**31-1
+                           for value in parent_bounds.values())
+                    or parent_bounds["width"] <= 0 or parent_bounds["height"] <= 0
+                    or not callable(parent_revalidate)):
+                raise OperationError("부모 메뉴의 물리 화면 경계를 확인하지 못했습니다.", "menu_parent_bounds_unverified")
             if (not isinstance(target, dict) or set(target) != {"pid", "window_id"}
                     or any(type(v) is not int or v < 1 for v in target.values())):
                 raise OperationError("이미지를 찾을 정확한 현재 창이 필요합니다.", "invalid_target")
             policy = copy.deepcopy(self.policy)
             policy.update(mode="visual", log_detail="metadata")
             validate_arguments("get_window_state", target, policy, self.process_resolver, self.window_resolver)
+            if menu_hover:
+                from transient_popup import proven_popup
+                if not proven_popup(target):
+                    raise OperationError("관련 팝업으로 증명되지 않은 창의 호버 입력은 지원하지 않습니다.",
+                        "menu_expand_method_unsupported")
             if step['operation'] != 'wait_for_image' and isinstance(self.transport, DriverTransport) and type(getattr(getattr(self.transport, 'child', None), 'pid', None)) is int:
                 from privileges import input_integrity_preflight
                 blocked = input_integrity_preflight(self.transport.child.pid, target['pid'])
@@ -1708,6 +1745,9 @@ class Guard:
             visual.action_count = self.action_count
             # Internal capability only; public click coordinates cannot opt in.
             visual._popup_image_click = step["operation"] == "image_click"
+            visual._popup_menu_hover = menu_hover
+            visual._popup_hover_parent_bounds = copy.deepcopy(parent_bounds)
+            visual._popup_hover_parent_revalidate = parent_revalidate
             visual._popup_check_active = ready
             def approve(name, args, call_id, *, request_deadline=None):
                 self.approve(name, args, call_id,
@@ -1754,17 +1794,36 @@ class Guard:
                         or any(type(matched.get(k)) is not int for k in ("x", "y"))
                         or not 0 <= matched["x"] < width or not 0 <= matched["y"] < height):
                     raise OperationError("이미지 비교 위치가 현재 캡처 범위를 벗어났습니다.", "image_coordinate_mismatch")
+                if parent_bounds is not None:
+                    # This path explicitly captures native physical pixels.
+                    # Driver frame/bounds are desktop_physical metadata, never
+                    # screenshot offsets or guessed owner resize coordinates.
+                    x, y = geometry[0] + matched["x"], geometry[1] + matched["y"]
+                    if not (parent_bounds["x"] <= x < parent_bounds["x"] + parent_bounds["width"]
+                            and parent_bounds["y"] <= y < parent_bounds["y"] + parent_bounds["height"]):
+                        raise OperationError("이미지의 펼침 위치가 새로 확인한 부모 메뉴 밖에 있습니다.", "menu_parent_image_mismatch")
                 return {"x": matched["x"], "y": matched["y"]}
             point = locate()
             def revalidate_popup_image():
                 # Driver discovery can fail slowly. The original image match
                 # must still identify the same point before the separate
-                # native backend is allowed to send its single click.
+                # native backend is allowed to send its single input.
                 if locate() != point:
                     raise OperationError("Driver 응답을 기다리는 동안 팝업 대상 위치가 바뀌었습니다. 입력하지 않았습니다.", "popup_image_changed")
             visual._popup_revalidate_image = revalidate_popup_image
             if step["operation"] == "wait_for_image":
                 return result("image_appeared", "현재 창에서 저장한 이미지를 하나로 확인했습니다.", verified=True)
+            if menu_hover:
+                answer = visual._dispatch_menu_hover(target, point)
+                native = answer.get("structuredContent", {})
+                may_have_dispatched = native.get("input_sent")
+                input_backend = "owned-popup-messages"
+                native_delivery = native_delivery_evidence(native)
+                if answer.get("isError"):
+                    driver_failure = input_failure_evidence(answer)
+                    return result(native.get("code", "menu_expand_input_unknown"),
+                        native.get("message", "메뉴 펼침 입력 결과를 확인하지 못했습니다. 반복하지 않습니다."))
+                return result("menu_expand_input_sent", "메뉴 펼침 이동을 한 번 전달했습니다. 자식 메뉴 등장은 별도로 확인합니다.", deferred=True)
             operation = step["operation"][6:]
             def dispatch(name, args, *, require_same_window_after=True):
                 nonlocal may_have_dispatched, driver_failure, input_backend, native_delivery
@@ -1853,6 +1912,67 @@ class Guard:
                 self.action_count = visual.action_count
             self.observed_targets.clear()
 
+    def _dispatch_menu_hover(self, target, point):
+        """Consume one freshly matched physical popup frame under the Guard."""
+        from transient_popup import hover, popup_proof
+        from operations import OperationError
+        started, call_id = time.monotonic(), uuid.uuid4().hex
+        args = {**target, "expansion_method": "hover"}
+        key, attempted = (target.get("pid"), target.get("window_id")), False
+        self.log("request", request_id=call_id, tool="expand_menu", arguments=args,
+                 route="saved_image_menu_hover", targeting="saved_image", mode=self.policy["mode"])
+        try:
+            self.check_stop()
+            validate_arguments("get_window_state", target, self.policy, self.process_resolver, self.window_resolver)
+            if (not getattr(self, "_popup_menu_hover", False) or key not in self.observed_targets
+                    or not isinstance(point, dict) or set(point) != {"x", "y"}
+                    or any(type(value) is not int for value in point.values())):
+                raise GuardError("A private fresh menu image observation is required.")
+            if self.action_count >= self.policy["max_actions"]:
+                raise GuardError("Maximum action count reached.")
+            native_frame = getattr(self, "_native_popup_frame", None)
+            if native_frame is None or native_frame[:2] != key:
+                raise OperationError("네이티브 메뉴 캡처와 입력 좌표가 연결되지 않았습니다.", "menu_expand_capture_unavailable")
+            self.approve("expand_menu", args, call_id)
+            validate_arguments("get_window_state", target, self.policy, self.process_resolver, self.window_resolver)
+            check = self._popup_check_active
+            check()
+            self.check_stop()
+            if self.image_geometry_resolver(target["window_id"]) != native_frame[2]:
+                raise GuardError("Native menu geometry changed; no input sent.")
+            parent_bounds = getattr(self, "_popup_hover_parent_bounds", None)
+            if parent_bounds is not None:
+                revalidate = getattr(self, "_popup_hover_parent_revalidate", None)
+                if not callable(revalidate) or revalidate() != parent_bounds:
+                    raise OperationError("메뉴 승인 또는 이미지 관찰 중 부모 요소가 바뀌었습니다.", "menu_parent_changed")
+                check()
+            self._popup_revalidate_image()
+            check()
+            if getattr(self, "_native_popup_frame", None) != native_frame:
+                raise GuardError("Native menu capture binding changed; no input sent.")
+            proof = popup_proof(target)
+            proof.pop("foreground", None)
+            if proof != native_frame[3]:
+                raise GuardError("Native menu lifetime changed; no input sent.")
+            self.check_stop()
+            self.action_count += 1
+            attempted = True
+            answer = hover(dict(target), dict(point), native_frame[2], check)
+            answer.setdefault("structuredContent", {})["capture_backend"] = "owned-popup-printwindow"
+        except (GuardError, OperationError, OSError, ValueError, RuntimeError) as error:
+            answer = {"isError": True, "structuredContent": {"backend": "owned-popup-messages",
+                "input_sent": None if attempted else False, "task_verified": False,
+                "code": getattr(error, "code", "menu_expand_guard_failed"), "message": str(error),
+                "delivery_phase": "move" if attempted else "preflight", "release_delivery": "not_queued",
+                "automatic_retry": False}}
+        finally:
+            self.observed_targets.discard(key)
+            self._native_popup_frame = None
+        self.log("result", request_id=call_id, tool="expand_menu", route="saved_image_menu_hover",
+                 action_count=self.action_count, success=not answer.get("isError", False),
+                 summary=result_summary(answer), **add_metrics(answer, started))
+        return answer
+
     def call(self, name, arguments, *, timeout_seconds=None):
         started = time.monotonic()
         if name == "get_window_state":
@@ -1926,7 +2046,18 @@ class Guard:
                     native_route = (name == "click" and getattr(self, "_popup_image_click", False)
                         and native_frame is not None and native_frame[:2] == target_key)
                     request = {"name": driver_name, "arguments": driver_args}
-                    if native_route:
+                    if name == "get_window_state" and getattr(self, "_popup_menu_hover", False):
+                        # A semantic hover has no supported Driver input API.
+                        # Pair its image and movement in physical coordinates;
+                        # never capture with one backend and guess another's scale.
+                        from transient_popup import capture as capture_popup, popup_proof
+                        popup_geometry = self.image_geometry_resolver(args["window_id"])
+                        raw = capture_popup({key: args[key] for key in ("pid", "window_id")}, popup_geometry)
+                        if not raw.get("isError") and raw.get("structuredContent", {}).get("backend") == "owned-popup-printwindow":
+                            proof = popup_proof({key: args[key] for key in ("pid", "window_id")})
+                            proof.pop("foreground", None)
+                            self._native_popup_frame = (*target_key, popup_geometry, proof)
+                    elif native_route:
                         from transient_popup import click as click_popup, popup_proof
                         try:
                             check = self._popup_check_active

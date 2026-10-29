@@ -1,8 +1,8 @@
 """Narrow, run-scoped fallback for a proven HWND omitted by the Driver.
 
 No public coordinate API. Guard owns policy, approvals, budgets and journaling.
-The only mutation is a single image-verified left click paired with a native
-capture, or following an exact Driver non-delivery response.
+Inputs are image-verified clicks or a semantic menu hover paired with native
+capture. Hover never sends button messages or implies command completion.
 """
 from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
@@ -277,6 +277,15 @@ def capture(target, geometry):
 
 def click(target, point, geometry, check):
     """Guard has already approved and image-matched this one final click."""
+    return _pointer_input(target, point, geometry, check)
+
+
+def hover(target, point, geometry, check):
+    """Private semantic menu expansion; one MOVE, never DOWN/UP or retry."""
+    return _pointer_input(target, point, geometry, check, hover_only=True)
+
+
+def _pointer_input(target, point, geometry, check, *, hover_only=False):
     check()
     import os
     from privileges import input_integrity_preflight
@@ -323,6 +332,7 @@ def click(target, point, geometry, check):
                 return {"isError": True, "structuredContent": {
                     "backend": "owned-popup-messages", "input_sent": None if attempted else False,
                     "task_verified": False, "code": code, "message": message,
+                    **({"operation": "expand_menu", "expansion_method": "hover"} if hover_only else {}),
                     "delivery_phase": phase, "release_delivery": "not_queued",
                     "point_evidence": dict(evidence), "automatic_retry": False}}
             def validate_point():
@@ -339,13 +349,19 @@ def click(target, point, geometry, check):
             try:
                 validate_point()
                 if not user.SetCursorPos(physical.x, physical.y):
-                    return refusal("popup_pointer_unknown", "포인터 위치를 맞추지 못해 클릭하지 않았습니다.")
+                    return refusal("popup_pointer_unknown", "포인터 위치를 맞추지 못해 메뉴를 펼치지 않았습니다."
+                        if hover_only else "포인터 위치를 맞추지 못해 클릭하지 않았습니다.")
                 evidence["pointer_aligned"] = True
+                # For a hover, pointer movement itself can open a submenu. A
+                # subsequent refusal is uncertain, never permission to repeat.
+                if hover_only:
+                    attempted = True
                 # Pointer movement and hover handlers may replace a submenu.
                 # Recheck the same child before MOVE and again before DOWN.
                 value = ctypes.c_size_t()
                 packed = local.x | (local.y << 16)
-                for phase, message, flags in (("move", 0x200, 0), ("down", 0x201, 1), ("up", 0x202, 0)):
+                messages = (("move", 0x200, 0),) if hover_only else (("move", 0x200, 0), ("down", 0x201, 1), ("up", 0x202, 0))
+                for phase, message, flags in messages:
                     validate_point()
                     attempted = True
                     accepted = (user.PostMessageW(child, message, flags, packed) if phase == "up" else
@@ -354,7 +370,9 @@ def click(target, point, geometry, check):
                         return refusal("popup_input_unknown", "메시지 전달 결과가 불명확합니다. 자동 재시도하지 않습니다.")
                 # Queue acceptance is delivery evidence, never business success.
                 return {"structuredContent": {"backend": "owned-popup-messages", "input_sent": True,
-                    "task_verified": False, "delivery_phase": "up", "release_delivery": "queued_once",
+                    "task_verified": False, "delivery_phase": "move" if hover_only else "up",
+                    "release_delivery": "not_queued" if hover_only else "queued_once",
+                    **({"operation": "expand_menu", "expansion_method": "hover"} if hover_only else {}),
                     "point_evidence": evidence}, "content": []}
             except (OperationError, OSError, RuntimeError, ValueError) as error:
                 return refusal(getattr(error, "code", "popup_input_preflight_failed"), str(error))

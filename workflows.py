@@ -170,7 +170,7 @@ def _validate_expanded(steps, program_ids):
             raise WorkflowError("window_ref는 영문자로 시작하는 1~64자 창 이름이어야 합니다.")
         validate_workflow_step(step)
         if step.get("review_mode") == "popup_image":
-            if (index+1 >= len(steps) or steps[index+1].get("operation") not in IMAGE_MUTATIONS
+            if (index+1 >= len(steps) or steps[index+1].get("operation") not in IMAGE_MUTATIONS | {"expand_menu"}
                     or target_key(step) != target_key(steps[index+1])
                     or step.get("image_target") != steps[index+1].get("image_target")):
                 raise WorkflowError("자동 팝업 확인은 바로 다음 이미지 입력의 대상만 확인할 수 있습니다. 최종 업무 결과 확인으로 사용할 수 없습니다.")
@@ -641,7 +641,7 @@ class WorkflowRunner:
                 if candidate is definition: after = True; continue
                 if not after or target_key(candidate) != target_key(definition): continue
                 if candidate['operation'] == 'checkpoint': continue
-                return candidate.get('image_target') if candidate['operation'] in IMAGE_OPERATIONS else None
+                return candidate.get('image_target') if candidate['operation'] in IMAGE_OPERATIONS | {"expand_menu"} else None
             return None
         all_keys = {target_key(step) for step in steps} | {(step["program_id"], step["owner_ref"])
             for step in steps if step["operation"] == "wait_for_window"}
@@ -924,6 +924,12 @@ class WorkflowRunner:
 
             def check_step(index, *, completed_receipt=False):
                 item = steps[index]
+                if item["operation"] == "expand_menu":
+                    # Sent or uncertain expansion resumes with observation
+                    # only. A duplicate hover/click could collapse or switch a
+                    # menu, and must never execute the final child command.
+                    from menu_expansion import verify_menu_expansion
+                    return measured(verify_menu_expansion(runtime, operation_step(item), resolve(item)))
                 if deferred_input(item) and item["operation"] not in IMAGE_MUTATIONS:
                     return {"task_verified": False, "input_dispatched": None,
                         "diagnostic": {"code": "input_action_uncertain", "automatic_replay": False,

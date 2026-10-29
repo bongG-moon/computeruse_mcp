@@ -50,8 +50,19 @@ OPERATION_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "properties": {
         "operation": {"enum": ["set_value", "select_option", "select_item", "set_checked",
-                                 "click", "double_click", "right_click", "press_key", "hotkey", "assert"]},
+                                 "click", "double_click", "right_click", "press_key", "hotkey", "assert", "expand_menu"]},
         "selector": SELECTOR_SCHEMA,
+        "image_target": {"type": "object", "description": "expand_menu only: recorded parent image. May pair with a fresh MenuItem selector only for hover into a logical child; matched native point must be inside its actual bounds. Never a desktop coordinate."},
+        "child_selector": SELECTOR_SCHEMA,
+        "child_image_target": {"type": "object", "description": "expand_menu only: saved child image used after expansion."},
+        "child_window": {"type": "object", "additionalProperties": False, "required": ["title", "class_name"],
+                         "properties": {"title": {"type": "string", "maxLength": 1000},
+                                        "class_name": {"type": "string", "minLength": 1, "maxLength": 256}}},
+        "expansion_method": {"enum": ["hover", "click", "keyboard", "accessibility"]},
+        "expansion_key": {"enum": ["RIGHT", "LEFT", "ENTER", "SPACE", "DOWN"]},
+        "menu_depth": {"type": "integer", "minimum": 1, "maximum": 16},
+        "menu_path": {"type": "array", "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 1000},
+                      "description": "Observed labels for local diagnostics only; never used as input selectors or menu ordering."},
         "value": {"type": "string", "maxLength": 16000},
         "checked": {"type": "boolean", "description": "Desired state for set_checked. Requires an observed boolean selected state and toggle capability."},
         "key": {"type": "string", "minLength": 1, "maxLength": 80},
@@ -133,6 +144,11 @@ def validate_assertions(assertions):
 
 
 def validate_step(step):
+    if isinstance(step, dict) and step.get("operation") == "expand_menu":
+        from menu_expansion import validate_menu_expansion
+        return validate_menu_expansion(step)
+    if isinstance(step, dict) and set(step) & {"image_target", "child_selector", "child_image_target", "child_window", "expansion_method", "expansion_key", "menu_depth"}:
+        raise OperationError("메뉴 전개 조건은 expand_menu에만 사용할 수 있습니다.", "invalid_menu_expansion")
     if not isinstance(step, dict) or set(step) - set(OPERATION_SCHEMA["properties"]):
         raise OperationError("작업 단계의 형식 또는 인자가 올바르지 않습니다.")
     operation = step.get("operation")
@@ -219,6 +235,8 @@ def validate_step(step):
 def verification_step(step):
     """Return a read-only recheck; useful when resuming without replaying input."""
     step = validate_step(step)
+    if step["operation"] == "expand_menu":
+        raise OperationError("메뉴 전개 재개는 verify_menu_expansion으로 자식 표시만 확인하세요. 입력을 반복하지 않습니다.", "menu_verification_required")
     if step.get("completion_mode") == "human":
         raise OperationError("직접 확인 방식의 입력은 화면 확인 지점에서 결과를 확인하세요. 입력을 자동 반복하지 않습니다.", "human_review_required")
     checks = copy.deepcopy(step.get("expect", []))
@@ -406,6 +424,9 @@ class Operations:
             raise OperationError("delivery_mode는 background 또는 foreground여야 합니다.")
         if self.runtime.mode != "uia":
             raise OperationError("검증 작업은 uia 세션에서만 사용할 수 있습니다.", "unsupported_mode")
+        if step["operation"] == "expand_menu":
+            from menu_expansion import execute_menu_expansion
+            return execute_menu_expansion(self.runtime, step, target, delivery_mode=delivery_mode)
         initial = None
         guard = getattr(self.runtime, "guard", None)
         observed_targets = getattr(guard, "observed_targets", set())

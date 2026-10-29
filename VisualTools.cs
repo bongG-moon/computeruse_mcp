@@ -1,4 +1,4 @@
-﻿// Offline visual authoring. Never injects application input or uses the network.
+// Offline visual authoring. Never injects application input or uses the network.
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -78,6 +78,16 @@ internal static class VisualTools
     internal const int MaximumRecordedWindows = 300;
     internal static bool ValidRecordingEventLimit(int value) { return value >= 1 && value <= MaximumRecordingEvents; }
     internal static bool RecordingPopupCapacity(int active, int total) { return active >= 0 && active < 5 && total >= 0 && total < MaximumRecordedWindows; }
+    internal static bool RecordingMenuExpansionWitness(string beforeIdentity, string afterIdentity,
+            string beforeState, string afterState, bool enabled, bool complete, bool sameLifetime,
+            int beforeInput, int currentInput, int childCount, double elapsedMs) {
+        // This is observed expansion intent, not a click or export-completion
+        // assertion. A new child needs its own current scope/identity check.
+        return !String.IsNullOrEmpty(beforeIdentity) && beforeIdentity == afterIdentity
+            && beforeState == "collapsed" && afterState == "expanded" && enabled && complete && sameLifetime
+            && beforeInput == currentInput && childCount > 0 && childCount <= 32
+            && elapsedMs >= 0 && elapsedMs <= 2500;
+    }
     internal sealed class RecordingPayloadBudget {
         // Reserve the remaining 6 MiB for popup metadata and the response
         // envelope. JSON string sizes are cached by identity without retaining
@@ -1918,12 +1928,19 @@ internal static class VisualTools
             internal SemanticSample Semantic; internal IntPtr HitWindow; internal Rectangle HitBounds; internal uint HitThread; internal int HitControlId; internal string HitClass; internal DateTime ClickAt; internal bool HitEnabled, ProbeRequested, ForegroundBeforeInput;
             internal bool SemanticBeforeInput; internal int InputVersion; internal IntPtr PointWindow, ComboListWindow; internal uint PointThread; internal string PointClass;
             internal SharedFrame Source; internal Rectangle Region; internal Point SourceAnchor; internal List<Rectangle> Blocked;
-            internal Dictionary<string, object> CaptureDiagnostic;
+            internal Dictionary<string, object> CaptureDiagnostic, MenuEvidence;
+            internal Rectangle MenuWindowBounds;
             internal readonly List<CachedFrame> BeforeHover = new List<CachedFrame>();
             internal Pending ImageOwner, DraftPreparation; internal bool DraftInputTarget, DraftInputFocusValid = true;
             internal readonly List<Pending> ImageDependants = new List<Pending>(); internal bool AuthorCompleted, ValueConfirmed, ValueSuperseded, ImageFocusValid = true; internal DateTime LastInputAt;
         }
-        sealed class SemanticSample { internal AutomationElement Element; internal Dictionary<string, object> Native; internal string Identity, Role, Property; internal object Value; internal bool Enabled; internal DateTime ObservedAt; internal IntPtr NativeWindow; }
+        sealed class SemanticSample {
+            internal AutomationElement Element; internal Dictionary<string, object> Native; internal string Identity, Role, Property;
+            internal object Value; internal bool Enabled; internal DateTime ObservedAt; internal IntPtr NativeWindow;
+            internal string MenuState, MenuStateSource; internal bool MenuComplete;
+            internal readonly List<Dictionary<string, object>> MenuItems = new List<Dictionary<string, object>>();
+            internal readonly HashSet<IntPtr> MenuWindows = new HashSet<IntPtr>();
+        }
         readonly List<Target> targets = new List<Target>(); readonly List<Dictionary<string, object>> events = new List<Dictionary<string, object>>();
         readonly Queue<Pending> pending = new Queue<Pending>(); readonly List<string> warnings = new List<string>(); readonly int maximum;
         readonly Queue<Pending> authorQueue = new Queue<Pending>(); bool authorBusy, completeRequested, payloadLimited; SharedFrame sharedFrame;
@@ -1947,6 +1964,11 @@ internal static class VisualTools
         AutomationElement focusedEdit, completedEdit; RecordingFinalRead finalRead; Pending finalTyping; bool finalReadAttempted;
         Pending mouseDown, typing, lastPointer, selectAllPreparation; readonly List<Pending> clickEvidence = new List<Pending>(); List<KeyValuePair<Pending, SemanticSample>> completedClicks, completedValues; Point mouseStart; readonly object stateLock = new object(); Dictionary<string, object> completedState; Target completedTarget; int completedGeneration; bool workerCompleted;
         SemanticSample hovered, completedHover, tracked, completedTracked; Target hoverTarget, trackedTarget; DateTime hoverAt, trackedAt; Dictionary<string, object> trackedEvent; int trackedIndex; bool trackedKeyboard;
+        // A move is never an action by itself. Keep one pre-expansion witness
+        // until this exact MenuItem exposes new visible children, or a real
+        // subsequent input requires an explicit repair entry.
+        Pending menuCandidate, completedMenuCandidate, completedMenuFrame; SemanticSample completedMenuAfter;
+        Target menuShownTarget; int completedInputVersion;
         internal Recorder(Dictionary<string, object> data, string response) : base(data, response, 1800) {
             maximum = Num(data, "max_events", MaximumRecordingEvents); if (!ValidRecordingEventLimit(maximum)) throw new InvalidOperationException("invalid_event_limit");
             object values; if (!data.TryGetValue("targets", out values) || !(values is IEnumerable)) throw new InvalidOperationException("targets_required");
@@ -1972,7 +1994,7 @@ internal static class VisualTools
             pause.Click += delegate { Drain(); Pause(); };
             stop.Click += delegate { CompleteRecording(); };
             cancel.Click += delegate { Finish("cancelled", null); };
-            Clock.Tick += Tick; FormClosed += delegate { if (finalRead != null) finalRead.Cancel(); UninstallHooks(); ReleaseFrame(); ClearFrames(); while (pending.Count > 0) DisposePending(pending.Dequeue()); while (authorQueue.Count > 0) DisposePending(authorQueue.Dequeue()); foreach (Target t in targets) t.Release(); focusedState = null; focusedEdit = null; };
+            Clock.Tick += Tick; FormClosed += delegate { if (finalRead != null) finalRead.Cancel(); UninstallHooks(); ClearMenuCandidate(); ClearCompletedMenuFrame(); ReleaseFrame(); ClearFrames(); while (pending.Count > 0) DisposePending(pending.Dequeue()); while (authorQueue.Count > 0) DisposePending(authorQueue.Dequeue()); foreach (Target t in targets) t.Release(); focusedState = null; focusedEdit = null; };
             ResumeLayout(false);
             ResizeEnd += delegate {
                 if (WindowState != FormWindowState.Normal || recorderSizing) return;
@@ -1995,7 +2017,7 @@ internal static class VisualTools
         void ReleaseFrame() { if (sharedFrame != null) { sharedFrame.Release(); sharedFrame = null; } else if (frame != null) frame.Dispose(); frame = null; }
         void ClearHoverHistory() { foreach (List<CachedFrame> history in hoverHistory.Values) foreach (CachedFrame old in history) old.Source.Release(); hoverHistory.Clear(); }
         void ClearFrames() { foreach(CapturePump pump in recordingPumps.Values)pump.Stop();recordingPumps.Clear();foreach (CachedFrame cached in frameCache.Values) cached.Source.Release(); frameCache.Clear(); ClearHoverHistory(); }
-        void InputChanged() { inputVersion++; inputChangedAt=DateTime.UtcNow;foreach(CapturePump pump in recordingPumps.Values)pump.RequestEpoch(inputVersion); ClearHoverHistory(); }
+        void InputChanged() { ClearMenuCandidate(); inputVersion++; inputChangedAt=DateTime.UtcNow;foreach(CapturePump pump in recordingPumps.Values)pump.RequestEpoch(inputVersion); ClearHoverHistory(); }
         static string RecordingStartCode(string value) {
             if (String.IsNullOrEmpty(value) || value.Length > 80) return "recording_start_failed";
             foreach (char c in value) if ((c < 'a' || c > 'z') && c != '_') return "recording_start_failed";
@@ -2334,7 +2356,7 @@ internal static class VisualTools
                 : "요소로 기록할 수 없으면 이미지로 기록합니다. 가려진 대상은 보완이 필요합니다.")
                 + "\nEsc: 일시정지 · 마친 뒤 동작과 입력값을 검토하세요.";
         }
-        void Pause() { recording = false; preparingTarget = null; generation++; Compact(false); FinalizePendingInput(); tracked = hovered = null; trackedEvent = null; trackedTarget = hoverTarget = null; typing = null; selectAllPreparation = null; lastPointer = null; focusedState = null; lastImage = null; lastImageTarget = null; recordState = "paused"; start.Enabled = !payloadLimited && probeSettled && hookProbe == "available" && events.Count < maximum; pause.Enabled = false; info.Text = "일시정지 · " + events.Count + "/" + maximum + "개 동작을 기록했습니다.\n다시 시작할 때 입력 대상을 클릭하거나 기록을 마치고 검토하세요."; ReleaseFrame(); ClearFrames(); Heartbeat(true); }
+        void Pause() { recording = false; preparingTarget = null; generation++; ClearMenuCandidate(); ClearCompletedMenuFrame(); Compact(false); FinalizePendingInput(); tracked = hovered = null; trackedEvent = null; trackedTarget = hoverTarget = null; typing = null; selectAllPreparation = null; lastPointer = null; focusedState = null; lastImage = null; lastImageTarget = null; recordState = "paused"; start.Enabled = !payloadLimited && probeSettled && hookProbe == "available" && events.Count < maximum; pause.Enabled = false; info.Text = "일시정지 · " + events.Count + "/" + maximum + "개 동작을 기록했습니다.\n다시 시작할 때 입력 대상을 클릭하거나 기록을 마치고 검토하세요."; ReleaseFrame(); ClearFrames(); Heartbeat(true); }
         void EnforcePayloadBudget() {
             if (!payloadBudget.Bound(events)) return;
             payloadLimited = true; Warn("recording_payload_limit"); Pause();
@@ -2422,6 +2444,8 @@ internal static class VisualTools
                 do { used = false; foreach (Target t in targets) if (t.Program == root.Program && t.Window == reference) { used = true; reference = popupPrefix + (++count + 1).ToString(); break; } } while (used);
                 Target discovered = new Target(root, candidate, reference);
                 targets.Add(discovered);
+                if (menuCandidate != null && SameMenuScope(menuCandidate.Target, discovered)
+                        && menuCandidate.InputVersion == inputVersion) menuShownTarget = discovered;
                 // Discovery runs outside the input hook. Keep a pre-input
                 // image even when a sibling menu owns the foreground.
                 if (discovered.ImageAllowed) { try { CaptureFor(discovered, false); } catch { } }
@@ -2595,6 +2619,7 @@ internal static class VisualTools
                 if (code >= 0 && recording) {
                     MOUSE mouse = (MOUSE)Marshal.PtrToStructure(data, typeof(MOUSE)); int kind = message.ToInt32();
                     if (kind == 0x201 || kind == 0x204 || kind == 0x20A) {
+                        FlushUnprovenMenuExpansion(mouse.point);
                         Target target = PointerTarget(mouse.point); if (target != null) {
                             if ((mouse.flags & 1) != 0) injected++; ResetPointerInput(kind == 0x20A);
                             Pending item = CaptureClick(target, mouse.point, kind == 0x204 ? "right_click" : kind == 0x20A ? "scroll" : "click");
@@ -2618,6 +2643,7 @@ internal static class VisualTools
             try {
                 if (code >= 0 && finalRead != null && (message.ToInt32() == 0x100 || message.ToInt32() == 0x104)) finalRead.Cancel();
                 if (code >= 0 && recording && (message.ToInt32() == 0x100 || message.ToInt32() == 0x104)) {
+                    POINT menuPoint; if (GetCursorPos(out menuPoint)) FlushUnprovenMenuExpansion(menuPoint);
                     InputChanged();
                     KEY key = (KEY)Marshal.PtrToStructure(data, typeof(KEY)); Target target = Current(); if (target != null) {
                         if ((key.flags & 16) != 0) injected++; Keys value = (Keys)key.code;
@@ -2694,7 +2720,7 @@ internal static class VisualTools
                 if (p.CaptureDiagnostic != null) item["capture_diagnostic"] = p.CaptureDiagnostic;
                 if (p.RequestedOperation != null && p.RequestedOperation != "manual_entry" && p.Reason != "drag_requires_manual_setup") {
                     item["requested_operation"] = p.RequestedOperation;
-                    item["pointer_evidence"] = new Dictionary<string, object> { { "source", "native_mouse_hook" }, { "operation", p.RequestedOperation }, { "before_input", p.Source != null || item.ContainsKey("template_png") } };
+                    item["pointer_evidence"] = new Dictionary<string, object> { { "source", p.RequestedOperation == "expand_menu" ? "observed_menu_hover" : "native_mouse_hook" }, { "operation", p.RequestedOperation }, { "before_input", p.Source != null || item.ContainsKey("template_png") } };
                     item["foreground_before_input"] = p.ForegroundBeforeInput;
                     item["semantic_target_before_input"] = p.SemanticBeforeInput;
                     if (!item.ContainsKey("template_png") && p.Source == null) item["capture_issue"] = Str(item, "reason", "image_capture_required");
@@ -2706,6 +2732,10 @@ internal static class VisualTools
                         && (p.Operation == "click" || p.Operation == "manual_entry" && (p.Reason == "image_capture_required" || p.Reason == "image_occluded_requires_selection" || p.Reason == "image_replay_unavailable"))) {
                     item["operation"] = "click"; item["native_target"] = p.Semantic.Native;
                     item.Remove("reason"); label = "요소 클릭 · 저장 전 Driver 대조";
+                }
+                if (p.MenuEvidence != null) {
+                    item["expansion_method"] = "hover"; item["menu_evidence"] = p.MenuEvidence;
+                    if (p.Semantic != null) item["native_target"] = p.Semantic.Native;
                 }
                 if (p.Reason == "focus_target_requires_selection" && !p.DraftInputTarget) foreach (string key in new string[] { "template_png", "width", "height", "anchor", "capture_window", "source_size" }) item.Remove(key);
                 if (p.Operation == "scroll") { item["wheel"] = p.Wheel; item["direction"] = p.Wheel < 0 ? "down" : "up"; item["amount"] = Math.Max(1, Math.Abs(p.Wheel) / 120); label = "스크롤"; }
@@ -2720,7 +2750,7 @@ internal static class VisualTools
                 }
                 if (Str(item, "operation", "") == "manual_entry") label = "직접 설정 필요 · " + Str(item, "reason", "unknown_input");
                 else if (p.Operation == "click") label = "클릭"; else if (p.Operation == "right_click") label = "오른쪽 클릭"; else if (p.Operation == "press_key") label = "키 " + p.Key; else if (p.Operation == "hotkey") label = "단축키 " + String.Join("+", p.Keys);
-                if (item.ContainsKey("native_target")) label = "클릭 · 요소 후보 (저장 전 확인)";
+                if (item.ContainsKey("native_target") && p.Operation != "manual_entry") label = p.RequestedOperation == "expand_menu" ? "하위 메뉴 펼침 · 관찰된 호버" : "클릭 · 요소 후보 (저장 전 확인)";
                 p.Saved = item; p.Index = events.Count; events.Add(item); list.Items.Add((events.Count).ToString() + "  " + label); list.TopIndex = Math.Max(0, list.Items.Count - 1);
                 if (p.Source != null) authorQueue.Enqueue(p);
                 else p.AuthorCompleted = true;
@@ -2782,7 +2812,7 @@ internal static class VisualTools
                         } else {
                             item["capture_issue"] = failure;
                             if (rejected != null) item["rejected_capture"] = rejected;
-                            if (!item.ContainsKey("native_target")) { item["operation"] = "manual_entry"; item["reason"] = failure; }
+                            if (!item.ContainsKey("native_target") || pointer.RequestedOperation == "expand_menu") { item["operation"] = "manual_entry"; item["reason"] = failure; }
                             if (pointer.CaptureDiagnostic != null) { pointer.CaptureDiagnostic["status"] = "rejected"; pointer.CaptureDiagnostic["code"] = failure; }
                         }
                         int index = events.IndexOf(item);
@@ -2810,8 +2840,124 @@ internal static class VisualTools
             int index = events.IndexOf(opener.Saved);
             return index >= 0 && index == events.Count - 2 && Object.ReferenceEquals(events[index + 1], popup.Saved);
         }
+        static bool SameMenuScope(Target left, Target right) {
+            if (left == null || right == null || left.Pid != right.Pid || left.Program != right.Program) return false;
+            while (left.Owner != null) left = left.Owner;
+            while (right.Owner != null) right = right.Owner;
+            return Object.ReferenceEquals(left, right);
+        }
+        void ClearMenuCandidate() {
+            Pending old = menuCandidate; menuCandidate = null; menuShownTarget = null;
+            if (old != null) DisposePending(old);
+        }
+        void ClearCompletedMenuFrame() {
+            lock (stateLock) {
+                if (completedMenuFrame != null) DisposePending(completedMenuFrame);
+                completedMenuFrame = null; completedMenuCandidate = null; completedMenuAfter = null;
+            }
+        }
+        // No COM, capture or input is performed from this hook-side repair.
+        // If SHOW raced the UIA worker, keep the missing intent before the
+        // child click; never make post-click pixels look like a prior target.
+        void FlushUnprovenMenuExpansion(POINT point) {
+            // A completed worker may be waiting for the next timer tick when
+            // the user clicks. Consume its already-read relationship first;
+            // this path performs no UIA call or image capture in the hook.
+            lock (stateLock) {
+                if (workerCompleted && completedGeneration == generation && completedInputVersion == inputVersion) {
+                    CompleteMenuCandidate(completedMenuCandidate, completedMenuAfter, completedInputVersion);
+                    completedMenuCandidate = null; completedMenuAfter = null;
+                }
+            }
+            Pending candidate = menuCandidate; Target shown = menuShownTarget;
+            if (candidate == null || shown == null || candidate.InputVersion != inputVersion
+                    || !shown.Valid() || !shown.Contains(point) || !SameMenuScope(candidate.Target, shown)) return;
+            PreserveMenuExpansionRepair(candidate, shown);
+        }
+        void PreserveMenuExpansionRepair(Pending candidate, Target shown) {
+            menuCandidate = null; menuShownTarget = null;
+            candidate.Operation = "manual_entry"; candidate.Reason = "menu_expansion_unverified";
+            candidate.MenuEvidence = new Dictionary<string, object> {
+                { "source", "uia_menu_transition" }, { "before_state", "collapsed" }, { "after_state", "unknown" },
+                { "input_version_unchanged", true }, { "parent_identity", candidate.Semantic.Identity },
+                { "child_representation", "hwnd" }, { "child_window_ref", shown.Window },
+                { "parent_window_ref", candidate.Target.Window }, { "child_items", new List<Dictionary<string, object>>() },
+                { "diagnostic", "popup_show_before_menu_relationship_observed" } };
+            Warn("menu_expansion_unverified"); Queue(candidate);
+        }
+        void BeginMenuCandidate(SemanticSample sample, Pending preFrame, int observedInput) {
+            if (preFrame == null) return;
+            if (sample == null || sample.Role != "MenuItem" || sample.MenuState != "collapsed" || !sample.Enabled
+                    || !sample.MenuComplete || observedInput != inputVersion || preFrame.InputVersion != inputVersion
+                    || sample.MenuItems.Count != 0 || !preFrame.Target.Valid()) { DisposePending(preFrame); return; }
+            var bounds = Map(sample.Native, "bounds"); var window = Map(sample.Native, "window_bounds");
+            if (bounds == null || window == null
+                    || !new Rectangle((int)Real(bounds, "x", 0), (int)Real(bounds, "y", 0), (int)Real(bounds, "width", 0), (int)Real(bounds, "height", 0)).Contains(preFrame.ScreenPoint)
+                    || preFrame.MenuWindowBounds != new Rectangle((int)Real(window, "x", 0), (int)Real(window, "y", 0), (int)Real(window, "width", 0), (int)Real(window, "height", 0))) {
+                DisposePending(preFrame); return;
+            }
+            if (menuCandidate != null && menuCandidate.Target == preFrame.Target && menuCandidate.Semantic.Identity == sample.Identity
+                    && DateTime.UtcNow.Subtract(menuCandidate.ClickAt).TotalMilliseconds <= 2500) { DisposePending(preFrame); return; }
+            ClearMenuCandidate(); preFrame.Semantic = sample; preFrame.SemanticBeforeInput = true;
+            preFrame.Operation = preFrame.Source == null ? "manual_entry" : "expand_menu";
+            preFrame.RequestedOperation = "expand_menu";
+            if (preFrame.Source != null) preFrame.Reason = null;
+            menuCandidate = preFrame;
+        }
+        void CompleteMenuCandidate(Pending candidate, SemanticSample after, int observedInput) {
+            if (candidate == null || !Object.ReferenceEquals(candidate, menuCandidate) || after == null) return;
+            SemanticSample before = candidate.Semantic;
+            bool lifetime = candidate.Target.Valid() && IsWindowVisible(candidate.Target.Hwnd)
+                && SameBounds(Map(before.Native, "window_bounds"), Map(after.Native, "window_bounds"));
+            if (!RecordingMenuExpansionWitness(before.Identity, after.Identity, before.MenuState, after.MenuState,
+                    before.Enabled && after.Enabled, before.MenuComplete && after.MenuComplete, lifetime,
+                    candidate.InputVersion, inputVersion, after.MenuItems.Count, after.ObservedAt.Subtract(before.ObservedAt).TotalMilliseconds)
+                    || observedInput != inputVersion) return;
+            Target child = null; bool logical = true;
+            foreach (IntPtr hwnd in after.MenuWindows) {
+                if (hwnd == IntPtr.Zero || hwnd == candidate.Target.Hwnd || candidate.Target.AcceptsWindow(hwnd)) continue;
+                IntPtr popupRoot = GetAncestor(hwnd, 2);
+                logical = false; Target found = null;
+                foreach (Target known in targets) if (known.Hwnd == popupRoot && !known.Retired && known.Valid()
+                        && IsWindowVisible(popupRoot) && SameMenuScope(candidate.Target, known)) {
+                    if (found != null) return; found = known;
+                }
+                if (found == null || child != null && child != found) return;
+                child = found;
+            }
+            if (!logical && child == null) return;
+            menuCandidate = null; menuShownTarget = null;
+            candidate.MenuEvidence = new Dictionary<string, object> {
+                { "source", "uia_menu_transition" }, { "before_state", "collapsed" }, { "after_state", "expanded" },
+                { "state_evidence", after.MenuStateSource }, { "input_version_unchanged", true },
+                { "parent_identity", before.Identity }, { "parent_window_ref", candidate.Target.Window },
+                { "child_representation", logical ? "logical" : "hwnd" }, { "child_items", after.MenuItems } };
+            if (child != null) candidate.MenuEvidence["child_window_ref"] = child.Window;
+            if (candidate.Source == null) { candidate.Operation = "manual_entry"; candidate.Reason = "image_capture_required"; }
+            Queue(candidate);
+        }
+        static bool SameBounds(Dictionary<string, object> before, Dictionary<string, object> after) {
+            if (before == null || after == null) return false;
+            foreach (string key in new string[] { "x", "y", "width", "height" }) if (Real(before, key, -1) != Real(after, key, -2)) return false;
+            return true;
+        }
+        static bool MenuCandidateContains(Pending candidate, Target target, POINT point) {
+            if (candidate == null || candidate.Target != target || candidate.Semantic == null) return false;
+            var bounds = Map(candidate.Semantic.Native, "bounds");
+            return bounds != null && new Rectangle((int)Real(bounds, "x", 0), (int)Real(bounds, "y", 0),
+                (int)Real(bounds, "width", 0), (int)Real(bounds, "height", 0)).Contains(point.X, point.Y);
+        }
         void Sample(Target target) {
             textBusy = true; workerStarted = DateTime.UtcNow; samplingTarget = target; int version = generation, sample = ++sampleVersion;
+            int observedInput = inputVersion; Pending observeMenu = menuCandidate, preMenuFrame = null;
+            // Only an already scoped menu/popup pays for a pre-hover witness.
+            // The image is retained before asynchronous UIA reads and can never
+            // be replaced by a frame captured after a later child click.
+            if (target.Owner != null || hovered != null && hovered.Role == "MenuItem") {
+                POINT point; if (GetCursorPos(out point) && !MenuCandidateContains(observeMenu, target, point) && target.Contains(point)) {
+                    try { preMenuFrame = CaptureClick(target, point, "expand_menu"); preMenuFrame.InputVersion = observedInput; preMenuFrame.MenuWindowBounds = target.Bounds(); } catch { if (preMenuFrame != null) DisposePending(preMenuFrame); preMenuFrame = null; }
+                }
+            }
             System.Threading.Interlocked.Increment(ref activeWorkers);
             lock (stateLock) { sampleWorkers[target] = 1; }
             SemanticSample observeTracked = trackedTarget == target ? tracked : null;
@@ -2825,8 +2971,13 @@ internal static class VisualTools
             }
             Thread worker = new Thread(delegate() {
                 Dictionary<string, object> state = null; AutomationElement stateElement = null;
-                SemanticSample hover = null, changed = null; var clicks = new List<KeyValuePair<Pending, SemanticSample>>(); var values = new List<KeyValuePair<Pending, SemanticSample>>();
+                SemanticSample hover = null, changed = null, menuAfter = null; var clicks = new List<KeyValuePair<Pending, SemanticSample>>(); var values = new List<KeyValuePair<Pending, SemanticSample>>();
                 try {
+                    if (observeMenu != null && observeMenu.Semantic != null && observeMenu.Target.Valid()) { try {
+                        var point = Map(observeMenu.Semantic.Native, "point");
+                        menuAfter = ReadSemantic(observeMenu.Semantic.Element, observeMenu.Target,
+                            new POINT { X = (int)Real(point, "x", 0), Y = (int)Real(point, "y", 0) }, false);
+                    } catch { } }
                     // A popup can take foreground before its opener is sampled.
                     // Only immutable exact-child evidence may resolve a historical
                     // Button; active Edit/value tracking still requires foreground.
@@ -2858,7 +3009,11 @@ internal static class VisualTools
                         }
                     }
                 } catch { }
-                lock (stateLock) { sampleWorkers.Remove(target); if (sample == sampleVersion) { completedState = state; completedEdit = stateElement; completedHover = hover; completedTracked = changed; completedClicks = clicks; completedValues = values; completedTarget = target; completedGeneration = version; workerCompleted = true; } }
+                lock (stateLock) { sampleWorkers.Remove(target); if (sample == sampleVersion && recording && !Done) {
+                    if (completedMenuFrame != null) DisposePending(completedMenuFrame);
+                    completedMenuFrame = preMenuFrame; completedMenuCandidate = observeMenu; completedMenuAfter = menuAfter; completedInputVersion = observedInput;
+                    completedState = state; completedEdit = stateElement; completedHover = hover; completedTracked = changed; completedClicks = clicks; completedValues = values; completedTarget = target; completedGeneration = version; workerCompleted = true;
+                } else if (preMenuFrame != null) DisposePending(preMenuFrame); }
                 System.Threading.Interlocked.Decrement(ref activeWorkers);
             }); worker.IsBackground = true; worker.SetApartmentState(ApartmentState.MTA); worker.Start();
         }
@@ -2974,7 +3129,7 @@ internal static class VisualTools
                 // It is its owning ComboBox's final selection we must observe.
                 for (int i = 0; i < Math.Min(5, chain.Count); i++) if (chain[i].Current.ControlType == ControlType.ComboBox) { chosen = i; break; }
                 if (chosen == 0 && leaf.Current.ControlType == ControlType.Text)
-                    for (int i = 1; i < Math.Min(4, chain.Count); i++) if (chain[i].Current.ControlType == ControlType.Button || chain[i].Current.ControlType == ControlType.CheckBox) { chosen = i; break; }
+                    for (int i = 1; i < Math.Min(4, chain.Count); i++) if (chain[i].Current.ControlType == ControlType.Button || chain[i].Current.ControlType == ControlType.CheckBox || chain[i].Current.ControlType == ControlType.MenuItem) { chosen = i; break; }
             }
             AutomationElement e = chain[chosen]; string role = e.Current.ControlType.ProgrammaticName.Replace("ControlType.", "");
             if (!EditableTextRole(role) && role != "ComboBox" && role != "CheckBox" && role != "Button" && role != "MenuItem" && !(target.Owner != null && (role == "ListItem" || role == "DataItem"))) return null;
@@ -3003,7 +3158,55 @@ internal static class VisualTools
             } else if (EditableTextRole(role) && e.TryGetCurrentPattern(ValuePattern.Pattern, out raw) && !((ValuePattern)raw).Current.IsReadOnly) {
                 string value = ((ValuePattern)raw).Current.Value; if (value != null && value.Length <= 2000) { sample.Property = "value"; sample.Value = value; }
             }
+            if (role == "MenuItem") ReadMenuState(sample, target);
             sample.ObservedAt = DateTime.UtcNow; return sample;
+        }
+        void ReadMenuState(SemanticSample sample, Target target) {
+            sample.MenuState = "unknown"; sample.MenuStateSource = "visible_descendants";
+            object raw; string patternState = "unknown";
+            if (sample.Element.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out raw)) {
+                ExpandCollapseState state = ((ExpandCollapsePattern)raw).Current.ExpandCollapseState;
+                patternState = state == ExpandCollapseState.Collapsed ? "collapsed" : state == ExpandCollapseState.Expanded ? "expanded"
+                    : state == ExpandCollapseState.LeafNode ? "leaf" : "unknown";
+                sample.MenuStateSource = "expand_collapse_and_visible_descendants";
+            }
+            // Walk only the observed parent's direct menu level. This is not
+            // a whole-app tree search; a nested MenuItem is a stopping boundary.
+            // Bounded traversal or any read error leaves evidence incomplete.
+            var nodes = new Queue<KeyValuePair<AutomationElement, int>>();
+            var windowHints = new Queue<IntPtr>();
+            nodes.Enqueue(new KeyValuePair<AutomationElement, int>(sample.Element, 0));
+            windowHints.Enqueue(sample.NativeWindow == IntPtr.Zero ? target.Hwnd : sample.NativeWindow);
+            int visited = 0; bool complete = true;
+            while (nodes.Count > 0 && complete) {
+                var current = nodes.Dequeue(); IntPtr inheritedWindow = windowHints.Dequeue();
+                AutomationElement child = TreeWalker.RawViewWalker.GetFirstChild(current.Key);
+                while (child != null) {
+                    if (++visited > 64 || sample.MenuItems.Count >= 32) { complete = false; break; }
+                    var info = child.Current;
+                    if (!target.AcceptsSemanticPid(info.ProcessId) || info.IsPassword) { complete = false; break; }
+                    IntPtr childWindow = info.NativeWindowHandle == 0 ? inheritedWindow : new IntPtr(info.NativeWindowHandle);
+                    System.Windows.Rect bounds = info.BoundingRectangle;
+                    if (info.ControlType == ControlType.MenuItem) {
+                        if (!info.IsOffscreen && !bounds.IsEmpty && bounds.Width > 0 && bounds.Height > 0) {
+                            var identity = SemanticIdentity(child); identity.Remove("is_password"); identity["enabled"] = info.IsEnabled;
+                            sample.MenuItems.Add(identity); sample.MenuWindows.Add(childWindow);
+                        }
+                    } else if (!info.IsOffscreen) {
+                        if (current.Value >= 3) { complete = false; break; }
+                        nodes.Enqueue(new KeyValuePair<AutomationElement, int>(child, current.Value + 1)); windowHints.Enqueue(childWindow);
+                    }
+                    child = TreeWalker.RawViewWalker.GetNextSibling(child);
+                }
+            }
+            sample.MenuComplete = complete;
+            if (complete) {
+                // A provider may have no ExpandCollapse implementation. A
+                // complete absent -> visible direct-child transition is still
+                // observed menu expansion, without claiming pattern support.
+                if (sample.MenuItems.Count > 0 && patternState != "collapsed" && patternState != "leaf") sample.MenuState = "expanded";
+                else if (sample.MenuItems.Count == 0 && patternState != "expanded" && patternState != "leaf") sample.MenuState = "collapsed";
+            }
         }
         bool ProtectedOrUnowned(AutomationElement element, Target target) {
             return ReadOwnedSemanticChain(element, target) == null;
@@ -3027,7 +3230,9 @@ internal static class VisualTools
                     + (imageBlocked ? "\n이미지 재생 좌표를 확인하지 못한 창은 요소 방식만 기록합니다. 이미지 동작은 ‘보완 필요’로 표시합니다." : "\n이미지 재생 좌표 점검 완료 · 요소를 찾지 못하면 이미지로 기록합니다.")
                     + "\n[기록 시작] 후 클릭과 입력은 실제 프로그램에 적용됩니다.";
             }
-            Drain(); Heartbeat(false); if (!recording) return; DiscoverPopup(); Target current = Current();
+            Drain(); Heartbeat(false); if (!recording) return;
+            if (menuCandidate != null && DateTime.UtcNow.Subtract(menuCandidate.ClickAt).TotalMilliseconds > 2500) ClearMenuCandidate();
+            DiscoverPopup(); Target current = Current();
             if (trackedKeyboard && trackedEvent != null) {
                 trackedEvent["operation"] = "manual_entry"; trackedEvent["reason"] = "recording_method_unverified"; trackedEvent["input_method"] = "keyboard_unverified";
                 trackedEvent.Remove("value"); trackedEvent.Remove("native_target"); trackedEvent.Remove("after"); Warn("recording_method_unverified");
@@ -3063,6 +3268,11 @@ internal static class VisualTools
             lock (stateLock) {
                 if (workerCompleted) {
                     workerCompleted = false; textBusy = false;
+                    if (completedGeneration == generation && completedInputVersion == inputVersion) {
+                        CompleteMenuCandidate(completedMenuCandidate, completedMenuAfter, completedInputVersion);
+                        if (completedMenuFrame != null) BeginMenuCandidate(completedHover, completedMenuFrame, completedInputVersion);
+                    } else if (completedMenuFrame != null) DisposePending(completedMenuFrame);
+                    completedMenuFrame = null; completedMenuCandidate = null; completedMenuAfter = null;
                     if (completedGeneration == generation && completedClicks != null) foreach (var click in completedClicks) AttachClickedSemantic(click.Key, click.Value);
                     if (completedGeneration == generation && completedValues != null) foreach (var value in completedValues) ConfirmValue(value.Key, value.Value);
                     if (completedGeneration == generation && completedTarget == current) {
@@ -3133,7 +3343,7 @@ internal static class VisualTools
                 // UIA providers may block COM indefinitely. Abandon only this
                 // sample; late responses cannot overwrite the next generation.
                 // Bound concurrent workers so repeated stalls cannot leak threads.
-                lock (stateLock) { sampleVersion++; workerCompleted = false; textBusy = false; }
+                lock (stateLock) { sampleVersion++; workerCompleted = false; textBusy = false; ClearCompletedMenuFrame(); }
                 if (samplingTarget != null) sampleRetryAt[samplingTarget] = DateTime.UtcNow.AddSeconds(2);
                 hovered = null; hoverTarget = null; focusedState = null;
                 Warn("uia_text_unavailable"); info.Text = "요소 응답 지연 · 이 동작은 이미지 또는 보완 필요로 기록합니다.\n요소 읽기는 응답이 돌아오면 자동으로 재개합니다.\n마친 뒤 ‘보완 필요’ 단계를 확인하세요."; Heartbeat(true);

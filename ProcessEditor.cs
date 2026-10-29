@@ -73,6 +73,16 @@ internal static class ProcessEditor
     }
     internal static string TrialMessage(Dictionary<string, object> tested)
     {
+        var menu = Map(tested, "menu_expansion");
+        if (menu != null) {
+            string path = MenuPath(menu), delivery = DeliveryLabel(Str(menu, "expansion_delivery", "unknown"));
+            return "메뉴 펼침: " + ExpansionLabel(Str(menu, "expansion_method", "unknown")) + " / " + delivery + " / " + MenuStageLabel(Str(menu, "stage", "unknown"))
+                + "\r\n깊이 " + Num(menu, "menu_depth", 1) + (path.Length > 0 ? " | " + ShortText(path, 60) : "")
+                + " | 최종 명령 " + DeliveryLabel(Str(menu, "child_command_delivery", "unknown")) + ", 업무 완료 " + BusinessLabel(tested, menu);
+        }
+        string review = ReviewKind(tested);
+        if (Str(tested, "status", "") == "needs_review" && review.Length > 0)
+            return "예정된 " + ReviewLabel(review) + " 지점에서 기다리고 있습니다. 실행 오류로 판정한 상태는 아닙니다. 기존 확인 절차를 마친 뒤 같은 실행을 이어가세요.";
         if (Object.Equals(tested != null && tested.ContainsKey("task_verified") ? tested["task_verified"] : null, true))
             return "시험 실행을 완료하고 결과를 확인했습니다. 필요하면 저장하세요.";
         string reason = Str(Map(tested, "continuation"), "reason", "");
@@ -83,6 +93,46 @@ internal static class ProcessEditor
             return (Num(tested, "repair_step_index", 0) + 1).ToString() + "단계 대상 확인이 필요합니다. " + Str(diagnostic, "message", "")
                 + " 실행 순서에서 해당 단계를 두 번 클릭하고 ‘이 단계만 다시 지정’을 선택하세요. 다른 단계는 유지됩니다.";
         return "시험 실행 상태: " + Str(tested, "status", "확인 필요") + ". 채팅의 결과를 확인하세요.";
+    }
+    static string ShortText(string text, int maximum) {
+        text = (text ?? "").Replace('\r', ' ').Replace('\n', ' ');
+        return text.Length <= maximum ? text : text.Substring(0, maximum) + "…";
+    }
+    static string DeliveryLabel(string value) { return value == "sent" ? "전송됨" : value == "not_sent" ? "미전송" : "전달 불명"; }
+    static string ExpansionLabel(string value) { return value == "hover" ? "호버" : value == "click" ? "클릭" : value == "keyboard" ? "키보드" : value == "accessibility" ? "접근성 펼침" : "방식 미확인"; }
+    static string MenuStageLabel(string value) { return value == "child_visible" ? "자식 표시 확인" : value == "child_observation" ? "자식 표시 확인 중" : value == "parent_observation" ? "부모 대상 확인 중" : "진행 위치 미확인"; }
+    static string ChildRepresentationLabel(string value) { return value == "hwnd" || value == "owned_popup" ? "별도 팝업 창" : value == "logical" || value == "logical_uia_child" ? "같은 창의 논리 자식" : "표현 방식 미확인"; }
+    static string BusinessLabel(Dictionary<string, object> result, Dictionary<string, object> menu) {
+        object value; if (menu != null && menu.TryGetValue("business_result_verified", out value)) return Object.Equals(value, true) ? "검증됨" : "미검증";
+        return result != null && result.TryGetValue("business_result_verified", out value) && Object.Equals(value, true) ? "검증됨" : "미검증";
+    }
+    static string MenuPath(Dictionary<string, object> menu) {
+        var names = new List<string>(); var path = List(menu, "menu_path");
+        if (path != null) foreach (object raw in path) { if (names.Count == 16) break; string name = raw as string; if (!String.IsNullOrEmpty(name)) names.Add(ShortText(name, 256)); }
+        return String.Join(" > ", names);
+    }
+    static string ReviewKind(Dictionary<string, object> result) {
+        string direct = Str(result, "review_kind", ""); if (direct.Length > 0) return direct;
+        var checkpoint = Map(result, "checkpoint"); if (checkpoint != null && checkpoint.Count > 0) return Str(checkpoint, "review_mode", "human");
+        var visual = Map(result, "visual_review"); return visual != null && visual.Count > 0 ? "visual" : "";
+    }
+    static string ReviewLabel(string kind) { return kind == "human" ? "사람 확인" : kind == "visual" ? "모델 화면 판정" : kind == "popup_image" ? "팝업 자동 조건 확인" : "결과 확인"; }
+    internal static List<string> LocalExecutionDetails(Dictionary<string, object> result) {
+        var lines = new List<string>(); var menu = Map(result, "menu_expansion");
+        if (menu != null) {
+            lines.Add("현재 작업: 부모 메뉴 펼침 — " + MenuStageLabel(Str(menu, "stage", "unknown")));
+            string path = MenuPath(menu); if (path.Length > 0) lines.Add("메뉴 경로: " + path);
+            lines.Add("메뉴 깊이: " + Num(menu, "menu_depth", 1) + " / 자식 표현: " + ChildRepresentationLabel(Str(menu, "child_representation", "unknown")));
+            lines.Add("부모 펼침: " + ExpansionLabel(Str(menu, "expansion_method", "unknown")) + " / 입력 " + DeliveryLabel(Str(menu, "expansion_delivery", "unknown")));
+            lines.Add("최종 자식 명령: " + DeliveryLabel(Str(menu, "child_command_delivery", "unknown")));
+            lines.Add("업무 결과: " + BusinessLabel(result, menu) + ". 메뉴 표시 확인과 파일 생성 완료는 별도로 판정합니다.");
+            if (Object.Equals(menu.ContainsKey("verify_only") ? menu["verify_only"] : null, true)) lines.Add("이번 호출은 열린 메뉴의 상태만 확인했습니다. 입력을 다시 보내지 않았습니다.");
+        } else if (Str(result, "status", "") == "needs_review") {
+            string kind = ReviewKind(result);
+            if (kind.Length > 0) lines.Add("대기 종류: 예정된 " + ReviewLabel(kind) + " 지점입니다. 확인 절차를 완료하기 전에는 진행하지 않습니다.");
+            else lines.Add("대기 종류: 조건 또는 대상 확인이 필요합니다. 아래 진단을 확인하세요.");
+        }
+        return lines;
     }
     internal static IEnumerable List(Dictionary<string, object> data, string key)
     { object value; return data != null && data.TryGetValue(key, out value) && !(value is string) ? value as IEnumerable : null; }
@@ -257,15 +307,18 @@ internal static class ProcessEditor
             var result=Map(request,"result"); if(result==null)throw new ArgumentException("missing_local_result");
             Text="작업 실행 결과 · 이 PC에서만 표시";Font=new Font("맑은 고딕",10);BackColor=Color.FromArgb(245,247,251);
             ClientSize=new Size(650,430);MinimumSize=new Size(500,340);
-            bool verified=Object.Equals(result.ContainsKey("task_verified")?result["task_verified"]:null,true);
+            var menuResult=Map(result,"menu_expansion");
+            bool verified=Object.Equals(result.ContainsKey("task_verified")?result["task_verified"]:null,true)
+                && (menuResult==null || BusinessLabel(result,menuResult)=="검증됨");
             string state=Str(result,"status","unknown");
-            string title=verified?"작업을 완료하고 결과를 확인했습니다.":state=="cancelled"?"작업이 취소되었습니다.":"작업을 끝내려면 확인이 필요합니다.";
+            string title=menuResult!=null&&!verified?"메뉴 구간 결과입니다. 최종 업무 완료는 별도로 확인합니다.":verified?"작업을 완료하고 결과를 확인했습니다.":state=="cancelled"?"작업이 취소되었습니다.":"작업을 끝내려면 확인이 필요합니다.";
             var heading=new Label {Text=title,Font=new Font(Font.FontFamily,14,FontStyle.Bold),ForeColor=verified?Color.FromArgb(26,100,74):Color.FromArgb(24,43,72),Dock=DockStyle.Top,Height=90,Padding=new Padding(20),Name="LocalResultHeading",AccessibleName="작업 결과"};Controls.Add(heading);
             var bottom=new FlowLayoutPanel {Dock=DockStyle.Bottom,Height=70,Padding=new Padding(12),FlowDirection=FlowDirection.RightToLeft};Controls.Add(bottom);
             var close=new Button {Text="닫기",Width=110,Height=34,DialogResult=DialogResult.OK,Name="CloseLocalResult",AccessibleName="닫기"};bottom.Controls.Add(close);AcceptButton=CancelButton=close;
             var lines=new List<string>();
             lines.Add("진행: "+Num(result,"completed_steps",0)+" / "+Num(result,"total_steps",0)+" 단계");
             lines.Add("상태: "+state);
+            lines.AddRange(LocalExecutionDetails(result));
             string summary=Str(result,"summary","");if(summary.Length>0)lines.Add(summary);
             var diagnostic=Map(result,"diagnostic");string code=Str(diagnostic,"code","");string message=Str(diagnostic,"message","");
             if(code.Length>0)lines.Add("확인 코드: "+code);
@@ -379,6 +432,7 @@ internal static class ProcessEditor
         readonly ComboBox saveMode = new ComboBox();
         bool editingExisting;
         readonly Label selected = new Label(), expectSelected = new Label(), status = new Label(), valueCaption = new Label(), timeCaption = new Label(), timeUnit = new Label(), actionHelp = new Label();
+        readonly ToolTip trialDetails = new ToolTip { AutoPopDelay = 30000, InitialDelay = 300, ShowAlways = true, ToolTipTitle = "시험 실행 상세" };
         readonly TextBox value = new TextBox(), optionOrder = new TextBox(), expected = new TextBox(), processName = new TextBox(), description = new TextBox();
         readonly NumericUpDown seconds = new NumericUpDown();
         readonly ListView steps = new ListView();
@@ -542,6 +596,7 @@ internal static class ProcessEditor
             previewSkill.Click += delegate { Send("skill_preview",new Dictionary<string,object>(),null); };
             exportSkill.Click += delegate { if(skillPreview!=null) Send("skill_export",new Dictionary<string,object>{{"preview_id",Str(skillPreview,"preview_id","")}},null); };
             status.Text = "화면에서 대상을 선택하거나 녹화를 시작하세요."; status.ForeColor = muted; status.Bounds = Box(26, 688, 532, 44); Identify(status, "ProcessEditorStatus", "프로세스 작성 상태"); Controls.Add(status);
+            status.AutoEllipsis = true; FormClosed += delegate { trialDetails.Dispose(); };
             ButtonStyle(trial, "TestProcess", "▷ 시험 실행", Box(574, 692, 156, 38), false, this);
             ButtonStyle(save, "SaveProcess", "프로세스 저장", Box(748, 692, 176, 38), true, this);
             var cancel = new Button(); ButtonStyle(cancel, "CancelProcess", "닫기", Box(940, 692, 96, 38), false, this);
@@ -1135,7 +1190,7 @@ internal static class ProcessEditor
             if (done || busy) return; pendingSeq = ++seq; pendingAction = command; pendingPurpose = purpose; busy = true;
             try { Write(response + ".command.json", new Dictionary<string, object> { { "nonce", nonce }, { "seq", pendingSeq }, { "action", command }, { "payload", payload } }); }
             catch { busy = false; Finish("runtime_failed", new Dictionary<string, object> { { "code", "command_write_failed" } }); return; }
-            if (busy) { status.Text = command == "pick_element" || command == "pick_image" || command == "pick_target" ? "화면에서 대상을 고르고 확인해 주세요." : command == "record" ? "녹화 창에서 시작한 뒤 연결한 프로그램을 직접 조작하세요." : command == "test_run" ? "현재 초안을 실제 프로그램에서 시험하고 있습니다…" : "요청한 내용을 확인하고 있습니다…"; status.ForeColor = muted; }
+            if (busy) { trialDetails.SetToolTip(status, ""); status.Text = command == "pick_element" || command == "pick_image" || command == "pick_target" ? "화면에서 대상을 고르고 확인해 주세요." : command == "record" ? "녹화 창에서 시작한 뒤 연결한 프로그램을 직접 조작하세요." : command == "test_run" ? "현재 초안을 실제 프로그램에서 시험하고 있습니다…" : "요청한 내용을 확인하고 있습니다…"; status.ForeColor = muted; }
             UpdateButtons();
         }
         void Tick(object sender, EventArgs args)
@@ -1155,6 +1210,7 @@ internal static class ProcessEditor
                         } else if (Str(update, "state", "") == "finished") {
                             Enabled = true; Show(); Activate(); var tested = Map(update, "result");
                             status.Text = TrialMessage(tested);
+                            trialDetails.SetToolTip(status, String.Join("\r\n", LocalExecutionDetails(tested)));
                             status.ForeColor = muted; UpdateButtons();
                         }
                     }
@@ -1198,6 +1254,7 @@ internal static class ProcessEditor
             if (pendingAction == "test_run") {
                 var tested = Map(result, "test_result");
                 result["message"] = TrialMessage(tested);
+                trialDetails.SetToolTip(status, String.Join("\r\n", LocalExecutionDetails(tested)));
             }
             if (pendingAction == "save") {
                 var saved = Map(result, "saved_task");
