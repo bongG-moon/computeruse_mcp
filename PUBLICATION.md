@@ -2,7 +2,15 @@
 
 이 문서는 배포 담당자용입니다. 일반 사용자는 [INSTALL.md](INSTALL.md)로 연결합니다.
 
-## 0.19.3 배포 기준
+## 0.19.4 배포 기준
+
+현재 UIA/MSAA 메뉴 의미를 확인하는 경로와 기존 녹화의 명시적 재지정을 포함합니다. 부모의 강조색은 의미 확인의 필수 조건이 아니며, 이미지 전용 경로의 임계값은 유지합니다. 하위 메뉴만 펼친 뒤 녹화를 끝내거나 취소해도 기존 기록을 보존하고 보완 단계를 남깁니다.
+
+회귀 검사와 실제 네이티브 Provider 시험의 범위는 [0.19.4 검증 기록](VALIDATION.html#menu-semantic-20261029)에 구분합니다. 시험 앱 저장 및 재시작, 현재 자식 Invoke와 XLSX 확인은 사내 업무 앱이나 전체 화면 녹화 인수 시험을 대신하지 않습니다. 실제 물리 입력 및 DPI 행렬, IAccIdentity 기반 MSAA 기본 동작 성공은 미검증입니다. 가상 셀 Realize/ScrollItem, 임의 PropertyGrid 편집 및 독립 업무 창 녹화 중 자동 편입은 전체 지원 범위가 아닙니다.
+
+MenuAccessibility.cs와 ProcessEditor.cs를 포함한 현재 C# 소스로 도우미 10개를 빌드합니다. 최종 ZIP의 bundled Python, 이미지 엔진, local/connected stdio 연결과 세 매니페스트는 아래 절차로 검증합니다. 기존 녹화, 설정, revision, 명시적 사람 확인 및 공개 응답 정책은 자동 변경하지 않습니다. 운영 기록이나 업무 캡처는 공개 자산에 넣지 않습니다.
+
+## 이전 0.19.3 배포 기준
 
 이번 배포는 하위 메뉴가 나타난 호버를 `expand_menu` 단계로 보존하고 부모 대상과 자식 등장 조건을 함께 저장합니다. 별도 팝업 창과 같은 창 안의 UIA 논리 자식을 구분하며, 같은 실행 재개에서 이미 보냈거나 전달이 불명확한 입력을 반복하지 않고 다시 관찰합니다. 메뉴 경로와 중단 위치, 입력 전달 상태는 로컬 결과창에만 추가하고 공개 응답 허용 목록과 명시적 connected 동작은 유지합니다.
 
@@ -43,9 +51,9 @@
 1. 실제 검증을 마치고 소스 버전, 사용자 문서와 결과 범위를 확정합니다. `build_portable.py`로 기본 ZIP과 소스 ZIP을 만들고, `bundle_driver.py`로 검토된 Driver를 포함한 ZIP을 만듭니다. 새 네이티브 소스는 최종 도우미 실행파일로 다시 빌드합니다.
 2. 전용 배포 자산 폴더에 정확히 아래 7개 파일을 준비합니다. 다른 문서나 과거 ZIP을 섞지 않습니다.
 
-   - Computer-Use-MCP-0.19.3.zip
-   - Computer-Use-MCP-0.19.3-source.zip
-   - Computer-Use-MCP-0.19.3-with-driver.zip
+   - Computer-Use-MCP-0.19.4.zip
+   - Computer-Use-MCP-0.19.4-source.zip
+   - Computer-Use-MCP-0.19.4-with-driver.zip
    - cua-driver.exe
    - CUA-DRIVER-LICENSE.md
    - DRIVER-BUNDLE-MANIFEST.json
@@ -57,7 +65,7 @@
 4. 아래 명령으로 최종 자산에서 세 명세를 생성합니다.
 
 ```powershell
-python tools/publication.py prepare --repo . --assets release/assets-0.19.3
+python tools/publication.py prepare --repo . --assets release/assets-0.19.4
 ```
 
 소스 ZIP, 런타임, Driver 파일의 재고·버전·체크섬과 저장소 소스를 검사한 뒤 명세를 씁니다. 불일치 파일을 덮어써서 숨기지 않고 실패합니다. PUBLICATION-MANIFEST 자신은 순환 해시를 피하기 위해 해시 목록에서 제외합니다. 별도 게시 도구는 `publication_support_files`로 구분합니다.
@@ -65,13 +73,13 @@ python tools/publication.py prepare --repo . --assets release/assets-0.19.3
 5. 소스와 명세를 명시적으로 stage하고 diff를 확인해 커밋합니다. 커밋된 Git 바이트도 검사합니다.
 
 ```powershell
-python tools/publication.py check --repo . --assets release/assets-0.19.3 --git-ref HEAD
+python tools/publication.py check --repo . --assets release/assets-0.19.4 --git-ref HEAD
 ```
 
 6. 커밋을 푸시하고 원격 브랜치 SHA가 같은지 확인합니다. Release notes는 7개 자산 폴더 밖에 둡니다. 다음 명령은 검사된 자산 사본만 게시하며 기존 태그·Release를 덮어쓰지 않습니다.
 
 ```powershell
-python tools/publication.py publish --repo . --assets release/assets-0.19.3 --github-repo bongG-moon/computeruse_mcp --notes-file release-notes.md
+python tools/publication.py publish --repo . --assets release/assets-0.19.4 --github-repo bongG-moon/computeruse_mcp --notes-file release-notes.md
 ```
 
 게시 후 태그가 검사한 커밋을 가리키는지, 원격 7개 자산의 크기·SHA-256이 일치하는지 다시 검사합니다. GitHub Release 이벤트의 자동 검사는 업로드 전 검사를 대신하지 않습니다. 시험판이라면 prepare/check/publish 모두에 `--release-status prerelease`를 지정합니다.

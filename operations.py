@@ -46,11 +46,17 @@ ASSERTION_SCHEMA = {
                    "require_change": {"type": "boolean", "description": "Require an observed change from the pre-action baseline before equality can pass. Read-only resume assertions cannot recreate a lost baseline."}},
     "required": ["selector", "property", "equals"],
 }
+MENU_TARGET_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["path"], "properties": {
+    "path": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "object", "additionalProperties": False,
+        "required": ["name", "role"], "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "role": {"const": "MenuItem"}}}}}}
 OPERATION_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "properties": {
         "operation": {"enum": ["set_value", "select_option", "select_item", "set_checked",
-                                 "click", "double_click", "right_click", "press_key", "hotkey", "assert", "expand_menu"]},
+                                 "click", "double_click", "right_click", "press_key", "hotkey", "assert", "expand_menu", "menu_command"]},
+        "menu_target": dict(copy.deepcopy(MENU_TARGET_SCHEMA), description="Observed menu labels and hierarchy scoped to the current approved menu. Never an internal field Name or persisted native handle."),
+        "child_menu_target": copy.deepcopy(MENU_TARGET_SCHEMA),
         "selector": SELECTOR_SCHEMA,
         "image_target": {"type": "object", "description": "expand_menu only: recorded parent image. May pair with a fresh MenuItem selector only for hover into a logical child; matched native point must be inside its actual bounds. Never a desktop coordinate."},
         "child_selector": SELECTOR_SCHEMA,
@@ -144,10 +150,13 @@ def validate_assertions(assertions):
 
 
 def validate_step(step):
+    if isinstance(step, dict) and step.get("operation") == "menu_command":
+        from semantic_menus import validate_menu_command
+        return validate_menu_command(step)
     if isinstance(step, dict) and step.get("operation") == "expand_menu":
         from menu_expansion import validate_menu_expansion
         return validate_menu_expansion(step)
-    if isinstance(step, dict) and set(step) & {"image_target", "child_selector", "child_image_target", "child_window", "expansion_method", "expansion_key", "menu_depth"}:
+    if isinstance(step, dict) and set(step) & {"image_target", "menu_target", "child_menu_target", "child_selector", "child_image_target", "child_window", "expansion_method", "expansion_key", "menu_depth"}:
         raise OperationError("메뉴 전개 조건은 expand_menu에만 사용할 수 있습니다.", "invalid_menu_expansion")
     if not isinstance(step, dict) or set(step) - set(OPERATION_SCHEMA["properties"]):
         raise OperationError("작업 단계의 형식 또는 인자가 올바르지 않습니다.")
@@ -424,6 +433,9 @@ class Operations:
             raise OperationError("delivery_mode는 background 또는 foreground여야 합니다.")
         if self.runtime.mode != "uia":
             raise OperationError("검증 작업은 uia 세션에서만 사용할 수 있습니다.", "unsupported_mode")
+        if step["operation"] == "menu_command":
+            from semantic_menus import execute_menu_command
+            return execute_menu_command(self.runtime, step, target)
         if step["operation"] == "expand_menu":
             from menu_expansion import execute_menu_expansion
             return execute_menu_expansion(self.runtime, step, target, delivery_mode=delivery_mode)

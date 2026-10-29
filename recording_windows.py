@@ -165,8 +165,11 @@ def _disambiguate_windows(runtime, probe, owner, candidates, image_hint):
     return chosen
 
 
-def execute_window_wait(runtime, step, bindings, *, image_hint=None, exclude_window_ids=()):
+def execute_window_wait(runtime, step, bindings, *, image_hint=None, menu_hint=None, menu_budget_ms=4000, exclude_window_ids=()):
     validate_window_wait(step)
+    if menu_hint is not None:
+        from semantic_menus import validate_menu_target
+        validate_menu_target(menu_hint)
     if not isinstance(exclude_window_ids, (tuple, list, set, frozenset)) or any(type(value) is not int or value < 1 for value in exclude_window_ids):
         raise OperationError("제외할 창의 현재 식별자를 확인하세요.", "invalid_window_wait")
     began = time.monotonic()
@@ -230,7 +233,13 @@ def execute_window_wait(runtime, step, bindings, *, image_hint=None, exclude_win
                 "uia_only_controls_scanned": False,
             }
             result["candidates"] = [{key: row.get(key) for key in ("pid", "window_id", "title", "class_name")} for row in matches[:10]]
-            if len(matches) > 1:
+            if matches and menu_hint is not None:
+                from semantic_menus import choose_menu_window
+                selected = choose_menu_window(runtime, probe, owner, matches, menu_hint, timeout_ms=menu_budget_ms)
+                matches = [selected] if selected else []
+                result["disambiguation"] = "current_menu_path_unique"
+                result["observation_summary"]["uia_only_controls_scanned"] = True
+            elif len(matches) > 1:
                 selected = _disambiguate_windows(runtime, probe, owner, matches, image_hint)
                 if selected is None:
                     raise OperationError("같은 조건의 관련 팝업을 저장 이미지로 유일하게 구분하지 못했습니다.", "recording_window_ambiguous")
@@ -248,7 +257,7 @@ def execute_window_wait(runtime, step, bindings, *, image_hint=None, exclude_win
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 recovery = getattr(runtime, "recover_msaa_dropdown", None)
-                if image_hint and callable(recovery):
+                if menu_hint is None and image_hint and callable(recovery):
                     recovered = recovery(owner, rows, image_hint, probe)
                     runtime.check_active()
                     fresh = probe.snapshot()

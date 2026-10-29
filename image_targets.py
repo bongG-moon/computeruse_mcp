@@ -127,10 +127,18 @@ def validate_match(answer, image_target, screenshot_png):
         "size_relation":"same_size" if dx == dy == 0 else "small_border_difference" if max(abs(dx),abs(dy))<=4 else "size_changed",
         "dpi_change_proven":False, "screen_change_proven":False}
     details["frame_sha256"] = hashlib.sha256(screenshot_png.encode("ascii")).hexdigest()
-    for field in ("score", "second_score"):
+    for field in ("score", "second_score", "original_score", "appearance_score"):
         value = answer.get(field)
         if type(value) in {int, float} and math.isfinite(value) and 0 <= value <= 1:
             details[field] = round(value, 6)
+    if answer.get("appearance_verified") is True:
+        details["appearance_verified"] = True
+    if answer.get("appearance_rejected") == "foreground_ink_changed":
+        details["appearance_rejected"] = "foreground_ink_changed"
+    from local_result_details import project_appearance_diagnostic
+    appearance = project_appearance_diagnostic(answer.get("appearance_diagnostic"))
+    if appearance:
+        details["appearance_diagnostic"] = appearance
     if type(answer.get("candidate_count")) is int and 0 <= answer["candidate_count"] <= 100000:
         details["candidate_count"] = answer["candidate_count"]
     if type(answer.get("scale")) in {int, float} and math.isfinite(answer["scale"]) and .2 <= answer["scale"] <= 16:
@@ -354,14 +362,6 @@ def match_image(runtime, image_target, screenshot_png, *, allow_selection_normal
             candidate = validate_match(answer, target, screenshot_png)
         runtime.check_active()
         validated = {**candidate, "backend": answer.get("backend", "airtest-template-rgb") if backend == "airtest" else "native-rgb"}
-        if answer.get("appearance_verified") is True:
-            validated["appearance_verified"] = True
-            validated["original_score"] = answer.get("original_score")
-        if answer.get("appearance_rejected") in {"foreground_ink_changed"}:
-            validated["appearance_rejected"] = answer["appearance_rejected"]
-            appearance_score = answer.get("appearance_score")
-            if type(appearance_score) in (int, float) and 0 <= appearance_score <= 1:
-                validated["appearance_score"] = appearance_score
         # Uniqueness and detail rejection are final, never a reason to try a
         # more permissive engine. Only a genuinely absent target may fall back.
         if candidate["status"] != "not_found" or candidate.get("low_detail"):

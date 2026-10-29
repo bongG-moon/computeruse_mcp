@@ -415,10 +415,16 @@ def _selection_text_tints(frame, *, allow_selection_normalization=False):
     return allowed
 
 
-def _ink_agrees(pattern, current, anchor_y, *, allow_selection_normalization=False):
+def _ink_diagnostics(pattern, current, anchor_y, *, allow_selection_normalization=False):
+    """Return per-call measurements without changing any appearance gate.
+
+    Only scalar evidence is retained; no pixels, labels, coordinates or shared
+    last-error state escape this comparison. The first failing gate preserves
+    the original evaluation order even when later metrics are also available.
+    """
     cv2, np, _ = _load()
     if pattern.shape != current.shape:
-        return False
+        return {"accepted": False, "reason": "shape_mismatch", "scope": "whole_template"}
     a, _ = _appearance_frame(pattern, allow_selection_normalization=allow_selection_normalization)
     b, _ = _appearance_frame(current, allow_selection_normalization=allow_selection_normalization)
     ia = (255-a.astype(np.float32).mean(axis=2))
@@ -435,8 +441,7 @@ def _ink_agrees(pattern, current, anchor_y, *, allow_selection_normalization=Fal
     text_antialias = ((neutral_a & tint_b) | (neutral_b & tint_a) | (tint_a & tint_b))
     changed_color = ((colored_ink_a | colored_ink_b)
                      & (np.max(np.abs(colors_a-colors_b), axis=2) > 25) & ~text_antialias)
-    if int(changed_color.sum()) >= 2:
-        return False
+    changed_color_pixels = int(changed_color.sum())
     # A small changed glyph (e.g. an added decimal point) can disappear in
     # the aggregate Dice score. Preserve strong ink topology while allowing
     # one-pixel antialias fringes around the same strokes.
@@ -445,8 +450,16 @@ def _ink_agrees(pattern, current, anchor_y, *, allow_selection_normalization=Fal
     near_a = cv2.dilate(core_a.astype(np.uint8), kernel) != 0
     near_b = cv2.dilate(core_b.astype(np.uint8), kernel) != 0
     missing_ink = (core_a & ~near_b & (ib <= 35)) | (core_b & ~near_a & (ia <= 35))
-    if int(missing_ink.sum()) >= 2:
-        return False
+    missing_ink_pixels = int(missing_ink.sum())
+    diagnostic = {"accepted": True, "reason": "accepted", "scope": "whole_template",
+                  "changed_color_pixels": changed_color_pixels, "missing_ink_pixels": missing_ink_pixels}
+    def reject(reason, scope):
+        if diagnostic["accepted"]:
+            diagnostic.update(accepted=False, reason=reason, scope=scope)
+    if changed_color_pixels >= 2:
+        reject("colored_ink_changed", "whole_template")
+    if missing_ink_pixels >= 2:
+        reject("missing_ink", "whole_template")
     center = min(a.shape[0]-1, max(0, int(anchor_y*a.shape[0])))
     dark_bands = (_selection_bands(pattern, dark=True)+_selection_bands(current, dark=True)
                   if allow_selection_normalization else [])
@@ -454,28 +467,54 @@ def _ink_agrees(pattern, current, anchor_y, *, allow_selection_normalization=Fal
     # Dark inversion requires surrounding menu context. A whole blue banner
     # or single cropped status badge cannot be proved to be a selection.
     if dark_bands and any(start < 8 and stop > a.shape[0]-8 for start, stop, _, _ in dark_bands):
-        return False
+        reject("selection_context_missing", "whole_template")
     inverted = any(start <= center < stop for start, stop, _, _ in dark_bands)
     light = any(start <= center < stop for start, stop, _, _ in light_bands)
-    for left, right, minimum in ((ia, ib, .98),
-            (ia[max(0,center-8):center+9], ib[max(0,center-8):center+9], .95)):
+    diagnostic.update(clicked_dark_selection=inverted, clicked_light_selection=light)
+    for scope, left, right, minimum in (("whole_template", ia, ib, .98),
+            ("clicked_band", ia[max(0,center-8):center+9], ib[max(0,center-8):center+9], .95)):
         mask = (left > 35) | (right > 35)
-        if int(mask.sum()) < 12 or not (left > 35).any() or not (right > 35).any():
-            return False
+        metrics = {"ink_pixels": int(mask.sum()), "pattern_ink_pixels": int((left > 35).sum()),
+                   "current_ink_pixels": int((right > 35).sum()), "minimum_ink_pixels": 12,
+                   "minimum_dice": minimum, "maximum_mean_difference": 10,
+                   "maximum_contrast_difference": 40}
+        diagnostic[scope] = metrics
+        if metrics["ink_pixels"] < 12 or not metrics["pattern_ink_pixels"] or not metrics["current_ink_pixels"]:
+            metrics["accepted"] = False
+            metrics["reason"] = "insufficient_ink"
+            reject("insufficient_ink", scope)
+            continue
         dice = 2*float(np.minimum(left,right).sum())/max(1,float(left.sum()+right.sum()))
         difference = float(np.abs(left-right)[mask].mean())
+        correlation = float(cv2.matchTemplate(left.astype(np.float32), right.astype(np.float32),
+                                              cv2.TM_CCOEFF_NORMED)[0, 0])
+        contrast_difference = abs(float(np.percentile(left[left > 35], 90))
+                                  - float(np.percentile(right[right > 35], 90)))
+        metrics.update(dice=dice, mean_difference=difference,
+                       contrast_difference=contrast_difference)
+        if math.isfinite(correlation):
+            metrics["correlation"] = correlation
+        metrics["accepted"] = True
+        metrics["reason"] = "accepted"
+        metrics["selection_tolerance_used"] = False
         if dice < minimum or difference > 10:
-            correlation = float(cv2.matchTemplate(left.astype(np.float32), right.astype(np.float32),
-                                                  cv2.TM_CCOEFF_NORMED)[0, 0])
             # Selection color evidence must be on the clicked band; a blue
             # row elsewhere cannot relax this row's text or disabled contrast.
-            contrast = abs(float(np.percentile(left[left > 35], 90))
-                           - float(np.percentile(right[right > 35], 90))) <= 40
+            contrast = contrast_difference <= 40
             contrast_agrees = ((inverted and dice >= .85 and difference <= 35 and correlation >= .96)
                                or (light and dice >= .93 and difference <= 10 and correlation >= .99))
             if not (minimum == .95 and contrast and contrast_agrees and math.isfinite(correlation)):
-                return False
-    return True
+                metrics.update(accepted=False, reason="ink_metrics_changed")
+                reject("ink_metrics_changed", scope)
+            else:
+                metrics["selection_tolerance_used"] = True
+    return diagnostic
+
+
+def _ink_agrees(pattern, current, anchor_y, *, allow_selection_normalization=False):
+    """Compatibility wrapper; all diagnostics belong to the individual call."""
+    return _ink_diagnostics(pattern, current, anchor_y,
+        allow_selection_normalization=allow_selection_normalization)["accepted"]
 
 
 def match_candidates(image_target, screenshot_png, *, deadline=None, check_active=None,
@@ -518,23 +557,27 @@ def match_candidates(image_target, screenshot_png, *, deadline=None, check_activ
     result = _rgb_candidates(normalized, _appearance_png(screenshot_png,
         allow_selection_normalization=allow_selection_normalization), deadline=end, check_active=check_active)
     if result["status"] == "ambiguous":
-        return {**result, "backend": "airtest-light-background", "original_score": original.get("score")}
+        return {**result, "backend": "airtest-light-background", "original_score": original.get("score"),
+                "appearance_score": result.get("score")}
     if result["status"] != "matched" or result.get("template_clip"):
-        return original
+        return {**original, "original_score": original.get("score"), "appearance_score": result.get("score")}
     cv2, np, _ = _load()
     pattern = cv2.imdecode(np.frombuffer(base64.b64decode(target["template_png"]), dtype=np.uint8), cv2.IMREAD_COLOR)
     screen = cv2.imdecode(np.frombuffer(base64.b64decode(screenshot_png), dtype=np.uint8), cv2.IMREAD_COLOR)
     rect = result["rect"]; x,y,w,h = (rect[k] for k in ("x","y","width","height"))
     if pattern.shape[:2] != (h,w):
         pattern = cv2.resize(pattern, (w,h), interpolation=cv2.INTER_CUBIC)
-    if not _ink_agrees(pattern, screen[y:y+h,x:x+w], target["anchor"]["y"],
-                       allow_selection_normalization=allow_selection_normalization):
-        return {**original, "appearance_rejected": "foreground_ink_changed", "appearance_score": result.get("score")}
+    appearance = _ink_diagnostics(pattern, screen[y:y+h,x:x+w], target["anchor"]["y"],
+                                  allow_selection_normalization=allow_selection_normalization)
+    if not appearance["accepted"]:
+        return {**original, "appearance_rejected": "foreground_ink_changed", "appearance_score": result.get("score"),
+                "original_score": original.get("score"), "appearance_diagnostic": appearance}
     if check_active: check_active()
     dark_selection = allow_selection_normalization and (
         _selection_bands(pattern, dark=True) or _selection_bands(screen[y:y+h,x:x+w], dark=True))
     return {**result, "backend": "airtest-list-selection" if dark_selection else "airtest-light-background",
             "original_score": original.get("score"),
+            "appearance_score": result.get("score"), "appearance_diagnostic": appearance,
             "appearance_verified": True}
 
 

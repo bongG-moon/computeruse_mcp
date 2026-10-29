@@ -30,6 +30,8 @@ PICTURES = {"main": png(24, 16), "menu": png(16, 16), "submenu": png(20, 16)}
 
 def imported_draft():
     events, windows = recording()
+    events[-1]["native_target"] = {"pid": windows[1]["pid"], "window_id": windows[1]["window_id"],
+        "element": {"role": "MenuItem", "name": "Active sheet", "is_password": False}}
     main_id = windows[0]["owner_window_id"]
     pid = windows[0]["pid"]
     for event in events:
@@ -128,19 +130,55 @@ class SimulatedApplication:
             self.inputs.append(("root_context", target["pid"], target["window_id"]))
             self.inventory[self.menu] = self.row(self.menu, "menu")
         elif operation == "image_click" and target == self.target(self.submenu):
-            self.inputs.append(("Active sheet", target["pid"], target["window_id"]))
-            self.inventory.pop(self.submenu)
-            self.inventory.pop(self.menu)
-            self.export_status = "Export complete"
-            if self.write_export:
-                (self.folder / self.output_name).write_bytes(workbook_bytes([
-                    ["Family", "Generation"], ["Hybrid", str(self.generation)], ["Hybrid", str(self.generation)]]))
-            if self.uncertain_export:
-                return {"task_verified": False, "input_dispatched": None,
-                        "diagnostic": {"code": "popup_input_unknown"}}
+            return self.complete_export(target)
         else:
             raise AssertionError(f"unexpected fixture input {operation} {target}")
         return {"task_verified": False, "input_dispatched": True, "verification_deferred": True}
+
+    def complete_export(self, target):
+        self.inputs.append(("Active sheet", target["pid"], target["window_id"]))
+        self.inventory.pop(self.submenu)
+        self.inventory.pop(self.menu)
+        self.export_status = "Export complete"
+        if self.write_export:
+            (self.folder / self.output_name).write_bytes(workbook_bytes([
+                ["Family", "Generation"], ["Hybrid", str(self.generation)], ["Hybrid", str(self.generation)]]))
+        if self.uncertain_export:
+            return {"task_verified": False, "input_dispatched": None,
+                    "diagnostic": {"code": "popup_input_unknown"}}
+        return {"task_verified": False, "input_dispatched": True, "verification_deferred": True}
+
+    def observe_menu(self, target, *, timeout_ms=2000):
+        self.check_active()
+        self.native_reads += 1
+        self.calls.append(("observe_menu", copy.deepcopy(target)))
+        if target["pid"] != self.pid or target["window_id"] not in self.inventory:
+            raise OperationError("fixture menu missing", "menu_target_unavailable")
+        names = ["Export to excel"] if target["window_id"] == self.menu else self.menu_order if target["window_id"] == self.submenu else []
+        parent = target["window_id"] == self.menu
+        rows = [{"index": index, "parent_index": None, "name": name, "role": "MenuItem",
+            "visible": True, "enabled": True, "has_children": parent,
+            "expansion_state": "expanded" if parent and self.submenu in self.inventory else "collapsed" if parent else "leaf",
+            "supported_actions": ["expand"] if parent else ["invoke"],
+            "bounds": {"x": 30, "y": 30+index*25, "width": 100, "height": 25},
+            "locator": {"provider": "uia_raw", "runtime_id": [self.generation, index]},
+            "evidence": {"recorded_fixture": True}} for index, name in enumerate(names)]
+        return {"target": copy.deepcopy(target), "read_only": True, "authorizes_input": False,
+            "sources": {"uia_raw": {"status": "ok", "complete": True, "truncated": False, "elements": rows}}}
+
+    def menu_action(self, target, menu_target, method, *, timeout_ms=10000):
+        from semantic_menus import resolve_menu
+        self.check_active()
+        self.calls.append(("menu_action", {"method": method, **copy.deepcopy(target)}))
+        current = resolve_menu(self.observe_menu(target), menu_target, purpose="command" if method == "command" else "parent")
+        name = current["item"]["name"]
+        if method == "command" and name == "Active sheet" and target == self.target(self.submenu):
+            return self.complete_export(target)
+        if method == "expand" and name == "Export to excel" and target == self.target(self.menu):
+            self.inputs.append(("expand_parent", target["pid"], target["window_id"]))
+            self.inventory[self.submenu] = self.row(self.submenu, "submenu")
+            return {"input_dispatched": True}
+        raise AssertionError("unexpected semantic menu input")
 
     def expand_menu_once(self, target, request):
         if target != self.target(self.menu) or self.match(request["image_target"], self.picture(target))["status"] != "matched":

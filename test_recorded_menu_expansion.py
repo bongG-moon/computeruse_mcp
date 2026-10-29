@@ -39,6 +39,67 @@ class RecordedMenuExpansionTests(unittest.TestCase):
     def draft(self):
         return ProcessDraft([{"program_id": "editor", **TARGET, "label": "Fixture"}])
 
+    def _unfinished_physical_menu(self, *, cancel_to_main=False):
+        draft = self.draft()
+        draft.recorded([image_event("main")])
+        existing_steps, existing_labels = copy.deepcopy((draft.steps, draft.labels))
+        events, windows = recording()
+        events = events[:2]
+        if cancel_to_main:
+            events.append(image_event("main"))
+        original = copy.deepcopy((events, windows))
+
+        draft.recorded(events, windows=windows, auto_popup=True)
+
+        self.assertEqual((events, windows), original)
+        self.assertEqual(draft.steps[:len(existing_steps)], existing_steps)
+        self.assertEqual(draft.labels[:len(existing_labels)], existing_labels)
+        imported = draft.steps[len(existing_steps):]
+        repairs = [row for row in imported if row["operation"] == "manual_entry"]
+        self.assertEqual(len(repairs), 1)
+        self.assertEqual(repairs[0]["manual_reason"], "menu_expansion_unverified")
+        self.assertEqual(repairs[0]["image_target"]["template_png"], events[1]["template_png"])
+        self.assertEqual(sum(row["operation"] == "image_right_click" for row in imported), 1)
+        self.assertEqual(sum(row["operation"] == "image_click" for row in imported), int(cancel_to_main))
+        self.assertFalse(any(row["operation"] in {"expand_menu", "menu_command"}
+                             or row.get("window_ref") == "submenu" for row in imported))
+        self.assertIn("menu_expansion_unverified", draft.recording_warnings)
+        self.assertEqual(draft.readiness()["unresolved_steps"], 1)
+        self.assertFalse(draft.readiness()["runnable"])
+        draft.validate(allow_pending=True)
+        return draft
+
+    def test_physical_menu_recording_can_end_without_a_child_selection(self):
+        self._unfinished_physical_menu()
+
+    def test_cancelled_physical_menu_keeps_later_main_click_and_existing_steps(self):
+        self._unfinished_physical_menu(cancel_to_main=True)
+
+    def test_unfinished_physical_menu_saves_and_reopens_as_a_nonexecutable_draft(self):
+        from server import TaskStore
+        from workflows import WorkflowError, render_steps
+        draft = self._unfinished_physical_menu()
+        with tempfile.TemporaryDirectory() as directory:
+            config = {"programs": [{"id": "editor"}]}
+            store = TaskStore(directory, config)
+            review = {key: draft.recording_review()[key]
+                      for key in ("partial", "warning_codes", "acknowledged")}
+            saved = store.save({"name": "Unfinished menu", "instructions": "Complete the missing selection",
+                "expected": "Explicit output condition", "program_ids": ["editor"],
+                "steps": draft.steps, "variables": {}, "recording_review": review,
+                "draft": draft.draft_metadata()})
+            reopened = TaskStore(directory, config).get(saved["id"])
+            self.assertEqual(reopened, saved)
+            restored = ProcessDraft([{"program_id": "editor", **TARGET, "label": "Fixture"}], reopened)
+            self.assertEqual(restored.steps, saved["steps"])
+            self.assertEqual(restored.labels, draft.labels)
+            self.assertEqual(restored.recording_review(), draft.recording_review())
+            self.assertFalse(restored.recording_review()["acknowledged"])
+            self.assertEqual(restored.readiness()["unresolved_steps"], 1)
+            self.assertFalse(restored.readiness()["runnable"])
+            with self.assertRaises(WorkflowError):
+                render_steps(reopened, {})
+
     def test_hover_parent_is_kept_before_child_binding_and_leaf(self):
         draft = self.draft(); events, windows = recording()
         draft.recorded(events, windows=windows, auto_popup=True)
@@ -61,8 +122,8 @@ class RecordedMenuExpansionTests(unittest.TestCase):
         for token in ('"pid"', '"window_id"', '"native_target"', '"parent_identity"', 'transient-only-7'):
             self.assertNotIn(token, serialized)
 
-    def test_missing_transition_or_capture_preserves_manual_step(self):
-        for field in ("template_png", "menu_evidence", "native_target"):
+    def test_missing_transition_or_native_evidence_preserves_manual_step(self):
+        for field in ("menu_evidence", "native_target"):
             with self.subTest(field=field):
                 draft = self.draft(); events, windows = recording()
                 events[1].pop(field)
@@ -73,6 +134,14 @@ class RecordedMenuExpansionTests(unittest.TestCase):
                 self.assertIn("menu_expansion_unverified", draft.recording_warnings)
                 row = next(row for row in draft.summaries() if row["requires_input"])
                 self.assertFalse(row["repairable"])
+
+    def test_observed_semantic_parent_does_not_require_hover_template(self):
+        draft = self.draft(); events, windows = recording()
+        events[1].pop("template_png")
+        draft.recorded(events, windows=windows)
+        expansion = next(row for row in draft.steps if row["operation"] == "expand_menu")
+        self.assertIn("menu_target", expansion)
+        self.assertNotIn("image_target", expansion)
 
     def test_unproven_child_and_changed_input_epoch_are_not_guessed(self):
         for change in ("child_ref", "input_epoch", "foreign_native", "child_image"):
@@ -115,7 +184,7 @@ class RecordedMenuExpansionTests(unittest.TestCase):
         self.assertEqual(expansion["child_selector"]["within"], expansion["selector"])
         self.assertNotIn("child_window", expansion)
         self.assertEqual(sum(row["operation"] == "wait_for_window" for row in draft.steps), 1)
-        self.assertEqual(draft.steps[-2]["operation"], "image_click")
+        self.assertEqual(draft.steps[-2]["operation"], "menu_command")
 
     def test_logical_transition_does_not_guess_unobserved_active_sheet(self):
         draft = self.draft(); events, windows = recording()

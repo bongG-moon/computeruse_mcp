@@ -98,6 +98,7 @@ ACTION_LABELS = {"click": "클릭", "double_click": "두 번 클릭", "right_cli
 ACTION_LABELS["wait_for_state"] = "완료 조건이 될 때까지 대기"
 ACTION_LABELS["wait_for_window"] = "관련 팝업 연결"
 ACTION_LABELS["expand_menu"] = "하위 메뉴 펼치기"
+ACTION_LABELS["menu_command"] = "메뉴 명령 실행"
 ACTION_LABELS.update({mapped: ACTION_LABELS.get(action, "스크롤") + " (이미지)" for action, mapped in IMAGE_ACTIONS.items()})
 ACTION_LABELS["manual_entry"] = "기록 내용 확인 필요"
 MANUAL_REASONS = {"unknown_input": "입력할 내용을 직접 지정하세요.",
@@ -227,6 +228,11 @@ class ProcessDraft:
                 "role": element["role"], "recognition": "uia", "actions": suggested_operations(element)}
         self.selections[identity] = {**view, "selector": selector,
                                     "target": (target["program_id"], target.get("window_ref", "main"))}
+        if element.get("role") == "MenuItem":
+            from recorded_menus import recorded_menu_target
+            menu_target = recorded_menu_target(native)
+            if menu_target is not None:
+                self.selections[identity]["menu_target"] = menu_target
         return copy.deepcopy(view)
 
     def remember_image(self, target, native):
@@ -246,6 +252,36 @@ class ProcessDraft:
                 "actions": list(IMAGE_ACTIONS), "thumbnail_png": image["template_png"]}
         self.selections[identity] = {**view, "image_target": image,
                                     "target": (target["program_id"], target.get("window_ref", "main"))}
+        return copy.deepcopy(view)
+
+    def remember_menu(self, target, native, observation):
+        """Corroborate an explicit menu re-pick without inventing a Driver handle."""
+        from learning_picker import _contains
+        from recorded_menus import recorded_menu_target, _menu_selector
+        from semantic_menus import resolve_menu
+        exact = {key: target[key] for key in ("pid", "window_id")}
+        element = native.get("element") if isinstance(native, dict) else None
+        if (not isinstance(native, dict) or native.get("status") != "selected" or native.get("human_confirmed") is not True
+                or any(native.get(key) != value for key, value in exact.items())
+                or not isinstance(element, dict) or element.get("is_password") is not False):
+            raise OperationError("선택한 메뉴가 현재 연결한 창의 확인된 대상이 아닙니다.", "target_mismatch")
+        actual = observation.get("target", observation) if isinstance(observation, dict) else {}
+        if (any(actual.get(key) != value for key, value in exact.items())
+                or observation.get("read_only") is not True or observation.get("authorizes_input") is not False):
+            raise OperationError("최신 메뉴 관찰의 대상과 읽기 범위를 확인하지 못했습니다.", "menu_observation_invalid")
+        menu_target = recorded_menu_target(native)
+        if menu_target is None:
+            raise OperationError("선택한 실제 메뉴의 이름 경로가 없습니다.", "invalid_menu_target")
+        matched = resolve_menu(observation, menu_target, purpose="parent")
+        current_bounds = matched["item"]["bounds"]
+        if (not _contains(native.get("bounds"), native.get("point"))
+                or native["bounds"] != current_bounds or not _contains(current_bounds, native["point"])):
+            raise OperationError("선택한 메뉴의 화면 위치가 최신 관찰과 다릅니다. 다시 선택하세요.", "picker_geometry_changed")
+        identity = uuid.uuid4().hex
+        view = {"selection_id": identity, "label": menu_target["path"][-1]["name"],
+                "role": "MenuItem", "recognition": "uia", "actions": ["expand_menu"]}
+        self.selections[identity] = {**view, "menu_target": copy.deepcopy(menu_target),
+            "selector": _menu_selector(menu_target), "target": (target["program_id"], target.get("window_ref", "main"))}
         return copy.deepcopy(view)
 
     @staticmethod
@@ -389,7 +425,7 @@ class ProcessDraft:
                 if parent is None: return False
                 source = (source[0], parent)
             return False
-        final_values, terminal_checks = {}, []
+        final_values, terminal_checks, menu_commands = {}, [], {}
         for index, event in enumerate(events):
             if isinstance(event, dict) and self._event_evidence(event):
                 binding = (event.get("program_id"), event.get("window_ref", "main"))
@@ -437,6 +473,13 @@ class ProcessDraft:
                 try:
                     expansion, label = recorded_menu_step(event, event_index, events, target, discovered, snapshots or {})
                     proposed.append(expansion); labels.append(label)
+                    if expansion.get("child_menu_target"):
+                        child_ref = event["menu_evidence"].get("child_window_ref", target.get("window_ref", "main"))
+                        child_key = (target["program_id"], child_ref)
+                        following_index = next((i for i in range(event_index+1, len(events))
+                            if isinstance(events[i], dict) and (events[i].get("program_id"), events[i].get("window_ref", "main")) == child_key), None)
+                        if following_index is not None:
+                            menu_commands[following_index] = expansion["child_menu_target"]
                     # Child visibility is a concrete automatic condition. Do
                     # not interrupt a transient menu with a human review here.
                     continue
@@ -449,6 +492,19 @@ class ProcessDraft:
                     event.update(operation="manual_entry", reason="menu_expansion_unverified")
                     kind = "manual_entry"
                     if "menu_expansion_unverified" not in warnings: warnings.append("menu_expansion_unverified")
+            if event_index in menu_commands:
+                from recorded_menus import recorded_menu_command
+                command = recorded_menu_command(event, target, menu_commands[event_index])
+                if command is not None:
+                    proposed.append(command); labels.append(command["menu_target"]["path"][-1]["name"])
+                    if binding_key in closed and event_index == last_event[binding_key]:
+                        check = self.checkpoint(targets[(target["program_id"], closed[binding_key])])
+                        check["return_from"] = target["window_ref"]
+                    else:
+                        check = self.checkpoint(target)
+                    check["message"] = "메뉴 명령 실행 뒤 실제 업무 결과와 필요한 파일 생성을 별도로 확인하세요."
+                    proposed.append(check); labels.append("메뉴 명령 결과 확인")
+                    continue
             semantic_failed = False
             semantic_error = None
             method_unverified = event.get("input_method") == "keyboard_unverified" or event.get("reason") == "recording_method_unverified"
@@ -548,11 +604,12 @@ class ProcessDraft:
             for index in range(len(self.steps), len(proposed)-1):
                 item, following = proposed[index], proposed[index+1]
                 if (item.get("review_origin") == "recording_generated" and item.get("opened_from")
-                        and following.get("image_target") and following.get("operation") != "manual_entry"
+                        and (following.get("image_target") or following.get("operation") == "expand_menu" and following.get("menu_target"))
+                        and following.get("operation") != "manual_entry"
                         and (item.get("program_id"), item.get("window_ref")) ==
                             (following.get("program_id"), following.get("window_ref"))):
-                    item.update(review_mode="popup_image", image_target=copy.deepcopy(following["image_target"]),
-                        message="관련 팝업 안에서 다음 녹화 대상 이미지가 유일하게 보이는지 확인합니다. 업무 결과 성공 판정은 아닙니다.")
+                    from checkpoint_groups import popup_condition
+                    popup_condition(item, following)
         self.validate(proposed, allow_pending=True)
         self.steps, self.labels = proposed, labels
         for key in connected:
@@ -619,10 +676,46 @@ class ProcessDraft:
         view = self.remember_image(target, native)
         proposed = copy.deepcopy(self.steps)
         proposed[index]["image_target"] = copy.deepcopy(self.selections[view["selection_id"]]["image_target"])
-        self._sync_popup_condition(proposed, index)
+        affected = self._sync_popup_condition(proposed, index, self.steps)
         self.validate(proposed, allow_pending=True)
         self.steps = proposed
         self.labels[index] = "다시 선택한 이미지"
+        return affected
+
+    @staticmethod
+    def _picked_menu_target(selected):
+        from semantic_menus import validate_menu_target
+        if selected.get("recognition") == "image":
+            raise OperationError("실제 메뉴 항목을 선택하세요.")
+        if selected.get("menu_target"):
+            return validate_menu_target(selected["menu_target"])
+        selector, chain = selected.get("selector", {}), []
+        current = selector
+        while isinstance(current, dict):
+            if current.get("role") == "MenuItem":
+                if not isinstance(current.get("name"), str) or not current["name"].strip():
+                    raise OperationError("실제 이름이 관찰된 메뉴만 지정할 수 있습니다.")
+                chain.insert(0, {"role": "MenuItem", "name": current["name"]})
+            current = current.get("within")
+        if selector.get("role") != "MenuItem" or not chain:
+            raise OperationError("연결할 실제 메뉴 항목을 선택하세요.")
+        return validate_menu_target({"path": chain})
+
+    @staticmethod
+    def _upgrade_menu_target(step, selected):
+        """Only an explicit native re-pick can add semantics to a legacy step."""
+        menu_target = ProcessDraft._picked_menu_target(selected)
+        if "child_window" not in step:
+            child, parent = step.get("child_selector", {}), step.get("selector", {})
+            if (child.get("role") != "MenuItem" or not isinstance(child.get("name"), str)
+                    or not child["name"].strip() or parent.get("role") != "MenuItem"
+                    or "within" in child and child["within"] != parent):
+                raise OperationError("기존 논리 자식의 이름과 부모 관계를 확인할 수 없습니다. 해당 메뉴 구간을 다시 녹화하세요.", "menu_expansion_unverified")
+            step["child_menu_target"] = {"path": [*copy.deepcopy(menu_target["path"]),
+                {"role": "MenuItem", "name": child["name"]}]}
+        # Physical children keep their exact saved window and image condition.
+        # A new parent selection is not evidence for an image-only child label.
+        step["menu_target"] = menu_target
 
     def repair(self, index, selection, *, action=None, value=None):
         """Replace one target without deleting its popup binding or neighbours."""
@@ -633,22 +726,55 @@ class ProcessDraft:
             raise OperationError(MANUAL_REASONS["menu_expansion_unverified"], "menu_expansion_unverified")
         if previous.get("manual_reason") == "protected_input":
             raise OperationError("보호된 입력은 녹화 단계로 복구하지 않습니다. 해당 입력은 직접 처리하세요.")
-        if previous["operation"] != "manual_entry" and not any(k in previous for k in ("image_target", "selector")):
+        if previous.get("operation") == "checkpoint" and previous.get("review_mode") == "popup_image":
+            selected = self.selection(selection["selection_id"], self.targets[(previous["program_id"], previous.get("window_ref", "main"))])
+            if selected.get("recognition") != "image":
+                if (action not in (None, "checkpoint") or index+1 >= len(self.steps)
+                        or self.steps[index+1].get("operation") != "expand_menu"):
+                    raise OperationError("의미 기반 확인으로 바꾸려면 연결된 부모 메뉴 항목을 선택하세요.")
+                proposed = copy.deepcopy(self.steps)
+                self._upgrade_menu_target(proposed[index+1], selected)
+                affected = self._sync_popup_condition(proposed, index+1, self.steps, promote_menu=True)
+                if proposed[index].get("review_mode") != "menu_semantic":
+                    raise OperationError("자동 확인과 부모 메뉴의 연결을 증명하지 못했습니다.", "popup_condition_link_mismatch")
+                self.validate(proposed, allow_pending=True)
+                self.steps, self.labels[index+1] = proposed, selected["label"]
+                return affected
+            proposed = copy.deepcopy(self.steps)
+            proposed[index]["image_target"] = copy.deepcopy(selected["image_target"])
+            affected = self._sync_popup_condition(proposed, index, self.steps)
+            self.validate(proposed, allow_pending=True)
+            self.steps, self.labels[index] = proposed, selected["label"]
+            return affected
+        if previous["operation"] != "manual_entry" and not any(k in previous for k in ("image_target", "selector", "menu_target")):
             raise OperationError("동작할 대상이 있는 단계를 선택하세요.")
         target = self.targets[(previous["program_id"], previous.get("window_ref", "main"))]
         selected = self.selection(selection["selection_id"], target)
+        if (previous.get("menu_target") or previous["operation"] == "expand_menu") and selected.get("recognition") != "image":
+            if action not in (None, previous["operation"]):
+                raise OperationError("메뉴 대상을 다시 지정할 때 기존 동작 종류를 유지하세요.")
+            proposed = copy.deepcopy(self.steps)
+            promote_menu = not previous.get("menu_target") and previous["operation"] == "expand_menu"
+            if promote_menu:
+                self._upgrade_menu_target(proposed[index], selected)
+            else:
+                proposed[index]["menu_target"] = self._picked_menu_target(selected)
+            affected = self._sync_popup_condition(proposed, index, self.steps, promote_menu=promote_menu)
+            self.validate(proposed, allow_pending=True)
+            self.steps, self.labels[index] = proposed, selected["label"]
+            return affected
         if previous["operation"] == "expand_menu":
             if action not in (None, "expand_menu"):
                 raise OperationError("메뉴 펼침을 최종 명령 클릭으로 바꿀 수 없습니다.")
             if selected.get("recognition") != "image" or "image_target" not in previous:
                 raise OperationError("메뉴 계층을 유지하려면 부모 메뉴의 이미지를 다시 지정하거나 해당 메뉴 구간을 녹화하세요.")
             proposed = copy.deepcopy(self.steps)
-            if "child_window" in previous: proposed[index].pop("selector", None)
+            if "child_window" in previous and "menu_target" not in previous: proposed[index].pop("selector", None)
             proposed[index]["image_target"] = copy.deepcopy(selected["image_target"])
-            self._sync_popup_condition(proposed, index)
+            affected = self._sync_popup_condition(proposed, index, self.steps)
             self.validate(proposed, allow_pending=True)
             self.steps, self.labels[index] = proposed, selected["label"]
-            return
+            return affected
         original = next((name for name, mapped in IMAGE_ACTIONS.items() if mapped == previous["operation"]), previous.get("repair_action", previous["operation"]))
         chosen = action or original
         if chosen not in {"click", "double_click", "right_click", "set_value", "select_option", "set_checked", "press_key", "hotkey", "scroll", "wait_for_element"}:
@@ -656,7 +782,7 @@ class ProcessDraft:
         if previous["operation"] != "manual_entry" and chosen != original:
             raise OperationError("대상 재지정은 기존 동작을 유지합니다.")
         step = {"program_id": target["program_id"], "window_ref": target.get("window_ref", "main"), "operation": chosen}
-        for key in ("step_id", "value", "key", "keys", "direction", "amount", "timeout_ms", "expect", "checked", "option_order", "completion_mode"):
+        for key in ("step_id", "precondition_step_id", "value", "key", "keys", "direction", "amount", "timeout_ms", "expect", "checked", "option_order", "completion_mode"):
             if key in previous: step[key] = copy.deepcopy(previous[key])
         if chosen == "set_value" and previous["operation"] == "manual_entry":
             if value is None: raise OperationError("다시 실행할 때 넣을 입력 내용을 직접 지정하세요.")
@@ -676,42 +802,122 @@ class ProcessDraft:
             if chosen in {"click", "double_click", "right_click"} and not step.get("expect"):
                 step["completion_mode"] = "human"
         proposed = copy.deepcopy(self.steps); proposed[index] = step
-        self._sync_popup_condition(proposed, index)
+        affected = self._sync_popup_condition(proposed, index, self.steps)
         self.validate(proposed, allow_pending=True)
         self.steps = proposed; self.labels[index] = selected["label"]
         issue = previous.get("step_id")
         if issue in self._target_warning_steps:
             self._target_warning_steps.remove(issue)
         self._resolve_target_warnings()
+        return affected
 
     @staticmethod
-    def _sync_popup_condition(proposed, index):
-        """Retarget the generated precondition with its next action atomically."""
+    def _sync_popup_condition(proposed, index, previous=None, *, promote_menu=False):
+        """Retarget either side of a proven pair, never an unrelated neighbour."""
+        from checkpoint_groups import AUTO_POPUP_MODES, validate_pair_links
+        baseline = proposed if previous is None else previous
+        if previous is not None:
+            try:
+                validate_pair_links(previous)
+            except ValueError as error:
+                raise OperationError(str(error), "popup_condition_link_mismatch") from error
+        changed = {index}
+        source = baseline[index]
+        check_index = index if source.get("operation") == "checkpoint" and source.get("review_mode") in AUTO_POPUP_MODES else index-1
+        if 0 <= check_index < len(proposed)-1:
+            old_check, old_action = baseline[check_index:check_index+2]
+            check, action = proposed[check_index:check_index+2]
+            key = lambda row: (row.get("program_id"), row.get("window_ref", "main"))
+            mode = old_check.get("review_mode")
+            field = "menu_target" if mode == "menu_semantic" else "image_target"
+            eligible = (old_check.get("operation") == "checkpoint" and mode in AUTO_POPUP_MODES
+                        and old_check.get("review_origin") in {"recording_generated", "user_grouped"}
+                        and key(old_check) == key(old_action))
+            explicit = "linked_step_id" in old_check or "precondition_step_id" in old_action
+            linked = (old_check.get("linked_step_id") == old_action.get("step_id")
+                      and old_action.get("precondition_step_id") == old_check.get("step_id")) if explicit else (
+                          mode == "popup_image" and bool(old_check.get(field)) and old_check.get(field) == old_action.get(field))
+            if eligible and not linked:
+                raise OperationError("자동 확인과 동작의 연결 또는 기존 대상이 다릅니다. 두 단계를 검토한 뒤 다시 지정하세요.", "popup_condition_link_mismatch")
+            if eligible and linked:
+                if promote_menu and mode == "popup_image" and action.get("operation") == "expand_menu" and action.get("menu_target"):
+                    from checkpoint_groups import popup_condition
+                    popup_condition(check, action)
+                    changed.update((check_index, check_index+1))
+                elif index == check_index:
+                    if not check.get(field):
+                        raise OperationError("연결된 확인 대상이 없습니다.", "popup_condition_link_mismatch")
+                    action[field] = copy.deepcopy(check[field])
+                    changed.add(check_index+1)
+                elif action.get(field):
+                    check[field] = copy.deepcopy(action[field])
+                    changed.add(check_index)
+                elif mode == "popup_image":
+                    # An explicit target repair may restore human review; it
+                    # never silently promotes an existing human requirement.
+                    check["review_mode"] = "human"
+                    check.pop("image_target", None)
+                    check.pop("linked_step_id", None)
+                    action.pop("precondition_step_id", None)
+                    check["message"] = "대상을 요소 방식으로 바꿨습니다. 열린 팝업과 다음 동작 대상을 확인하세요."
+                    changed.add(check_index)
+                else:
+                    raise OperationError("메뉴 의미 확인과 연결된 메뉴 경로를 함께 유지해야 합니다.", "popup_condition_link_mismatch")
+        for changed_index in list(changed):
+            current, original = proposed[changed_index], baseline[changed_index]
+            if current.get("operation") != "expand_menu" or current.get("menu_target") == original.get("menu_target"):
+                continue
+            path = current["menu_target"]["path"]
+            selector = None
+            for part in path:
+                selector = {**part, **({"within": selector} if selector is not None else {})}
+            current["selector"] = selector
+            if not original.get("menu_target") and current.get("child_menu_target") and "child_window" not in current:
+                child_selector = None
+                for part in current["child_menu_target"]["path"]:
+                    child_selector = {**part, **({"within": child_selector} if child_selector is not None else {})}
+                current["child_selector"] = child_selector
+            if "child_window" not in current and current.get("child_menu_target") and original.get("menu_target"):
+                old_path = original["menu_target"]["path"]
+                child_path = original["child_menu_target"]["path"]
+                if child_path[:len(old_path)] != old_path:
+                    raise OperationError("저장된 부모와 자식 메뉴 경로가 일치하지 않습니다.", "popup_condition_link_mismatch")
+                current["child_menu_target"] = {"path": [*copy.deepcopy(path), *copy.deepcopy(child_path[len(old_path):])]}
+                if changed_index+1 < len(proposed) and proposed[changed_index+1].get("operation") == "menu_command":
+                    leaf = proposed[changed_index+1]
+                    if (leaf.get("program_id"), leaf.get("window_ref", "main")) != (current.get("program_id"), current.get("window_ref", "main")) or leaf.get("menu_target") != original["child_menu_target"]:
+                        raise OperationError("부모 메뉴와 다음 최종 명령의 기존 경로가 다릅니다.", "popup_condition_link_mismatch")
+                    leaf["menu_target"] = copy.deepcopy(current["child_menu_target"])
+                    changed.add(changed_index+1)
+        if proposed[index].get("operation") == "menu_command" and previous is not None:
+            parent_index = index-1
+            if parent_index >= 0 and proposed[parent_index].get("operation") == "wait_for_window":
+                parent_index -= 1
+            if parent_index >= 0 and proposed[parent_index].get("operation") == "expand_menu":
+                parent, old_parent = proposed[parent_index], baseline[parent_index]
+                if old_parent.get("child_menu_target") != baseline[index].get("menu_target"):
+                    raise OperationError("부모의 자식 확인과 최종 명령 경로가 다릅니다.", "popup_condition_link_mismatch")
+                parent["child_menu_target"] = copy.deepcopy(proposed[index]["menu_target"])
+                changed.add(parent_index)
         if index >= 2:
             expansion, wait, action = proposed[index-2:index+1]
+            original_expansion, _, original_action = baseline[index-2:index+1]
             if (expansion.get("operation") == "expand_menu" and wait.get("operation") == "wait_for_window"
                     and action.get("image_target") and action.get("operation") != "manual_entry"
                     and expansion.get("program_id") == wait.get("program_id") == action.get("program_id")
                     and wait.get("window_ref") == action.get("window_ref", "main")
-                    and expansion.get("child_window") == {key: wait.get(key) for key in ("title", "class_name")}):
+                    and expansion.get("child_window") == {key: wait.get(key) for key in ("title", "class_name")}
+                    and (previous is None or original_expansion.get("child_image_target") == original_action.get("image_target"))):
                 # Keep the observed child condition tied to the retargeted
                 # next input, in this draft/revision only.
                 expansion["child_image_target"] = copy.deepcopy(action["image_target"])
-        if index < 1: return
-        check, action = proposed[index-1], proposed[index]
-        if (check.get("operation") != "checkpoint" or check.get("review_mode") != "popup_image"
-                or check.get("review_origin") not in {"recording_generated", "user_grouped"}
-                or (check.get("program_id"), check.get("window_ref", "main")) !=
-                   (action.get("program_id"), action.get("window_ref", "main"))):
-            return
-        if action.get("image_target"):
-            check["image_target"] = copy.deepcopy(action["image_target"])
-        else:
-            # A UIA target cannot prove the previous image condition. Retain
-            # review rather than silently approving or retaining a stale image.
-            check["review_mode"] = "human"
-            check.pop("image_target", None)
-            check["message"] = "대상을 요소 방식으로 바꿨습니다. 열린 팝업과 다음 동작 대상을 확인하세요."
+                changed.add(index-2)
+        try:
+            validate_pair_links(proposed)
+        except ValueError as error:
+            raise OperationError(str(error), "popup_condition_link_mismatch") from error
+        return [{"index": i, "step_id": proposed[i].get("step_id"), "operation": proposed[i]["operation"]}
+                for i in sorted(changed)]
 
     def edit(self, payload):
         """Edit one authored step; image bytes and untouched fields never round-trip through the UI."""
@@ -736,6 +942,11 @@ class ProcessDraft:
             step["review_mode"] = payload["review_mode"]
             step["review_origin"] = "explicit"
             step.pop("image_target", None)
+            step.pop("menu_target", None)
+            linked_id = step.pop("linked_step_id", None)
+            for other in proposed:
+                if other.get("step_id") == linked_id and other.get("precondition_step_id") == step.get("step_id"):
+                    other.pop("precondition_step_id", None)
             step.pop("review_after", None)
         if operation == "manual_entry":
             if set(payload) != {"index", "value"}: raise OperationError("먼저 확인되지 않은 입력 내용을 지정하세요.")
@@ -745,7 +956,7 @@ class ProcessDraft:
         if "value" in payload:
             if field is None: raise OperationError("이 단계에는 수정할 입력값이 없습니다.")
             step[field] = _text(payload["value"], "입력 내용", 16000, empty=True)
-            if operation == "checkpoint" and step.get("review_mode") != "popup_image":
+            if operation == "checkpoint" and step.get("review_mode") not in {"popup_image", "menu_semantic"}:
                 # An authored review message is an explicit requirement even
                 # when the user keeps the existing human/visual mode.
                 step["review_origin"] = "explicit"
@@ -958,6 +1169,11 @@ class ProcessDraft:
                 detail = ("부모 펼침 → 자식 메뉴 재관찰 (" + step["expansion_method"] + ") · "
                           + ("별도 팝업" if "child_window" in step else "같은 창의 논리 자식")
                           + " · 최종 명령과 파일 생성은 별도 확인")
+            if action == "menu_command":
+                detail = " → ".join(part["name"] for part in step["menu_target"]["path"]) + " | 실제 명령 결과는 다음 확인에서 검증"
+            if step.get("review_mode") == "menu_semantic":
+                action_label = "부모 메뉴 상태 확인"
+                detail = " → ".join(part["name"] for part in step["menu_target"]["path"]) + " | 표시와 사용 가능 상태 확인"
             if step.get("review_mode") == "deferred_visual":
                 final_index = next((i+1 for i, row in enumerate(self.steps) if row.get("step_id") == step.get("review_after")), "?")
                 action_label = "조건 묶음 확인 대기"
@@ -971,7 +1187,7 @@ class ProcessDraft:
             rows.append({"index": index, "program": target["label"], "label": label, "action": action,
                          "action_label": action_label, "recognition": "image_candidate" if candidate else "image" if "image_target" in step else "unresolved" if action == "manual_entry" else "uia",
                          "requires_input": action == "manual_entry", "editable_input": editable_input, "detail": detail,
-                         "repairable": (action == "manual_entry" or "image_target" in step or "selector" in step) and step.get("manual_reason") not in {"protected_input", "menu_expansion_unverified"},
+                         "repairable": (action == "manual_entry" or "image_target" in step or "selector" in step or "menu_target" in step) and step.get("manual_reason") not in {"protected_input", "menu_expansion_unverified"},
                          "repair_action": step.get("repair_action", ""),
                          **({"input_target_candidate": copy.deepcopy(INPUT_CANDIDATE_PROOF)} if candidate else {}),
                          "summary": f"{index+1}. {action_label} · {label} · {detail}"})
@@ -1244,7 +1460,7 @@ class ProcessEditors:
             if set(payload) - {"index", "action", "value", "method"} or payload.get("method", "auto") not in ("auto", "image") or type(index) is not int or not 0 <= index < len(draft.steps) or not draft.summaries()[index]["repairable"]:
                 raise OperationError("보완이 필요한 단계 또는 이미지 동작을 선택하세요.")
             step = draft.steps[index]
-            image_only = payload.get("method", "auto") == "image" or step["operation"] == "expand_menu"
+            image_only = payload.get("method", "auto") == "image"
             target = draft.targets[(step["program_id"], step.get("window_ref", "main"))]
             exact = {k: target[k] for k in ("pid", "window_id")}
             self._program(job, target["program_id"], exact)
@@ -1253,18 +1469,32 @@ class ProcessEditors:
             self._program(job, target["program_id"], exact)
             selected = None
             if isinstance(native.get("native_target"), dict) and not image_only:
+                next_step = draft.steps[index+1] if index+1 < len(draft.steps) else {}
+                menu_repick = (step.get("operation") == "expand_menu" or
+                    step.get("operation") == "checkpoint" and step.get("review_mode") in {"popup_image", "menu_semantic"}
+                    and next_step.get("operation") == "expand_menu")
+                native_element = native["native_target"].get("element")
+                native_menu = isinstance(native_element, dict) and native_element.get("role") == "MenuItem"
                 try:
                     with runtime.execution_lock:
                         self._check(job)
-                        snapshot, _ = self.library._observe(runtime, exact, target["program_id"])
-                        selected = draft.remember(target, snapshot, native["native_target"])
+                        if menu_repick and native_menu:
+                            from semantic_menus import observe_menu
+                            observation = observe_menu(runtime, exact, timeout_ms=2000)
+                            self._program(job, target["program_id"], exact)
+                            selected = draft.remember_menu(target, native["native_target"], observation)
+                        else:
+                            snapshot, _ = self.library._observe(runtime, exact, target["program_id"])
+                            selected = draft.remember(target, snapshot, native["native_target"])
                 except OperationError as exc:
+                    if menu_repick and native_menu: raise
                     if exc.code not in IMAGE_FALLBACK_ERRORS or getattr(exc, "helper_cleanup_pending", False): raise
             if selected is None:
                 selected = draft.remember_image(target, native)
             previous_review = draft.steps[index-1].get("review_mode") if index else None
-            draft.repair(index, selected, action=payload.get("action"), value=payload.get("value"))
-            message = "이 단계의 대상만 다시 지정했습니다. 순서와 프로그램·팝업 연결은 그대로 유지했습니다."
+            affected = draft.repair(index, selected, action=payload.get("action"), value=payload.get("value"))
+            extra["affected_steps"] = affected or [{"index": index, "step_id": draft.steps[index].get("step_id")}]
+            message = "대상을 다시 지정했습니다. 함께 변경한 단계: " + ", ".join(str(row["index"]+1) for row in extra["affected_steps"])
             if previous_review == "popup_image" and draft.steps[index-1].get("review_mode") == "human":
                 message += " 이미지 대상을 요소 방식으로 바꾸어 앞의 팝업 자동 확인이 사람 확인으로 변경됐습니다. 실행 전 확인 방식을 검토하세요."
                 extra["review_policy_change"] = {"step_index":index-1,"from":"popup_image","to":"human"}
@@ -1668,6 +1898,8 @@ class ProcessEditors:
         last = tested.get("last_result", {})
         from menu_expansion import local_menu_summary
         result.update(local_menu_summary(tested))
+        from local_result_details import project_local_diagnostics
+        result.update(project_local_diagnostics(tested))
         if "menu_expansion" in result: result["business_result_verified"] = False
         diagnostic = last.get("diagnostic", {})
         if isinstance(last.get("menu_expansion"), dict) and diagnostic:

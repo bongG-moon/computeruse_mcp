@@ -30,6 +30,50 @@ def _reject(message):
     raise OperationError(message, "menu_expansion_unverified")
 
 
+def recorded_menu_target(native):
+    """Persist only actual native menu labels and their observed role hierarchy."""
+    if not isinstance(native, dict):
+        return None
+    ancestors = native.get("ancestors", [])
+    element = native.get("element")
+    if not isinstance(ancestors, list) or len(ancestors) > 16 or not isinstance(element, dict):
+        return None
+    if element.get("role") != "MenuItem":
+        return None
+    path = []
+    for row in [*reversed(ancestors), element]:
+        if not isinstance(row, dict):
+            return None
+        if row.get("role") != "MenuItem":
+            continue
+        name = row.get("name")
+        if (row.get("is_password") is True or not isinstance(name, str)
+                or not 1 <= len(name.strip()) <= 1000):
+            return None
+        path.append({"name": name, "role": "MenuItem"})
+    return {"path": path} if 1 <= len(path) <= 16 else None
+
+
+def recorded_menu_command(event, target, menu_target):
+    """A proven recorded child click becomes a fresh path lookup at execution."""
+    native = event.get("native_target")
+    observed = recorded_menu_target(native)
+    if (event.get("operation") != "click" or event.get("input_method") == "keyboard_unverified"
+            or observed is None or any(native.get(k) != target[k] for k in ("pid", "window_id"))
+            or observed["path"][-1] != menu_target["path"][-1]):
+        return None
+    return {"operation": "menu_command", "program_id": target["program_id"],
+            "window_ref": target.get("window_ref", "main"),
+            "menu_target": copy.deepcopy(menu_target), "completion_mode": "human"}
+
+
+def _menu_selector(menu_target):
+    selector = None
+    for part in menu_target["path"]:
+        selector = {**part, **({"within": selector} if selector is not None else {})}
+    return selector
+
+
 def recorded_menu_step(event, index, events, target, discovered, snapshots):
     """Return one self-verifying expansion, or require repair of this event.
 
@@ -60,6 +104,12 @@ guarded image/semantic targets and fresh child discovery, never those handles.
     parent_name = native_element.get("name")
     if isinstance(parent_name, str) and 1 <= len(parent_name.strip()) <= 1000:
         step["menu_path"] = [parent_name]
+    semantic_parent = recorded_menu_target(native)
+    if semantic_parent is not None:
+        step["menu_target"] = semantic_parent
+        # Even a separate child HWND has a semantic parent. Never use a
+        # provider's internal automation identifier as the saved menu label.
+        step["selector"] = _menu_selector(semantic_parent)
     # Diagnostic depth follows proven menu-opening episodes, not same-PID
     # windows or guessed HWND owner depth (sibling menus may share an owner).
     depth, ancestor = 1, step["window_ref"]
@@ -80,7 +130,7 @@ guarded image/semantic targets and fresh child discovery, never those handles.
         if not isinstance(child_ref, str):
             _reject("자식 메뉴 참조 형식이 올바르지 않습니다.")
         child_key = (target["program_id"], child_ref)
-        if child_key not in discovered or child_ref == step["window_ref"] or parent_image is None:
+        if child_key not in discovered or child_ref == step["window_ref"] or parent_image is None and semantic_parent is None:
             _reject("부모 이미지 또는 실제 소유 관계가 확인된 자식 팝업이 없습니다.")
         child_target, wait = discovered[child_key]
         if child_target["pid"] != target["pid"] or child_target["window_id"] == target["window_id"]:
@@ -98,16 +148,25 @@ guarded image/semantic targets and fresh child discovery, never those handles.
             _reject("부모와 자식 메뉴의 소유 경로가 연결되지 않았습니다.")
         following = next((row for row in events[index+1:] if isinstance(row, dict)
             and (row.get("program_id"), row.get("window_ref", "main")) == child_key), None)
+        if following is None:
+            # Ending or cancelling the menu is a valid partial recording. The
+            # importer keeps the other events and a repair step, not a guessed command.
+            _reject("하위 메뉴를 연 뒤 선택한 항목이 기록되지 않았습니다. 이 메뉴 구간을 보완하세요.")
         child_image = recorded_image(following or {})
-        if child_image is None:
-            _reject("자식 메뉴를 구별할 사전 이미지가 없습니다. 자식 메뉴 구간을 보완하세요.")
         child_native = following.get("native_target")
         child_element = child_native.get("element") if isinstance(child_native, dict) else None
         label = child_element.get("name") if isinstance(child_element, dict) else None
-        if isinstance(label, str) and 1 <= len(label) <= 1000 and label in {row["name"] for row in children}:
+        if (isinstance(label, str) and 1 <= len(label) <= 1000
+                and label in {row["name"] for row in children if row.get("enabled") is not False}
+                and child_element.get("role") == "MenuItem" and child_element.get("is_password") is not True
+                and all(child_native.get(k) == child_target[k] for k in ("pid", "window_id"))):
             step.setdefault("menu_path", []).append(label)
-        step.update(image_target=parent_image, child_window={k: wait[k] for k in ("title", "class_name")},
-                    child_image_target=child_image)
+            step["child_menu_target"] = {"path": [{"name": label, "role": "MenuItem"}]}
+        if child_image is None and "child_menu_target" not in step:
+            _reject("자식 메뉴를 구별할 관찰된 이름 또는 사전 이미지가 없습니다. 자식 메뉴 구간을 보완하세요.")
+        step["child_window"] = {k: wait[k] for k in ("title", "class_name")}
+        if parent_image is not None: step["image_target"] = parent_image
+        if child_image is not None: step["child_image_target"] = child_image
     elif representation == "logical":
         snapshot = snapshots.get((target["program_id"], step["window_ref"]))
         # Prefer the child actually used next, but only from the recorded
@@ -118,10 +177,21 @@ guarded image/semantic targets and fresh child discovery, never those handles.
         selected_element = selected_native.get("element") if isinstance(selected_native, dict) else None
         selected_name = selected_element.get("name") if isinstance(selected_element, dict) else None
         names = {row["name"] for row in children if row.get("enabled") is not False}
-        if not isinstance(selected_name, str) or selected_name not in names:
+        if (not isinstance(selected_name, str) or selected_name not in names
+                or selected_element.get("role") != "MenuItem" or selected_element.get("is_password") is True
+                or any(selected_native.get(k) != target[k] for k in ("pid", "window_id"))):
             _reject("다음 동작을 실제 펼쳐진 자식 메뉴와 연결하지 못했습니다.")
         step.setdefault("menu_path", []).append(selected_name)
-        if isinstance(snapshot, dict):
+        if semantic_parent is not None:
+            step["child_menu_target"] = {"path": [*copy.deepcopy(semantic_parent["path"]),
+                                                    {"name": selected_name, "role": "MenuItem"}]}
+        if semantic_parent is not None:
+            # The recorded native transition proves the relationship. The
+            # end-of-recording Driver tree may already have closed this menu;
+            # never replace its real labels with a provider-internal ID.
+            step["selector"] = _menu_selector(semantic_parent)
+            step["child_selector"] = _menu_selector(step["child_menu_target"])
+        elif isinstance(snapshot, dict):
             picked = match_picked_element(snapshot, native, {key: target[key] for key in ("pid", "window_id")})
             parent = _unique(snapshot, picked["expected_selector"])
             step["selector"] = stable_selector(snapshot, parent)
@@ -145,9 +215,9 @@ guarded image/semantic targets and fresh child discovery, never those handles.
         else:
             _reject("논리 자식 메뉴를 재관찰할 계층과 입력 근거가 없습니다.")
         if method == "hover":
-            if parent_image is None:
+            if parent_image is None and semantic_parent is None:
                 _reject("논리 메뉴 호버 입력의 사전 이미지가 없습니다.")
-            step["image_target"] = parent_image
+            if parent_image is not None: step["image_target"] = parent_image
     else:
         _reject("자식 메뉴가 별도 창인지 논리 자식인지 확인하지 못했습니다.")
     from menu_expansion import validate_menu_expansion

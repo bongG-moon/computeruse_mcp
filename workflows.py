@@ -49,11 +49,11 @@ def _target_executable(guard, target):
 
 
 def operation_step(step):
-    return {k: v for k, v in step.items() if k not in {"program_id", "window_ref", "step_id", "iteration_id"}}
+    return {k: v for k, v in step.items() if k not in {"program_id", "window_ref", "step_id", "iteration_id", "linked_step_id", "precondition_step_id"}}
 
 
 def window_step(step):
-    return {k: v for k, v in step.items() if k not in {"step_id", "iteration_id"}}
+    return {k: v for k, v in step.items() if k not in {"step_id", "iteration_id", "linked_step_id", "precondition_step_id"}}
 
 
 def validate_workflow_step(step):
@@ -88,7 +88,7 @@ def _snapshot_fits(value):
 def deferred_input(step):
     """Delivery is checked by the immediately following explicit checkpoint."""
     return (step.get("operation") in IMAGE_MUTATIONS and not step.get("expect")) or (
-        step.get("operation") in {"click", "double_click", "right_click"} and step.get("completion_mode") == "human")
+        step.get("operation") in {"click", "double_click", "right_click", "menu_command"} and step.get("completion_mode") == "human")
 
 
 def _sent_postclick_focus_failure(step, result, target):
@@ -174,6 +174,12 @@ def _validate_expanded(steps, program_ids):
                     or target_key(step) != target_key(steps[index+1])
                     or step.get("image_target") != steps[index+1].get("image_target")):
                 raise WorkflowError("자동 팝업 확인은 바로 다음 이미지 입력의 대상만 확인할 수 있습니다. 최종 업무 결과 확인으로 사용할 수 없습니다.")
+        if step.get("review_mode") == "menu_semantic":
+            if (index+1 >= len(steps) or steps[index+1].get("operation") != "expand_menu"
+                    or target_key(step) != target_key(steps[index+1])
+                    or step.get("menu_target") != steps[index+1].get("menu_target")
+                    or not step.get("linked_step_id") or not steps[index+1].get("precondition_step_id")):
+                raise WorkflowError("메뉴 의미 확인은 연결한 바로 다음 부모 메뉴의 존재와 상태만 확인합니다. 최종 명령 결과는 별도로 확인하세요.")
         if deferred_input(step):
             direct = index+1 < len(steps) and linked_image_checkpoint(step, steps[index+1])
             opened = index+2 < len(steps) and linked_popup_checkpoint(step, steps[index+1], steps[index+2])
@@ -188,8 +194,9 @@ def _validate_expanded(steps, program_ids):
         if "${" in step["program_id"] or "${" in step.get("operation", "") or "${" in ref:
             raise WorkflowError("프로그램이나 동작 이름은 입력 변수로 바꿀 수 없습니다.")
     dynamic_window_keys([window_step(s) for s in steps])
-    from checkpoint_groups import batch_links
+    from checkpoint_groups import batch_links, validate_pair_links
     try:
+        validate_pair_links(steps)
         batch_links(steps)
     except ValueError as error:
         raise WorkflowError(str(error)) from error
@@ -633,7 +640,7 @@ class WorkflowRunner:
         explicit_bindings = {key: dict(value) for key, value in bindings.items()}
         dynamic_keys = dynamic_window_keys([window_step(s) for s in steps])
         dynamic_definitions = {target_key(step): step for step in steps if step["operation"] == "wait_for_window"}
-        def popup_image_hint(definition):
+        def popup_hint(definition, *, semantic=False):
             # Reuse the original recording, never rewrite a stored recipe. Only
             # the first input in that popup can establish the recovery identity.
             after = False
@@ -641,8 +648,15 @@ class WorkflowRunner:
                 if candidate is definition: after = True; continue
                 if not after or target_key(candidate) != target_key(definition): continue
                 if candidate['operation'] == 'checkpoint': continue
+                if semantic:
+                    return candidate.get('menu_target') if candidate['operation'] in {"menu_command", "expand_menu"} else None
+                if candidate.get('menu_target'):
+                    return None
                 return candidate.get('image_target') if candidate['operation'] in IMAGE_OPERATIONS | {"expand_menu"} else None
             return None
+        def popup_hints(definition):
+            semantic = popup_hint(definition, semantic=True)
+            return {"menu_hint": semantic} if semantic else {"image_hint": popup_hint(definition)}
         all_keys = {target_key(step) for step in steps} | {(step["program_id"], step["owner_ref"])
             for step in steps if step["operation"] == "wait_for_window"}
         if not (all_keys - dynamic_keys) <= set(bindings) or set(bindings) - all_keys:
@@ -658,7 +672,7 @@ class WorkflowRunner:
                 owner = resolve(owner_item)
                 bindings[target_key(owner_item)] = owner
                 answer = execute_window_wait(runtime, {**window_step(definition), "timeout_ms": 0}, bindings,
-                                             image_hint=popup_image_hint(definition))
+                                             **popup_hints(definition))
                 if answer.get("task_verified") is not True:
                     raise BindingError("저장한 소유 관계와 제목·종류에 맞는 팝업을 확인하지 못했습니다. 현재 창을 다시 지정하세요.")
                 dynamic_target = answer["target"]
@@ -946,13 +960,19 @@ class WorkflowRunner:
                 if item["operation"] == "wait_for_window":
                     owner_item = {"program_id": item["program_id"], "window_ref": item["owner_ref"]}
                     bindings[target_key(owner_item)] = resolve(owner_item)
-                    answer = measured(execute_window_wait(runtime, {**window_step(item), "timeout_ms": 0}, bindings, image_hint=popup_image_hint(item)))
+                    answer = measured(execute_window_wait(runtime, {**window_step(item), "timeout_ms": 0}, bindings, **popup_hints(item)))
                     if answer.get("task_verified") is True:
                         bindings[target_key(item)] = answer["target"]
                         resolve(item)
                     return answer
                 if item["operation"] == "wait_for_image":
                     return measured(execute_image_step(runtime, {**operation_step(item), "timeout_ms": 0}, resolve(item)))
+                if item.get("review_mode") == "menu_semantic":
+                    from menu_expansion import verify_menu_precondition
+                    return measured(verify_menu_precondition(runtime, operation_step(item), resolve(item)))
+                if item.get("review_mode") == "popup_image":
+                    return measured(execute_image_step(runtime, {"operation": "wait_for_image",
+                        "image_target": item["image_target"], "timeout_ms": 0}, resolve(item)))
                 if item["operation"] in {"delay", "checkpoint"}:
                     return {"task_verified": True, "input_dispatched": False}
                 if item["operation"] == "wait_for_element":
@@ -1021,16 +1041,21 @@ class WorkflowRunner:
                     checkpoint["source_step_index"] = source_index
                 record["checkpoint"] = checkpoint
                 save("running")
-                if item.get("review_mode") == "popup_image":
-                    checked = measured(execute_image_step(runtime, {"operation":"wait_for_image",
-                        "image_target":item["image_target"], "timeout_ms":0}, target))
-                    checked.update(verification_scope="declared_popup_and_unique_next_target", business_result_verified=False)
+                if item.get("review_mode") in {"popup_image", "menu_semantic"}:
+                    if item["review_mode"] == "menu_semantic":
+                        from menu_expansion import verify_menu_precondition
+                        checked = measured(verify_menu_precondition(runtime, operation_step(item), target))
+                        checked.update(verification_scope="declared_menu_parent_path_and_state", business_result_verified=False)
+                    else:
+                        checked = measured(execute_image_step(runtime, {"operation":"wait_for_image",
+                            "image_target":item["image_target"], "timeout_ms":0}, target))
+                        checked.update(verification_scope="declared_popup_and_unique_next_target", business_result_verified=False)
                     record["step_delivery"] = {"step_index":index,"state":"not_sent"}
                     if checked.get("task_verified") is not True:
                         record.pop("checkpoint", None)
                         save("needs_review")
                         return {**record,"last_result":checked,"input_dispatched":False,
-                            "next_step":"같은 실행에서 자동 이미지 조건만 다시 확인하세요. 사람 확인으로 바꾸거나 입력을 반복하지 않습니다."}
+                            "next_step":"같은 실행에서 저장한 자동 확인 조건만 다시 관찰하세요. 사람 확인으로 바꾸거나 입력을 반복하지 않습니다."}
                     record["completed_steps"] = index+1
                     record["pending_step"] = None
                     record.pop("checkpoint", None)
@@ -1284,7 +1309,7 @@ class WorkflowRunner:
                     save("running")
                     stage = "operation"
                     timed_phase("operation")
-                    if item["operation"] == "checkpoint" and item.get("review_mode") not in {"popup_image", "deferred_visual"}:
+                    if item["operation"] == "checkpoint" and item.get("review_mode") not in {"popup_image", "menu_semantic", "deferred_visual"}:
                         stage = "screenshot_checkpoint"
                         return capture_checkpoint(index, target)
                     if item.get("review_mode") == "deferred_visual":
@@ -1299,7 +1324,12 @@ class WorkflowRunner:
                             metrics["batched_reviews"] = metrics.get("batched_reviews", 0) + 1
                         performance["batched_reviews"] = performance.get("batched_reviews", 0) + 1
                         continue
-                    if item.get("review_mode") == "popup_image":
+                    if item.get("review_mode") == "menu_semantic":
+                        from menu_expansion import verify_menu_precondition
+                        latest = verify_menu_precondition(runtime, operation_step(item), target)
+                        latest.update(verification_scope="declared_menu_parent_path_and_state", business_result_verified=False)
+                        engine = Operations(runtime)
+                    elif item.get("review_mode") == "popup_image":
                         latest = execute_image_step(runtime, {"operation":"wait_for_image",
                             "image_target":item["image_target"], "timeout_ms":0}, target)
                         latest["verification_scope"] = "declared_popup_and_unique_next_target"
@@ -1309,7 +1339,7 @@ class WorkflowRunner:
                         progress_event("waiting", index, item["operation"])
                         owner_item = {"program_id": item["program_id"], "window_ref": item["owner_ref"]}
                         bindings[target_key(owner_item)] = resolve(owner_item)
-                        latest = execute_window_wait(runtime, window_step(item), bindings, image_hint=popup_image_hint(item))
+                        latest = execute_window_wait(runtime, window_step(item), bindings, **popup_hints(item))
                         if latest.get("task_verified") is True:
                             bindings[target_key(item)] = latest["target"]
                             progress_event("transition", index, item["operation"], resolve(item))

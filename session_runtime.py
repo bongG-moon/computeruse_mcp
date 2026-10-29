@@ -27,7 +27,7 @@ ACTION_LABELS = {"click": "선택한 버튼 또는 위치 누르기", "double_cl
                  "right_click": "오른쪽 버튼 메뉴 열기", "type_text": "글자 입력", "set_value": "입력칸 값 변경",
                  "press_key": "키보드 키 누르기", "hotkey": "단축키 누르기", "scroll": "화면 스크롤",
                  "drag": "선택한 위치 끌기", "bring_to_front": "선택한 창 앞으로 가져오기", "invoke_menu": "프로그램 메뉴 실행",
-                 "expand_menu": "선택한 부모 메뉴의 하위 메뉴 펼치기"}
+                 "expand_menu": "선택한 부모 메뉴의 하위 메뉴 펼치기", "menu_command": "현재 메뉴 경로의 최종 명령 실행"}
 
 def loaded_code_identity():
     """Hash loaded function code, not potentially newer source files on disk."""
@@ -175,6 +175,7 @@ class SessionRuntime:
         # Include the actual menu dispatcher in the session-start code receipt,
         # even when this run has not reached its first expansion yet.
         import menu_expansion  # noqa: F401
+        import semantic_menus, menu_guard, menu_accessibility  # noqa: F401
         self.code_identity = loaded_code_identity()
         self.minutes = max_minutes if max_minutes is not None else config["max_minutes"]
         self.max_actions = max_actions if max_actions is not None else config["max_actions"]
@@ -490,13 +491,48 @@ class SessionRuntime:
             if answer.get("input_dispatched") is False and diagnostic.get("code") in {"image_not_found", "image_ambiguous"} and last_match:
                 details = dict(diagnostic.get("image_match", {}))
                 details.update({key:last_match[key] for key in ("frame_comparison", "frame_sha256", "score_gap", "review_candidates",
-                    "appearance_rejected", "appearance_score", "original_score", "backend", "screenshot") if key in last_match})
+                    "appearance_rejected", "appearance_diagnostic", "appearance_score", "original_score", "backend", "screenshot") if key in last_match})
                 answer = {**answer, "diagnostic":{**diagnostic,"image_match":details,
                     "message":match_failure_message(details) if diagnostic["code"]=="image_not_found" else diagnostic.get("message", "이미지 후보가 여러 개입니다.")}}
             if self._driver_ended():
                 self.stop("Cua Driver 연결이 종료되어 이미지 작업을 중지했습니다. 미확인 입력을 반복하지 마세요.")
             self.check_active()
             return answer
+
+    def observe_menu(self, target, *, timeout_ms=2000):
+        from menu_guard import observe
+        from interaction import _identity
+        with self.execution_lock:
+            self.check_active()
+            self.report_progress("observing")
+            probe = self.create_transition_probe(dict(target))
+            try:
+                before = _identity(probe.capture(), target["window_id"])
+                answer = observe(self.guard, target, self.check_active, timeout_ms=timeout_ms)
+                if _identity(probe.snapshot(), target["window_id"]) != before:
+                    from operations import OperationError
+                    raise OperationError("메뉴 관찰 중 창이 바뀌었습니다.", "menu_target_changed")
+                return answer
+            finally:
+                probe.close()
+
+    def menu_action(self, target, menu_target, operation, *, timeout_ms=10000):
+        from menu_guard import act
+        from interaction import _identity
+        from operations import OperationError
+        with self.execution_lock:
+            self.check_active()
+            self.report_progress("acting")
+            probe = self.create_transition_probe(dict(target))
+            try:
+                before = _identity(probe.capture(), target["window_id"])
+                def same():
+                    self.check_active()
+                    if _identity(probe.snapshot(), target["window_id"]) != before:
+                        raise OperationError("메뉴 입력 전에 창이 바뀌었습니다.", "menu_target_changed")
+                return act(self.guard, target, menu_target, operation, self.check_active, same, timeout_ms=timeout_ms)
+            finally:
+                probe.close()
 
     def expand_menu_once(self, target, step, *, parent_bounds=None, parent_revalidate=None):
         """One guarded semantic expansion; the caller verifies child appearance."""

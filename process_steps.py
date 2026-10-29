@@ -18,7 +18,7 @@ def validate_process_step(step):
     operation = step["operation"]
     allowed = {"operation"} | ({"duration_ms"} if operation == "delay" else
         {"selector", "timeout_ms", "poll_interval_ms"} if operation == "wait_for_element" else
-        {"expect", "timeout_ms", "poll_interval_ms"} if operation == "wait_for_state" else {"message", "return_from", "opened_from", "review_mode", "review_origin", "image_target", "review_after"})
+        {"expect", "timeout_ms", "poll_interval_ms"} if operation == "wait_for_state" else {"message", "return_from", "opened_from", "review_mode", "review_origin", "image_target", "menu_target", "review_after"})
     if set(step) - allowed:
         raise OperationError("이 프로세스 단계에 지원하지 않는 설정이 있습니다.")
     if operation == "delay":
@@ -37,7 +37,7 @@ def validate_process_step(step):
     else:
         if step.get("review_origin", "explicit") not in {"explicit", "recording_generated", "user_grouped"}:
             raise OperationError("확인 단계의 생성 경로가 올바르지 않습니다.")
-        if step.get("review_mode", "human") not in {"human", "visual", "popup_image", "deferred_visual"}:
+        if step.get("review_mode", "human") not in {"human", "visual", "popup_image", "menu_semantic", "deferred_visual"}:
             raise OperationError("화면 확인 방식은 human 또는 visual로 지정하세요.")
         if step.get("review_mode") == "popup_image":
             from image_targets import validate_image_target
@@ -46,6 +46,13 @@ def validate_process_step(step):
             validate_image_target(step.get("image_target"))
         elif "image_target" in step:
             raise OperationError("이미지 조건은 자동 팝업 확인에만 지정하세요.")
+        if step.get("review_mode") == "menu_semantic":
+            from semantic_menus import validate_menu_target
+            if step.get("review_origin") not in {"recording_generated", "user_grouped"} or not step.get("opened_from"):
+                raise OperationError("메뉴 의미 확인에는 명시적으로 연결한 메뉴 열림 단계가 필요합니다.")
+            validate_menu_target(step.get("menu_target"))
+        elif "menu_target" in step:
+            raise OperationError("메뉴 경로는 연결된 메뉴 의미 확인에만 지정하세요.")
         if step.get("review_mode") == "deferred_visual":
             from task_inputs import STEP_ID
             if (step.get("review_origin") not in {"recording_generated", "user_grouped"} or step.get("opened_from")
@@ -109,7 +116,7 @@ def execute_process_step(runtime, step, target):
         runtime.check_active()
         return result(True, "delay_completed", "지정한 고정 대기를 완료했습니다. 화면 변경을 확인한 것은 아닙니다.")
     if operation == "checkpoint":
-        if step.get("review_mode") in {"visual", "deferred_visual"}:
+        if step.get("review_mode") in {"visual", "deferred_visual", "menu_semantic"}:
             return result(False, "visual_review_requires_workflow", "모델 시각 확인은 실행·단계·화면이 연결된 저장 작업에서만 진행하세요.")
         report("observing")
         capture = getattr(runtime, "capture_checkpoint", None)

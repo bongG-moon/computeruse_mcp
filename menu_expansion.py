@@ -12,7 +12,7 @@ import time
 from operations import OperationError, _Execution, _descendant, _elements, _find, _limited, _name, _unique, validate_selector
 
 
-FIELDS = {"operation", "selector", "image_target", "child_selector", "child_window",
+FIELDS = {"operation", "selector", "image_target", "child_selector", "child_window", "menu_target", "child_menu_target",
           "child_image_target", "expansion_method", "expansion_key", "menu_depth", "menu_path",
           "verification_timeout_ms", "poll_interval_ms", "step_timeout_ms"}
 
@@ -20,6 +20,49 @@ FIELDS = {"operation", "selector", "image_target", "child_selector", "child_wind
 def validate_menu_expansion(step):
     if not isinstance(step, dict) or step.get("operation") != "expand_menu" or set(step) - FIELDS:
         raise OperationError("메뉴 전개 단계의 형식이 올바르지 않습니다.", "invalid_menu_expansion")
+    if "menu_target" in step:
+        from semantic_menus import validate_menu_target
+        validate_menu_target(step["menu_target"])
+        if "child_menu_target" in step:
+            validate_menu_target(step["child_menu_target"])
+        if "child_window" not in step:
+            parent_path = step["menu_target"]["path"]
+            child_path = step.get("child_menu_target", {}).get("path", [])
+            if len(child_path) <= len(parent_path) or child_path[:len(parent_path)] != parent_path:
+                raise OperationError("논리 자식은 부모 메뉴의 실제 하위 경로여야 합니다.", "invalid_menu_expansion")
+        else:
+            child = step["child_window"]
+            if (not isinstance(child, dict) or set(child) != {"title", "class_name"}
+                    or not isinstance(child["title"], str) or len(child["title"]) > 1000
+                    or not isinstance(child["class_name"], str) or not 1 <= len(child["class_name"]) <= 256
+                    or not ("child_menu_target" in step or "child_image_target" in step)):
+                raise OperationError("별도 자식 메뉴의 창 관계와 대상 조건이 필요합니다.", "invalid_menu_expansion")
+        # Validate timing/method and optional image shape using the legacy
+        # contract, without making the image a semantic presence condition.
+        for key in ("image_target", "child_image_target"):
+            if key in step:
+                from image_targets import validate_image_target
+                validate_image_target(step[key])
+        for key in ("selector", "child_selector"):
+            if key in step:
+                validate_selector(step[key])
+                if step[key].get("role") != "MenuItem":
+                    raise OperationError("메뉴 선택자는 실제 MenuItem만 지정하세요.", "invalid_menu_expansion")
+        path = step.get("menu_path", [])
+        if not isinstance(path, list) or len(path) > 16 or any(not isinstance(label, str) or not 1 <= len(label.strip()) <= 1000 for label in path):
+            raise OperationError("메뉴 진단 경로를 확인하세요.", "invalid_menu_expansion")
+        method = step.get("expansion_method")
+        if method not in {"hover", "click", "keyboard", "accessibility"}:
+            raise OperationError("실제 관찰한 메뉴 전개 방식이 필요합니다.", "invalid_menu_expansion")
+        if method == "keyboard" and step.get("expansion_key") not in {"RIGHT", "LEFT", "ENTER", "SPACE", "DOWN"}:
+            raise OperationError("녹화한 전개 키를 확인하세요.", "invalid_menu_expansion")
+        if method != "keyboard" and "expansion_key" in step:
+            raise OperationError("전개 키는 keyboard 방식에만 사용합니다.", "invalid_menu_expansion")
+        for key, default, low, high in (("verification_timeout_ms",1500,0,10000),("poll_interval_ms",100,100,1000),
+                                      ("step_timeout_ms",10000,1,120000),("menu_depth",1,1,16)):
+            if type(step.get(key,default)) is not int or not low <= step.get(key,default) <= high:
+                raise OperationError("메뉴 대기 시간이나 깊이가 올바르지 않습니다.", "invalid_menu_expansion")
+        return copy.deepcopy(step)
     paired_hover = ("selector" in step and "image_target" in step
                     and step.get("expansion_method") == "hover"
                     and "child_selector" in step and "child_window" not in step)
@@ -383,12 +426,20 @@ def execute_menu_expansion(runtime, step, target, *, delivery_mode="background",
         raise OperationError("승인된 현재 메뉴 창을 지정하세요.", "invalid_target")
     if runtime.mode != "uia":
         raise OperationError("메뉴 전개는 UIA 세션에서 실행하세요.", "unsupported_mode")
+    if "menu_target" in step:
+        from semantic_menus import execute_semantic_expansion
+        return execute_semantic_expansion(runtime, step, target, verify_only=verify_only)
     return _MenuExpansion(runtime, step, target, delivery_mode, verify_only).run()
 
 
 def verify_menu_expansion(runtime, step, target):
     """Resume only the postcondition; never redispatch the recorded expansion."""
     return execute_menu_expansion(runtime, step, target, verify_only=True)
+
+
+def verify_menu_precondition(runtime, step, target):
+    from semantic_menus import verify_menu_precondition as verify
+    return verify(runtime, step, target)
 
 
 def local_menu_summary(raw):
@@ -400,13 +451,22 @@ def local_menu_summary(raw):
     source = raw if isinstance(raw.get('menu_expansion'), dict) else last
     menu = source.get('menu_expansion')
     visible = {}
+    command_source = raw if isinstance(raw.get('menu_command'), dict) else last
+    command = command_source.get('menu_command')
+    if isinstance(command, dict):
+        delivery = command.get('command_delivery')
+        command_view = {'command_delivery': delivery if delivery in ('sent','not_sent','unknown') else 'unknown'}
+        path = command.get('menu_path')
+        if isinstance(path, list):
+            command_view['menu_path'] = [name.replace('\r',' ').replace('\n',' ')[:256] for name in path[:16] if isinstance(name,str)]
+        visible.update(menu_command=command_view,pending_operation='menu_command', business_result_verified=False)
     if isinstance(menu, dict):
         # Captures, complete UIA trees and nested Driver input results can be
         # huge. The form needs these discrete states, not the full observation.
         allowed = {
             'stage': {'parent_observation', 'child_observation', 'child_visible'},
             'expansion_method': {'hover', 'click', 'keyboard', 'accessibility'},
-            'child_representation': {'hwnd', 'logical', 'owned_popup', 'logical_uia_child', 'unknown'},
+            'child_representation': {'hwnd', 'logical', 'owned_popup', 'logical_uia_child', 'logical_menu_child', 'unknown'},
             'expansion_delivery': {'not_sent', 'sent', 'unknown'},
             'child_command_delivery': {'not_sent', 'sent', 'unknown'},
         }
@@ -426,12 +486,12 @@ def local_menu_summary(raw):
             visible['input_dispatched'] = source.get('input_dispatched')
         if type(source.get('business_result_verified')) is bool:
             visible['business_result_verified'] = source['business_result_verified']
-    if not isinstance(menu, dict) and raw.get('status') == 'needs_review':
+    if not isinstance(menu, dict) and not isinstance(command, dict) and raw.get('status') == 'needs_review':
         checkpoint = raw.get('checkpoint')
         visual = raw.get('visual_review')
         if isinstance(checkpoint, dict) and checkpoint:
             mode = checkpoint.get('review_mode', 'human')
-            visible.update(pending_operation='checkpoint', review_kind=mode if mode in {'human', 'visual', 'popup_image'} else 'unknown')
+            visible.update(pending_operation='checkpoint', review_kind=mode if mode in {'human', 'visual', 'popup_image', 'menu_semantic'} else 'unknown')
         elif isinstance(visual, dict) and visual:
             visible.update(pending_operation='checkpoint', review_kind='visual')
     return visible

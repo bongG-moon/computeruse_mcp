@@ -86,7 +86,8 @@ MANAGEMENT["computer_save_task"]["inputSchema"]["properties"].update({
 RECORDING_WARNINGS = ["outside_target_not_recorded", "uia_text_unavailable", "uia_probe_unavailable",
     "recording_timeout_partial", "recording_hook_unavailable", "recording_mouse_failed", "recording_keyboard_failed",
     "recording_progress_failed", "semantic_target_unverified", "recording_event_limit", "recording_final_value_unconfirmed", "recording_method_unverified",
-    "recording_window_ambiguous", "recording_window_limit", "recording_capture_backlog", "recording_payload_limit"]
+    "recording_window_ambiguous", "recording_window_limit", "recording_capture_backlog", "recording_payload_limit",
+    "menu_expansion_unverified"]
 MANAGEMENT["computer_save_task"]["inputSchema"]["properties"]["recording_review"] = object_schema({
     "partial": {"type": "boolean", "enum": [True]}, "acknowledged": {"type": "boolean"},
     "warning_codes": {"type": "array", "minItems": 1, "maxItems": 30, "uniqueItems": True,

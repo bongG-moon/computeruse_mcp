@@ -101,7 +101,7 @@ internal static class ProcessEditor
     static string DeliveryLabel(string value) { return value == "sent" ? "전송됨" : value == "not_sent" ? "미전송" : "전달 불명"; }
     static string ExpansionLabel(string value) { return value == "hover" ? "호버" : value == "click" ? "클릭" : value == "keyboard" ? "키보드" : value == "accessibility" ? "접근성 펼침" : "방식 미확인"; }
     static string MenuStageLabel(string value) { return value == "child_visible" ? "자식 표시 확인" : value == "child_observation" ? "자식 표시 확인 중" : value == "parent_observation" ? "부모 대상 확인 중" : "진행 위치 미확인"; }
-    static string ChildRepresentationLabel(string value) { return value == "hwnd" || value == "owned_popup" ? "별도 팝업 창" : value == "logical" || value == "logical_uia_child" ? "같은 창의 논리 자식" : "표현 방식 미확인"; }
+    static string ChildRepresentationLabel(string value) { return value == "hwnd" || value == "owned_popup" ? "별도 팝업 창" : value == "logical" || value == "logical_uia_child" || value == "logical_menu_child" ? "같은 창의 논리 자식" : "표현 방식 미확인"; }
     static string BusinessLabel(Dictionary<string, object> result, Dictionary<string, object> menu) {
         object value; if (menu != null && menu.TryGetValue("business_result_verified", out value)) return Object.Equals(value, true) ? "검증됨" : "미검증";
         return result != null && result.TryGetValue("business_result_verified", out value) && Object.Equals(value, true) ? "검증됨" : "미검증";
@@ -116,9 +116,34 @@ internal static class ProcessEditor
         var checkpoint = Map(result, "checkpoint"); if (checkpoint != null && checkpoint.Count > 0) return Str(checkpoint, "review_mode", "human");
         var visual = Map(result, "visual_review"); return visual != null && visual.Count > 0 ? "visual" : "";
     }
-    static string ReviewLabel(string kind) { return kind == "human" ? "사람 확인" : kind == "visual" ? "모델 화면 판정" : kind == "popup_image" ? "팝업 자동 조건 확인" : "결과 확인"; }
+    static string ReviewLabel(string kind) { return kind == "human" ? "사람 확인" : kind == "visual" ? "모델 화면 판정" : kind == "popup_image" ? "팝업 자동 조건 확인" : kind == "menu_semantic" ? "메뉴 이름과 계층 확인" : "결과 확인"; }
     internal static List<string> LocalExecutionDetails(Dictionary<string, object> result) {
         var lines = new List<string>(); var menu = Map(result, "menu_expansion");
+        var image = Map(result, "image_comparison");
+        if (image != null) {
+            lines.Add("이미지 비교: " + ShortText(Str(image,"stage","unknown"),60) + " / " + ShortText(Str(image,"status","unknown"),60));
+            foreach (string key in new[] {"score","threshold","original_score","appearance_score"})
+                if (image.ContainsKey(key)) lines.Add(key + ": " + ShortText(Convert.ToString(image[key], System.Globalization.CultureInfo.InvariantCulture),40));
+            var ink=Map(image,"appearance_diagnostic");
+            if (ink != null) {
+                lines.Add("전경 검사: " + ShortText(Str(ink,"reason","unknown"),80) + " / " + ShortText(Str(ink,"scope",""),40));
+                foreach (string key in new[] {"changed_color_pixels","missing_ink_pixels"})
+                    if (ink.ContainsKey(key)) lines.Add(key + ": " + ShortText(Convert.ToString(ink[key]),32));
+                foreach (string band in new[] {"whole_template","clicked_band"}) {
+                    var values=Map(ink,band); if(values==null) continue;
+                    var pairs=new List<string>();
+                    foreach(string key in new[] {"dice","mean_difference","correlation","contrast_difference"})
+                        if(values.ContainsKey(key)) pairs.Add(key+"="+ShortText(Convert.ToString(values[key],System.Globalization.CultureInfo.InvariantCulture),32));
+                    if(pairs.Count>0) lines.Add(band+": "+String.Join(", ",pairs));
+                }
+            }
+        }
+        var command=Map(result,"menu_command");
+        if(command!=null) {
+            lines.Add("최종 메뉴 명령: "+MenuPath(command));
+            lines.Add("입력 상태: "+DeliveryLabel(Str(command,"command_delivery","unknown"))+" / 업무 결과: 미검증");
+            lines.Add("파일 생성 또는 허용된 결과 창을 별도 완료 조건으로 확인합니다.");
+        }
         if (menu != null) {
             lines.Add("현재 작업: 부모 메뉴 펼침 — " + MenuStageLabel(Str(menu, "stage", "unknown")));
             string path = MenuPath(menu); if (path.Length > 0) lines.Add("메뉴 경로: " + path);
