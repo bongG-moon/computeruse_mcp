@@ -94,9 +94,11 @@ class ScopedControls:
             raise OperationError("현재 프로그램과 창을 지정하세요.")
         return self._query(target, {"selectors": selectors}, timeout_ms=timeout_ms, max_elements=80)
 
-    def inspect(self, target, *, within, max_depth=12, max_elements=600, timeout_ms=3000):
+    def inspect(self, target, *, within, max_depth=12, max_elements=600, timeout_ms=3000, include_grid=False):
         """Resolve one exact region, then read only its bounded subtree."""
         within = validate_selector(within, allow_within=False)
+        if type(include_grid) is not bool:
+            raise OperationError("표 상태 관찰 옵션은 참 또는 거짓이어야 합니다.")
         for name, value, ceiling in (("max_depth", max_depth, 32), ("max_elements", max_elements, 5000)):
             if type(value) is not int or not 1 <= value <= ceiling:
                 raise OperationError(f"{name}는 1~{ceiling} 범위의 정수여야 합니다.")
@@ -106,8 +108,39 @@ class ScopedControls:
                 or any(type(v) is not int or v < 1 for v in target.values())):
             raise OperationError("현재 프로그램과 창을 지정하세요.")
         return self._query(target, {"operation": "inspect", "within": within,
-                                   "max_depth": max_depth, "max_elements": max_elements},
+                                   "max_depth": max_depth, "max_elements": max_elements,
+                                   **({"include_grid": True} if include_grid else {})},
                            timeout_ms=timeout_ms, max_elements=max_elements, inspection=True)
+
+    def observe_grid(self, target, intent, *, max_depth=12, max_elements=600, timeout_ms=3000):
+        """Read actual grid state and named conditions in one read-only request.
+
+        Current cell contents are not selectors. External readiness/view nodes
+        retain real parent relationships and distinct response-local indices.
+        A supported SelectionPattern is required later by grid_intent, not
+        synthesized from selected flags on visible cells.
+        """
+        from grid_intent import validate_grid_intent
+        intent = validate_grid_intent(intent)
+        for name, value, ceiling in (("max_depth", max_depth, 32), ("max_elements", max_elements, 5000)):
+            if type(value) is not int or not 1 <= value <= ceiling:
+                raise OperationError(f"{name}는 1~{ceiling} 범위의 정수여야 합니다.")
+        if type(timeout_ms) is not int or not 1 <= timeout_ms <= 120000:
+            raise OperationError("표 관찰 제한 시간을 확인하세요.")
+        if (not isinstance(target, dict) or set(target) != {"pid", "window_id"}
+                or any(type(v) is not int or v < 1 for v in target.values())):
+            raise OperationError("현재 프로그램과 창을 지정하세요.")
+        selectors = []
+        for condition in [intent["active_sheet"], *intent["ready_when"], *intent["view_conditions"]]:
+            selector = condition["selector"]
+            if "label" in selector or "row" in selector:
+                raise OperationError("표 의미 상태 확인에는 실제 이름 또는 automation_id와 범위를 사용하세요.", "grid_condition_selector_unsupported")
+            if selector not in selectors:
+                selectors.append(selector)
+        return self._query(target, {"operation": "inspect", "within": intent["grid_selector"],
+            "max_depth": max_depth, "max_elements": max_elements, "include_grid": True,
+            "condition_selectors": selectors}, timeout_ms=timeout_ms,
+            max_elements=max_elements + len(selectors) * 2 + 1, inspection=True)
 
     def _query(self, target, payload, *, timeout_ms, max_elements, inspection=False):
         runtime = self.runtime
@@ -162,6 +195,9 @@ class ScopedControls:
                     if inspection and (data.get("scoped_inspection") is not True
                             or data.get("within") != payload["within"] or type(data.get("truncated")) is not bool):
                         raise OperationError("선택 영역의 관찰 범위를 확인하지 못했습니다.", "scoped_response_invalid")
+                    if payload.get("include_grid") is True and (data.get("grid_evidence_read_only") is not True
+                            or data.get("target") != target or not isinstance(data.get("grid_selection"), dict)):
+                        raise OperationError("빠른 확인 도우미가 표 상태 관찰 기능을 제공하지 않습니다. 같은 빌드의 도우미인지 확인하세요.", "grid_evidence_unavailable")
                     for element in data["elements"]:
                         if (not isinstance(element, dict) or element.get("verification_only") is not True
                                 or any(k in element for k in ("element_token", "snapshot_id", "actions"))):

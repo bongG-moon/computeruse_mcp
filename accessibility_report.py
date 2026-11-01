@@ -104,6 +104,8 @@ def collect(runtime, target):
               ]}
     if application_strategy is not None:
         report['application_strategy'] = copy.deepcopy(application_strategy)
+    from smartfx_profiles import compare_accessibility_sources
+    report['source_findings'] = compare_accessibility_sources(sources.get('provider'), sources.get('driver'))
     helper = Path(accessibility_diagnostics.__file__).with_name(accessibility_diagnostics.HELPER)
     report['build'] = {'helper_sha256': hashlib.sha256(helper.read_bytes()).hexdigest() if helper.is_file() else None,
                        'helper_file_present': helper.is_file(), 'source': 'local_helper_file_after_observation',

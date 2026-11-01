@@ -40,7 +40,22 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(self.driver.call_args.kwargs['observation'], 'uia')
         self.assertTrue(self.driver.call_args.kwargs['diagnostics'])
         self.assertNotIn('target_ref', report)
+        self.assertIn('source_findings', report)
+        self.assertFalse(report['source_findings']['authorizes_input'])
         self.assertEqual(self.driver.call_count, 1); self.assertEqual(self.native.call_count, 1)
+
+    def test_native_empty_peer_diagnostic_is_not_inferred_from_driver_counts(self):
+        self.native.return_value = {'sources': {'uia_raw': {'status': 'ok', 'complete': True, 'elements': [
+            {'node_id': 0, 'parent_id': None, 'children_status': 'provider_returned_zero',
+             'properties': {'name': {'status': 'observed', 'value': 'CustomWindowAutomationPeer'}}}]}}}
+        result = collect(self.runtime, self.target)
+        finding = result['diagnostic_report']['source_findings']['findings'][0]
+        self.assertEqual(finding['code'], 'provider_empty')
+        self.assertFalse(finding['all_application_accessibility_absent'])
+        self.assertEqual(self.driver.call_count, 1); self.assertEqual(self.native.call_count, 1)
+        public = str(filter_response({'structuredContent': result}))
+        self.assertNotIn('source_findings', public)
+        self.assertNotIn('CustomWindowAutomationPeer', public)
 
     def test_host_strategy_is_in_local_report_without_extra_readers(self):
         from smartfx_profiles import host_profile

@@ -18,7 +18,7 @@ def validate_process_step(step):
     operation = step["operation"]
     allowed = {"operation"} | ({"duration_ms"} if operation == "delay" else
         {"selector", "timeout_ms", "poll_interval_ms"} if operation == "wait_for_element" else
-        {"expect", "timeout_ms", "poll_interval_ms"} if operation == "wait_for_state" else {"message", "return_from", "opened_from", "review_mode", "review_origin", "image_target", "menu_target", "review_after"})
+        {"expect", "timeout_ms", "poll_interval_ms"} if operation == "wait_for_state" else {"message", "return_from", "opened_from", "review_mode", "review_origin", "image_target", "menu_target", "menu_purpose", "review_after"})
     if set(step) - allowed:
         raise OperationError("이 프로세스 단계에 지원하지 않는 설정이 있습니다.")
     if operation == "delay":
@@ -51,7 +51,9 @@ def validate_process_step(step):
             if step.get("review_origin") not in {"recording_generated", "user_grouped"} or not step.get("opened_from"):
                 raise OperationError("메뉴 의미 확인에는 명시적으로 연결한 메뉴 열림 단계가 필요합니다.")
             validate_menu_target(step.get("menu_target"))
-        elif "menu_target" in step:
+            if step.get("menu_purpose", "parent") not in ("parent", "command"):
+                raise OperationError("메뉴 확인 목적은 부모 펼침 또는 최종 명령으로 지정하세요.", "invalid_menu_target")
+        elif "menu_target" in step or "menu_purpose" in step:
             raise OperationError("메뉴 경로는 연결된 메뉴 의미 확인에만 지정하세요.")
         if step.get("review_mode") == "deferred_visual":
             from task_inputs import STEP_ID

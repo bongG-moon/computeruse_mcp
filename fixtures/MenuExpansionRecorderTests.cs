@@ -32,7 +32,7 @@ internal static class MenuExpansionRecorderTests {
         Set(sample, "Identity", "synthetic-parent-runtime-id"); Set(sample, "Role", "MenuItem"); Set(sample, "Enabled", true);
         Set(sample, "ObservedAt", DateTime.UtcNow.AddMilliseconds(expanded ? -10 : -300));
         Set(sample, "MenuState", expanded ? "expanded" : "collapsed"); Set(sample, "MenuStateSource", "fixture_injected_semantics"); Set(sample, "MenuComplete", true);
-        Set(sample, "Native", new Dictionary<string, object> { { "element", new Dictionary<string, object> { {"name", "Export test"}, {"role", "MenuItem"} } }, { "window_bounds", Bounds(target.Bounds()) } });
+        Set(sample, "Native", new Dictionary<string, object> { { "element", new Dictionary<string, object> { {"name", "Export test"}, {"role", "MenuItem"} } }, { "window_bounds", Bounds(target.Bounds()) }, { "bounds", Bounds(target.Bounds()) } });
         if (expanded) ((IList)Get(sample, "MenuItems")).Add(new Dictionary<string, object> { {"name", "Active sheet test"}, {"role", "MenuItem"}, {"enabled", true} });
         return sample;
     }
@@ -48,12 +48,15 @@ internal static class MenuExpansionRecorderTests {
         object p = Activator.CreateInstance(Pending, true);
         Set(p, "Target", parent); Set(p, "Semantic", before); Set(p, "InputVersion", 7);
         Set(p, "Operation", "expand_menu"); Set(p, "RequestedOperation", "expand_menu");
+        Set(p, "ScreenPoint", new Point(parent.Bounds().Left + 5, parent.Bounds().Top + 5)); Set(p, "MenuWindowBounds", parent.Bounds());
         Set(p, "ClickAt", DateTime.UtcNow.AddMilliseconds(-320));
         var pixels = new Bitmap(96, 32); pixels.SetPixel(3, 4, Color.Red);
         Set(p, "Source", Activator.CreateInstance(Shared, F, null, new object[] {pixels}, null));
         return p;
     }
     static Dictionary<string, object> Run(string mode) {
+        bool noImage = mode.StartsWith("no_image_");
+        if (noImage) mode = mode.Substring(9);
         IntPtr foreground = GetForegroundWindow();
         var result = new Dictionary<string, object>();
         using (var main = new OffscreenForm()) using (var menu = new OffscreenForm()) using (var child = new OffscreenForm()) using (var second = new OffscreenForm()) {
@@ -68,9 +71,16 @@ internal static class MenuExpansionRecorderTests {
                     var popup = new VisualTools.Target(mode == "unrelated" ? otherRoot : root, child.Handle, "menu_child_episode_1");
                     var extra = new VisualTools.Target(root, second.Handle, "menu_child_episode_2");
                     object recorder = BlankRecorder(), before = Sample(parent, false), after = Sample(parent, true), pending = Candidate(parent, before);
-                    Set(recorder, "menuCandidate", pending);
+                    if (mode == "nameless") ((Dictionary<string, object>)((Dictionary<string, object>)Get(before, "Native"))["element"])["name"] = "";
+                    if (mode == "ancestor") ((Dictionary<string, object>)Get(before, "Native"))["ancestors"] = new[] { new Dictionary<string, object> { {"role", "MenuItem"}, {"name", ""} } };
+                    if (noImage) {
+                        Call(Get(pending, "Source"), "Release"); Set(pending, "Source", null);
+                        Set(pending, "Operation", "manual_entry"); Set(pending, "Reason", "image_capture_required");
+                        Call(recorder, "BeginMenuCandidate", before, pending, 7);
+                        result["candidate_operation"] = Get(pending, "Operation");
+                    } else Set(recorder, "menuCandidate", pending);
                     var targets = (IList)Get(recorder, "targets"); targets.Add(root); targets.Add(parent); targets.Add(popup); targets.Add(extra);
-                    ((HashSet<IntPtr>)Get(after, "MenuWindows")).Add(mode == "logical" ? menu.Handle : child.Handle);
+                    ((HashSet<IntPtr>)Get(after, "MenuWindows")).Add(mode == "logical" || mode == "nameless" || mode == "ancestor" ? menu.Handle : child.Handle);
                     if (mode == "duplicate") targets.Add(new VisualTools.Target(root, child.Handle, "duplicate_episode"));
                     if (mode == "two_children") ((HashSet<IntPtr>)Get(after, "MenuWindows")).Add(second.Handle);
                     if (mode == "retired") popup.Retired = true;
@@ -79,6 +89,7 @@ internal static class MenuExpansionRecorderTests {
                     if (mode == "moved") ((Dictionary<string, object>)Get(after, "Native"))["window_bounds"] = Bounds(new Rectangle(-24001, -24000, 320, 160));
                     if (mode == "identity") Set(after, "Identity", "different-runtime-id");
                     if (mode == "incomplete") Set(after, "MenuComplete", false);
+                    if (mode == "disabled") Set(after, "Enabled", false);
                     if (mode == "hover_only") { Set(after, "MenuState", "collapsed"); ((IList)Get(after, "MenuItems")).Clear(); }
                     if (mode == "repair") {
                         Call(recorder, "PreserveMenuExpansionRepair", pending, popup);
@@ -89,8 +100,18 @@ internal static class MenuExpansionRecorderTests {
                     if (queue.Count > 0) {
                         object[] entries = (object[])queue.GetType().GetMethod("ToArray").Invoke(queue, new object[0]);
                         result["operation"] = Get(entries[0], "Operation"); result["reason"] = Get(entries[0], "Reason"); result["evidence"] = Get(entries[0], "MenuEvidence");
+                        result["semantic_expansion"] = Recorder.GetMethod("SemanticMenuExpansion", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, new object[] {entries[0]});
                         object source = Get(entries[0], "Source"); result["retained_original_frame"] = source != null && ((Bitmap)Get(source, "Image")).GetPixel(3, 4).ToArgb() == Color.Red.ToArgb();
                         if (entries.Length == 2) result["next_operation"] = Get(entries[1], "Operation");
+                        if (noImage && entries.Length == 1) {
+                            foreach (string field in new[] { "authorQueue", "clickEvidence", "payloadBudget" })
+                                Set(recorder, field, Activator.CreateInstance(Recorder.GetField(field, F).FieldType, true));
+                            using (var list = new ListBox()) {
+                                Set(recorder, "list", list); Set(recorder, "authorBusy", true);
+                                Call(recorder, "Drain");
+                                result["saved_event"] = ((IList)Get(recorder, "events"))[0];
+                            }
+                        }
                         foreach (object entry in entries) Recorder.GetMethod("DisposePending", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, new object[] {entry});
                     }
                     Call(recorder, "ClearMenuCandidate");

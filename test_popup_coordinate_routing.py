@@ -1,6 +1,9 @@
 """Native physical captures cannot be fed to Driver resize coordinates."""
 import copy
+import contextlib
 import json
+import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -147,3 +150,96 @@ class PopupCoordinateRoutingTests(unittest.TestCase):
         answer = self.guard.call("get_window_state", {"pid": -1, "window_id": 200})
         self.assertTrue(answer["isError"])
         self.assertIsNone(self.guard._native_popup_frame)
+
+    @contextlib.contextmanager
+    def cleanup_failure(self, *, fallback=False, uncertain=False, escaped=False):
+        """Real native/Guard code with fault-injected Win32; no desktop input."""
+        def driver(request, result):
+            if request["name"] == ("click" if fallback else "get_window_state"):
+                result.clear(); result.update(missing())
+        self.transport.after = driver
+        def capture(target, geometry):
+            return {"structuredContent": {**target, "backend": "owned-popup-printwindow",
+                    "screenshot_width": 100, "screenshot_height": 100},
+                    "content": [{"type": "image", "mimeType": "image/png", "data": png(100, 100)}]}
+        user = mock.Mock()
+        user.SetThreadDpiAwarenessContext.return_value = 0
+        user.ScreenToClient.return_value = True
+        user.ChildWindowFromPointEx.return_value = 300
+        user.WindowFromPoint.return_value = 300
+        user.IsWindowEnabled.return_value = True
+        def thread(_, pid):
+            pid._obj.value = TARGET["pid"]
+            return 7
+        user.GetWindowThreadProcessId.side_effect = thread
+        user.SetCursorPos.return_value = True
+        user.SendMessageTimeoutW.return_value = True
+        user.PostMessageW.return_value = not uncertain
+        probe = mock.Mock()
+        probe.ownership_path.side_effect = lambda child, owner: [300, 200] if child == 300 and owner == 200 else None
+        from closing import ProbeError
+        probe.close.side_effect = ProbeError("process_handle_close_failed")
+        proof = {"bounds": (0, 0, 100, 100)}
+        with contextlib.ExitStack() as stack:
+            for patch in (mock.patch.object(popup, "capture", side_effect=capture),
+                    mock.patch.object(popup, "popup_proof", return_value=proof),
+                    mock.patch.object(popup, "_binding", return_value=({}, proof)),
+                    mock.patch.object(popup, "_user", return_value=user),
+                    mock.patch("closing.NativeClosureProbe", return_value=probe),
+                    mock.patch("privileges.input_integrity_preflight", return_value=None)):
+                stack.enter_context(patch)
+            if escaped:
+                # Unknown native errors must be conservative even if a future
+                # native implementation accidentally lets cleanup escape.
+                def escaped_click(*args):
+                    user.PostMessageW(300, 0x202, 0, 0)
+                    raise ProbeError("process_handle_close_failed")
+                stack.enter_context(mock.patch.object(popup, "click", side_effect=escaped_click))
+            yield user
+
+    def test_both_native_routes_keep_delivery_after_cleanup_failure(self):
+        for fallback in (False, True):
+            for uncertain in (False, True):
+                with self.subTest(fallback=fallback, uncertain=uncertain), \
+                        self.cleanup_failure(fallback=fallback, uncertain=uncertain) as user:
+                    result = self.run_step()
+                    self.assertTrue(result["input_dispatched"])
+                    self.assertIs(result["native_delivery"]["input_sent"], None if uncertain else True)
+                    self.assertEqual(result["native_delivery"]["cleanup_failures"], ["probe_close"])
+                    self.assertFalse(result["task_verified"])
+                    self.assertEqual(user.PostMessageW.call_count, 1)
+
+    def test_escaped_native_exception_is_unknown_in_both_routes(self):
+        for fallback in (False, True):
+            with self.subTest(fallback=fallback), self.cleanup_failure(fallback=fallback, escaped=True) as user:
+                result = self.run_step()
+                self.assertTrue(result["input_dispatched"])
+                self.assertIsNone(result["native_delivery"]["input_sent"])
+                self.assertEqual(result["native_delivery"]["delivery_phase"], "native")
+                self.assertEqual(result["native_delivery"]["release_delivery"], "unknown")
+                self.assertFalse(result["task_verified"])
+                self.assertEqual(user.PostMessageW.call_count, 1)
+
+    def test_same_run_resume_never_repeats_native_input_after_cleanup_failure(self):
+        from test_workflows import FakeRuntime
+        from workflows import WorkflowRunner
+        for fallback in (False, True):
+            for outcome in ("sent", "unknown", "escaped"):
+                with self.subTest(fallback=fallback, outcome=outcome), tempfile.TemporaryDirectory() as folder, \
+                        self.cleanup_failure(fallback=fallback, uncertain=outcome == "unknown",
+                                             escaped=outcome == "escaped") as user:
+                    runtime = FakeRuntime(folder)
+                    runtime.stop_event = threading.Event()
+                    runtime.image_action = lambda step, target: self.run_step(step)
+                    workflow = WorkflowRunner(folder)
+                    task = {"id": "cleanup", "revision": 1, "program_ids": ["editor"], "variables": {},
+                        "steps": [{"program_id": "editor", **self.step},
+                                  {"program_id": "editor", "operation": "checkpoint", "message": "Verify actual output"}]}
+                    targets = [{"program_id": "editor", **TARGET}]
+                    first = workflow.run(runtime, task, {}, targets)
+                    self.assertEqual(user.PostMessageW.call_count, 1)
+                    self.assertFalse(first["task_verified"])
+                    second = workflow.run(runtime, task, {}, targets, resume_run_id=first["run_id"])
+                    self.assertEqual(second["run_id"], first["run_id"])
+                    self.assertEqual(user.PostMessageW.call_count, 1)
+                    self.assertFalse(second["task_verified"])

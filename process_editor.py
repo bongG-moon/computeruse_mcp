@@ -99,6 +99,7 @@ ACTION_LABELS["wait_for_state"] = "완료 조건이 될 때까지 대기"
 ACTION_LABELS["wait_for_window"] = "관련 팝업 연결"
 ACTION_LABELS["expand_menu"] = "하위 메뉴 펼치기"
 ACTION_LABELS["menu_command"] = "메뉴 명령 실행"
+ACTION_LABELS["open_grid_menu"] = "현재 결과 표의 메뉴 열기"
 ACTION_LABELS.update({mapped: ACTION_LABELS.get(action, "스크롤") + " (이미지)" for action, mapped in IMAGE_ACTIONS.items()})
 ACTION_LABELS["manual_entry"] = "기록 내용 확인 필요"
 MANUAL_REASONS = {"unknown_input": "입력할 내용을 직접 지정하세요.",
@@ -604,7 +605,7 @@ class ProcessDraft:
             for index in range(len(self.steps), len(proposed)-1):
                 item, following = proposed[index], proposed[index+1]
                 if (item.get("review_origin") == "recording_generated" and item.get("opened_from")
-                        and (following.get("image_target") or following.get("operation") == "expand_menu" and following.get("menu_target"))
+                        and (following.get("image_target") or following.get("operation") in {"expand_menu", "menu_command"} and following.get("menu_target"))
                         and following.get("operation") != "manual_entry"
                         and (item.get("program_id"), item.get("window_ref")) ==
                             (following.get("program_id"), following.get("window_ref"))):
@@ -668,6 +669,108 @@ class ProcessDraft:
             self.labels[index] = "이미지 입력 · 사용자 지정 값"
         self._resolve_target_warnings()
 
+    def grid_export_setup(self, index):
+        """List existing recipe relationships; this is not provider evidence."""
+        if type(index) is not int or not 0 <= index < len(self.steps):
+            raise OperationError("표 메뉴를 열었던 단계를 선택하세요.", "grid_intent_step_required")
+        source = self.steps[index]
+        if source.get("operation") not in {"right_click", "image_right_click", "open_grid_menu"}:
+            raise OperationError("표에서 메뉴를 여는 오른쪽 클릭만 지정할 수 있습니다.", "grid_intent_step_required")
+        key = lambda row: (row.get("program_id"), row.get("window_ref", "main"))
+        cursor, menu_ref = index+1, source.get("window_ref", "main")
+        if cursor < len(self.steps) and self.steps[cursor].get("operation") == "wait_for_window":
+            wait = self.steps[cursor]
+            if wait.get("program_id") != source["program_id"] or wait.get("owner_ref") != menu_ref:
+                raise OperationError("표와 메뉴의 소유 관계를 다시 지정하세요.", "grid_menu_relation_unverified")
+            cursor, menu_ref = cursor+1, wait["window_ref"]
+        if cursor < len(self.steps) and self.steps[cursor].get("operation") == "checkpoint":
+            cursor += 1
+        parent = self.steps[cursor] if cursor < len(self.steps) else {}
+        if (parent.get("operation") != "expand_menu" or key(parent) != (source["program_id"], menu_ref)
+                or not parent.get("menu_target")):
+            raise OperationError("연결된 부모 메뉴를 먼저 요소 방식으로 지정하세요. 전체 녹화 대신 해당 메뉴 단계만 보완할 수 있습니다.", "grid_menu_semantics_required")
+        queries = []
+        for position, step in enumerate(self.steps[:index]):
+            if (key(step) == key(source) and step.get("step_id")
+                    and step.get("operation") in {"click", "image_click", "press_key", "image_press_key", "hotkey", "image_hotkey"}
+                    and any(check.get("require_change") is True for check in step.get("expect", []))):
+                queries.append({"step_id": step["step_id"], "index": position,
+                                "label": _preview_text(self.labels[position], 160)})
+        return {"index": index, "query_steps": queries, "menu_target": copy.deepcopy(parent["menu_target"]),
+                "input_dispatched": False,
+                "message": "대상 표와 활성 시트를 선택하세요. 조회 완료 조건은 앞서 지정한 결과 변화 조건을 재사용합니다." if queries else
+                           "먼저 조회 단계의 완료 기준에 실제 결과 변화를 지정하세요. 기존 단계는 유지됩니다."}
+
+    def define_grid_export(self, index, grid_intent, menu_target, *, query_step_id, observation):
+        """Explicitly edit a context-menu target, never reinterpret all right clicks.
+
+        The local command supplies a fresh read-only provider observation.
+        No captured cell text, frame, runtime index or HWND enters this recipe.
+        Saving this draft creates an ordinary revision; an active run snapshot
+        and the raw recording receipt are not modified here.
+        """
+        from grid_intent import inspect_grid_intent, validate_grid_intent
+        from semantic_menus import validate_menu_target
+        from task_inputs import STEP_ID
+        if type(index) is not int or not 0 <= index < len(self.steps):
+            raise OperationError("표 메뉴를 열었던 단계를 선택하세요.", "grid_intent_step_required")
+        previous = self.steps[index]
+        if previous.get("operation") not in {"right_click", "image_right_click", "open_grid_menu"}:
+            raise OperationError("표에서 메뉴를 여는 오른쪽 클릭만 내보내기 대상으로 지정할 수 있습니다.", "grid_intent_step_required")
+        intent = validate_grid_intent(grid_intent)
+        menu = validate_menu_target(menu_target)
+        key = lambda row: (row.get("program_id"), row.get("window_ref", "main"))
+        target = self.targets[key(previous)]
+        expected = {field: target[field] for field in ("pid", "window_id")}
+        if (not isinstance(observation, dict) or observation.get("target") != expected
+                or observation.get("read_only") is not True or observation.get("authorizes_input") is not False):
+            raise OperationError("현재 연결 창의 읽기 전용 표 관찰이 필요합니다.", "grid_observation_invalid")
+        if not isinstance(query_step_id, str) or not STEP_ID.fullmatch(query_step_id):
+            raise OperationError("이번 조회의 완료 조건을 가진 앞 단계를 선택하세요.", "grid_query_step_required")
+        queries = [(i, item) for i, item in enumerate(self.steps) if item.get("step_id") == query_step_id]
+        if (len(queries) != 1 or queries[0][0] >= index or key(queries[0][1]) != key(previous)
+                or queries[0][1].get("operation") not in {"click", "image_click", "press_key", "image_press_key", "hotkey", "image_hotkey"}
+                or not any(check.get("require_change") is True for check in queries[0][1].get("expect", []))):
+            raise OperationError("같은 업무 창에서 실제 결과 변화를 확인하는 앞선 조회 동작을 지정하세요.", "grid_query_step_required")
+        # The requested menu name must already be grounded in the related
+        # recorded/retargeted parent. A typed REA Name is never menu evidence.
+        cursor, menu_ref = index + 1, previous.get("window_ref", "main")
+        if cursor < len(self.steps) and self.steps[cursor].get("operation") == "wait_for_window":
+            wait = self.steps[cursor]
+            if wait.get("program_id") != previous["program_id"] or wait.get("owner_ref") != menu_ref:
+                raise OperationError("표 우클릭과 관련 메뉴의 창 연결이 다릅니다.", "grid_menu_relation_unverified")
+            menu_ref = wait["window_ref"]
+            cursor += 1
+        if cursor < len(self.steps) and self.steps[cursor].get("operation") == "checkpoint":
+            check = self.steps[cursor]
+            if (key(check) != (previous["program_id"], menu_ref)
+                    or check.get("opened_from", previous.get("window_ref", "main")) != previous.get("window_ref", "main")):
+                raise OperationError("표 메뉴와 확인 단계의 창 관계가 다릅니다.", "grid_menu_relation_unverified")
+            cursor += 1
+        parent = self.steps[cursor] if cursor < len(self.steps) else {}
+        if (parent.get("operation") != "expand_menu" or key(parent) != (previous["program_id"], menu_ref)
+                or parent.get("menu_target") != menu):
+            raise OperationError("연결된 부모 메뉴를 먼저 요소 방식으로 지정하세요. 전체 녹화 대신 해당 메뉴 단계만 보완할 수 있습니다.", "grid_menu_semantics_required")
+        # A stale image precondition cannot silently survive on this different
+        # target contract, nor may an explicit human review be bypassed.
+        if previous.get("precondition_step_id"):
+            raise OperationError("표 우클릭 앞의 이미지 사전 조건을 먼저 검토하세요. 기존 확인을 자동으로 없애지 않습니다.", "grid_precondition_review_required")
+        current = inspect_grid_intent(observation, intent)
+        proposed = copy.deepcopy(self.steps)
+        step = {"operation": "open_grid_menu", "program_id": previous["program_id"],
+                "window_ref": previous.get("window_ref", "main"), "grid_intent": intent,
+                "menu_target": menu, "query_step_id": query_step_id, "verification_timeout_ms": 3000}
+        if previous.get("step_id"):
+            step["step_id"] = previous["step_id"]
+        proposed[index] = step
+        self.validate(proposed, allow_pending=True)
+        self.steps = proposed
+        self.labels[index] = intent["grid_selector"].get("name", intent["grid_selector"].get("automation_id", "현재 결과 표"))
+        return {"affected_steps": [{"index": index, "step_id": step.get("step_id"), "operation": step["operation"]}],
+                "authoring_origin": "explicit_local_edit", "recognition": "grid_intent",
+                "query_verified": current["query_verified"], "input_dispatched": False,
+                "snapshot_unchanged": True, "requires_save": True}
+
     def retarget(self, index, native):
         if type(index) is not int or not 0 <= index < len(self.steps) or "image_target" not in self.steps[index]:
             raise OperationError("이미지가 있는 동작 단계를 선택하세요.")
@@ -722,6 +825,8 @@ class ProcessDraft:
         if type(index) is not int or not 0 <= index < len(self.steps):
             raise OperationError("다시 지정할 동작 단계를 선택하세요.")
         previous = self.steps[index]
+        if previous.get("operation") == "open_grid_menu":
+            raise OperationError("표 내보내기 대상은 표, 시트와 선택 범위를 함께 다시 확인하세요.", "grid_intent_edit_required")
         if previous.get("manual_reason") == "menu_expansion_unverified":
             raise OperationError(MANUAL_REASONS["menu_expansion_unverified"], "menu_expansion_unverified")
         if previous.get("manual_reason") == "protected_input":
@@ -840,7 +945,7 @@ class ProcessDraft:
             if eligible and not linked:
                 raise OperationError("자동 확인과 동작의 연결 또는 기존 대상이 다릅니다. 두 단계를 검토한 뒤 다시 지정하세요.", "popup_condition_link_mismatch")
             if eligible and linked:
-                if promote_menu and mode == "popup_image" and action.get("operation") == "expand_menu" and action.get("menu_target"):
+                if promote_menu and mode == "popup_image" and action.get("operation") in {"expand_menu", "menu_command"} and action.get("menu_target"):
                     from checkpoint_groups import popup_condition
                     popup_condition(check, action)
                     changed.update((check_index, check_index+1))
@@ -943,6 +1048,7 @@ class ProcessDraft:
             step["review_origin"] = "explicit"
             step.pop("image_target", None)
             step.pop("menu_target", None)
+            step.pop("menu_purpose", None)
             linked_id = step.pop("linked_step_id", None)
             for other in proposed:
                 if other.get("step_id") == linked_id and other.get("precondition_step_id") == step.get("step_id"):
@@ -1009,27 +1115,85 @@ class ProcessDraft:
             raise
         self.steps = proposed
 
+    def completion_targets(self, index):
+        """Local authoring choices, never a new app/window permission."""
+        if type(index) is not int or not 0 <= index < len(self.steps):
+            raise OperationError("완료 기준을 바꿀 단계를 선택하세요.")
+        step = self.steps[index]
+        refs = {step.get("window_ref", "main")}
+        if step["operation"] == "menu_command":
+            refs = {"main"} | {row["window_ref"] for row in self.steps[:index]
+                if row.get("operation") == "wait_for_window" and row.get("program_id") == step["program_id"]}
+        result = []
+        for ref in sorted(refs, key=lambda value: (value != "main", value)):
+            target = self.targets.get((step["program_id"], ref))
+            if target is not None and all(type(target.get(key)) is int and target[key] > 0 for key in ("pid", "window_id")):
+                result.append({"window_ref": ref, "label": _preview_text(target.get("label", ref), 300),
+                    "same_as_input": ref == step.get("window_ref", "main")})
+        return result
+
     def completion(self, payload):
-        if set(payload) != {"index", "selection_id", "property", "equals"} or type(payload["index"]) is not int or not 0 <= payload["index"] < len(self.steps):
+        if (set(payload) - {"index", "selection_id", "property", "equals", "require_change", "completion_window_ref", "condition_index"}
+                or not {"index", "selection_id", "property", "equals"} <= set(payload)
+                or type(payload.get("require_change", False)) is not bool
+                or type(payload["index"]) is not int or not 0 <= payload["index"] < len(self.steps)):
             raise OperationError("완료 기준을 바꿀 단계와 확인 대상을 선택하세요.")
         index = payload["index"]
         step = copy.deepcopy(self.steps[index])
         was_deferred = not step.get("expect") and (step.get("completion_mode") == "human" or step["operation"].startswith("image_"))
-        if step["operation"] not in {*IMAGE_ACTIONS.values(), "click", "double_click", "right_click", "set_value", "select_option", "set_checked", "press_key", "hotkey", "wait_for_state"}:
+        if step["operation"] not in {*IMAGE_ACTIONS.values(), "click", "double_click", "right_click", "set_value", "select_option", "set_checked", "press_key", "hotkey", "wait_for_state", "menu_command"}:
             raise OperationError("동작 또는 완료 대기 단계에 결과 조건을 지정하세요.")
-        target = self.targets[(step["program_id"], step.get("window_ref", "main"))]
+        completion_ref = payload.get("completion_window_ref", step.get("completion_window_ref", step.get("window_ref", "main")))
+        if not isinstance(completion_ref, str) or completion_ref not in {row["window_ref"] for row in self.completion_targets(index)}:
+            raise OperationError("같은 프로그램에서 이 단계 전에 연결된 결과 창을 선택하세요.", "completion_window_unavailable")
+        target = self.targets[(step["program_id"], completion_ref)]
         selected = self.selection(payload["selection_id"], target)
         if selected.get("recognition") == "image": raise OperationError("값을 제공하는 확인 요소를 선택하세요.")
+        checks = step.get("expect", [])
+        condition_index = payload.get("condition_index")
+        if "condition_index" in payload:
+            if type(condition_index) is not int or not -1 <= condition_index < len(checks):
+                raise OperationError("수정할 완료 조건을 다시 선택하세요. 다른 조건은 변경하지 않았습니다.", "completion_condition_unavailable")
+        else:
+            # Older editors identify the result element, not a list entry.
+            # Update that one condition or add a new one; never replace the list.
+            matches = [i for i, item in enumerate(checks) if item["selector"] == selected["selector"]
+                       and item["property"] == payload["property"]]
+            if len(matches) > 1:
+                raise OperationError("같은 요소의 완료 조건이 여러 개입니다. 수정할 조건을 목록에서 선택하세요.", "completion_condition_ambiguous")
+            condition_index = matches[0] if matches else -1
+        previous_ref = step.get("completion_window_ref", step.get("window_ref", "main"))
+        retained_count = len(checks) - (condition_index >= 0)
+        if retained_count and completion_ref != previous_ref:
+            raise OperationError("다른 완료 조건의 확인 창을 바꾸지 않도록 기존 결과 창에서 수정하거나 추가하세요.", "completion_window_in_use")
         check = {"selector": copy.deepcopy(selected["selector"]), "property": payload["property"], "equals": copy.deepcopy(payload["equals"])}
-        if step["operation"].startswith("image_"): check["require_change"] = True
-        step["expect"] = [check]
-        step.pop("completion_mode", None)
+        requires_change = payload.get("require_change", checks[condition_index].get("require_change", False) if condition_index >= 0 else False)
+        other_change = any(item.get("require_change") for i, item in enumerate(checks) if i != condition_index)
+        if (step["operation"].startswith("image_") or requires_change
+                or step["operation"] == "menu_command" and not other_change):
+            check["require_change"] = True
+        if condition_index >= 0:
+            checks[condition_index] = check
+        else:
+            checks.append(check)
+        step["expect"] = checks
+        if step["operation"] == "menu_command":
+            step["completion_mode"] = "conditions"
+            step["completion_window_ref"] = completion_ref
+        else:
+            step.pop("completion_mode", None)
         proposed, labels = copy.deepcopy(self.steps), list(self.labels)
         proposed[index] = step
         if was_deferred and index + 1 < len(proposed):
             following = proposed[index + 1]
-            if (following.get("operation") == "checkpoint" and following.get("review_origin") == "recording_generated" and not any(k in following for k in ("opened_from", "return_from"))
-                    and (following["program_id"], following.get("window_ref", "main")) == (step["program_id"], step.get("window_ref", "main"))):
+            paired_return = (step["operation"] == "menu_command"
+                and following.get("return_from") == step.get("window_ref", "main")
+                and following.get("window_ref", "main") == completion_ref)
+            same_window = (not any(k in following for k in ("opened_from", "return_from"))
+                and following.get("window_ref", "main") == step.get("window_ref", "main") == completion_ref)
+            if (following.get("operation") == "checkpoint" and following.get("review_origin") == "recording_generated"
+                    and "opened_from" not in following and "linked_step_id" not in following
+                    and following["program_id"] == step["program_id"] and (paired_return or same_window)):
                 proposed.pop(index + 1); labels.pop(index + 1)
         self.validate(proposed, allow_pending=True)
         self.steps, self.labels = proposed, labels
@@ -1170,9 +1334,19 @@ class ProcessDraft:
                           + ("별도 팝업" if "child_window" in step else "같은 창의 논리 자식")
                           + " · 최종 명령과 파일 생성은 별도 확인")
             if action == "menu_command":
-                detail = " → ".join(part["name"] for part in step["menu_target"]["path"]) + " | 실제 명령 결과는 다음 확인에서 검증"
+                detail = " → ".join(part["name"] for part in step["menu_target"]["path"])
+                if step.get("completion_mode") == "conditions":
+                    detail += " | " + step.get("completion_window_ref", step.get("window_ref", "main")) + "에서 이번 명령 이후 결과 변화 확인"
+                    for check in step.get("expect", []):
+                        detail += " → " + str(check["selector"].get("name", check["selector"].get("automation_id", "결과 요소"))) + " = " + str(check["equals"])
+                else:
+                    detail += " | 실제 명령 결과는 다음 확인에서 검증"
+            if action == "open_grid_menu":
+                intent = step["grid_intent"]
+                scope = "활성 시트 전체" if intent["export_scope"] == "whole_active_sheet" else "현재 선택 범위"
+                detail = scope + " | 현재 표와 시트, 선택 범위를 다시 확인한 뒤 데이터 셀에서 메뉴 열기 | 출력 완료는 별도 확인"
             if step.get("review_mode") == "menu_semantic":
-                action_label = "부모 메뉴 상태 확인"
+                action_label = "최종 메뉴 명령 상태 확인" if step.get("menu_purpose") == "command" else "부모 메뉴 상태 확인"
                 detail = " → ".join(part["name"] for part in step["menu_target"]["path"]) + " | 표시와 사용 가능 상태 확인"
             if step.get("review_mode") == "deferred_visual":
                 final_index = next((i+1 for i, row in enumerate(self.steps) if row.get("step_id") == step.get("review_after")), "?")
@@ -1185,9 +1359,10 @@ class ProcessDraft:
             if candidate:
                 detail = "두 번 클릭해 입력 위치 후보 이미지를 확인하고 입력할 값을 한 번 지정하세요. 입력한 글자는 기록하지 않았습니다. 위치가 다르면 그 단계만 다시 선택할 수 있습니다."
             rows.append({"index": index, "program": target["label"], "label": label, "action": action,
-                         "action_label": action_label, "recognition": "image_candidate" if candidate else "image" if "image_target" in step else "unresolved" if action == "manual_entry" else "uia",
+                         "action_label": action_label, "recognition": "grid_intent" if action == "open_grid_menu" else "menu_semantic" if step.get("menu_target") else "image_candidate" if candidate else "image" if "image_target" in step else "unresolved" if action == "manual_entry" else "uia",
                          "requires_input": action == "manual_entry", "editable_input": editable_input, "detail": detail,
-                         "repairable": (action == "manual_entry" or "image_target" in step or "selector" in step or "menu_target" in step) and step.get("manual_reason") not in {"protected_input", "menu_expansion_unverified"},
+                         "repairable": action != "open_grid_menu" and (action == "manual_entry" or "image_target" in step or "selector" in step or "menu_target" in step) and step.get("manual_reason") not in {"protected_input", "menu_expansion_unverified"},
+                         "grid_intent_editable": action in {"right_click", "image_right_click", "open_grid_menu"},
                          "repair_action": step.get("repair_action", ""),
                          **({"input_target_candidate": copy.deepcopy(INPUT_CANDIDATE_PROOF)} if candidate else {}),
                          "summary": f"{index+1}. {action_label} · {label} · {detail}"})
@@ -1343,7 +1518,7 @@ class ProcessEditors:
         # Only authoring snapshots are reversible. App input and approval
         # receipts are never undone, synthesized or restored by this history.
         action = command.get('action')
-        tracked = action in {'input_edit', 'edit_step', 'set_completion', 'add_step', 'remove_step', 'move_step', 'resolve_input', 'retarget_step'}
+        tracked = action in {'input_edit', 'edit_step', 'set_completion', 'add_step', 'remove_step', 'move_step', 'resolve_input', 'retarget_step', 'define_grid_export', 'define_grid_export_selection'}
         before = copy.deepcopy(job['draft'].__dict__) if tracked else None
         try:
             answer = self._command_impl(job, command)
@@ -1401,6 +1576,80 @@ class ProcessEditors:
             draft.steps, draft.variables = edit_inputs(draft.steps, draft.variables, payload.get('edit', payload))
             draft.validate(allow_pending=True)
             return {'status': 'ok', 'message': '입력값과 연결된 확인 조건을 함께 반영했습니다.', 'steps': draft.summaries()}
+        if action == 'define_grid_export':
+            if set(payload) != {'index', 'grid_intent', 'menu_target', 'query_step_id'}:
+                raise OperationError('표 메뉴 단계, 출력 의도, 실제 메뉴 경로와 앞선 조회 단계를 지정하세요.', 'invalid_grid_intent_edit')
+            index = payload['index']
+            if type(index) is not int or not 0 <= index < len(draft.steps):
+                raise OperationError('표 메뉴를 열었던 단계를 선택하세요.', 'grid_intent_step_required')
+            from grid_intent import validate_grid_intent
+            intent = validate_grid_intent(payload['grid_intent'])
+            step = draft.steps[index]
+            target = draft.targets[(step['program_id'], step.get('window_ref', 'main'))]
+            exact = {key: target[key] for key in ('pid', 'window_id')}
+            callback = getattr(runtime, 'observe_grid_context', None)
+            if not callable(callback):
+                raise OperationError('현재 표와 선택 범위를 읽는 도우미가 없습니다. 전체 설치본을 갱신하세요.', 'grid_observation_unavailable')
+            self._program(job, target['program_id'], exact)
+            with runtime.execution_lock:
+                observation = callback(exact, intent, timeout_ms=2000)
+                self._program(job, target['program_id'], exact)
+                self._check(job)
+                result = draft.define_grid_export(index, intent, payload['menu_target'],
+                    query_step_id=payload['query_step_id'], observation=observation)
+            return {'status': 'ok', 'message': '현재 표, 활성 시트와 선택 범위를 확인했습니다. 저장하면 새 버전에 반영되며 실행 중인 기록은 그대로 유지됩니다.',
+                    **result, 'steps': draft.summaries()}
+        if action == 'grid_export_setup':
+            if set(payload) != {'index'}:
+                raise OperationError('표 메뉴 단계를 선택하세요.', 'invalid_grid_intent_edit')
+            return {'status': 'ok', 'grid_export_setup': draft.grid_export_setup(payload['index']), 'input_dispatched': False}
+        if action == 'pick_grid_export':
+            if set(payload) != {'index', 'purpose'} or payload['purpose'] not in {'grid', 'sheet', 'view'}:
+                raise OperationError('표 또는 의미 상태의 요소를 선택하세요.', 'invalid_grid_intent_edit')
+            draft.grid_export_setup(payload['index'])
+            result = self._command_impl(job, {'action': 'pick_completion', 'payload': {'index': payload['index']}})
+            if payload['purpose'] == 'sheet' and result.get('selection', {}).get('role') != 'TabItem':
+                raise OperationError('현재 표에서 선택된 시트 탭을 선택하세요. 입력칸이나 셀 값은 활성 시트의 증거로 사용하지 않습니다. 시트 탭을 읽지 못하면 기존 기록을 유지합니다.', 'grid_active_sheet_unavailable')
+            result['grid_purpose'] = payload['purpose']
+            return result
+        if action == 'define_grid_export_selection':
+            required = {'index', 'grid_selection_id', 'sheet_selection_id', 'query_step_id', 'export_scope',
+                        'sheet_condition', 'view_conditions', 'view_conditions_confirmed', 'allow_empty'}
+            if (set(payload) != required or payload['view_conditions_confirmed'] is not True
+                    or not isinstance(payload['view_conditions'], list) or len(payload['view_conditions']) > 20):
+                raise OperationError('출력 범위와 숨김 열 및 필터 조건을 직접 확인하세요.', 'invalid_grid_intent_edit')
+            setup = draft.grid_export_setup(payload['index'])
+            step = draft.steps[payload['index']]
+            target = draft.targets[(step['program_id'], step.get('window_ref', 'main'))]
+            def picked(identity):
+                item = draft.selection(identity, target)
+                if item.get('recognition') != 'uia' or not item.get('selector'):
+                    raise OperationError('이미지 대신 실제 값과 계층을 제공하는 요소를 선택하세요.', 'grid_observation_unavailable')
+                return item
+            def condition(selection_id, value):
+                if not isinstance(value, dict) or set(value) != {'property', 'equals'}:
+                    raise OperationError('조건 속성과 기대값을 지정하세요.', 'invalid_grid_intent_edit')
+                return {'selector': copy.deepcopy(picked(selection_id)['selector']), **copy.deepcopy(value)}
+            sheet_condition = condition(payload['sheet_selection_id'], payload['sheet_condition'])
+            if (sheet_condition['selector'].get('role') != 'TabItem'
+                    or not isinstance(sheet_condition['property'], str)
+                    or sheet_condition['property'] not in {'selected', 'name'}
+                    or sheet_condition['property'] == 'selected' and sheet_condition['equals'] is not True):
+                raise OperationError('활성 시트는 현재 선택된 시트 탭의 선택 상태 또는 이름으로 확인하세요. 입력칸과 셀의 값은 사용할 수 없습니다.', 'grid_active_sheet_unavailable')
+            queries = [item for item in draft.steps[:payload['index']] if item.get('step_id') == payload['query_step_id']]
+            if len(queries) != 1 or payload['query_step_id'] not in {item['step_id'] for item in setup['query_steps']}:
+                raise OperationError('앞선 조회 완료 단계를 선택하세요.', 'grid_query_step_required')
+            view = []
+            for item in payload['view_conditions']:
+                if not isinstance(item, dict) or set(item) != {'selection_id', 'property', 'equals'}:
+                    raise OperationError('숨김 열 및 필터 조건의 요소와 기대값을 지정하세요.', 'invalid_grid_intent_edit')
+                view.append(condition(item['selection_id'], {key: item[key] for key in ('property', 'equals')}))
+            intent = {'format': 'computer-grid-intent/v1', 'grid_selector': copy.deepcopy(picked(payload['grid_selection_id'])['selector']),
+                'export_scope': payload['export_scope'], 'active_sheet': sheet_condition,
+                'ready_when': [{key: copy.deepcopy(value) for key, value in item.items() if key != 'require_change'} for item in queries[0]['expect']],
+                'view_conditions': view, 'allow_empty': payload['allow_empty']}
+            return self._command_impl(job, {'action': 'define_grid_export', 'payload': {
+                'index': payload['index'], 'grid_intent': intent, 'menu_target': setup['menu_target'], 'query_step_id': payload['query_step_id']}})
         if action in {'undo', 'redo'}:
             source, destination = ('undo', 'redo') if action == 'undo' else ('redo', 'undo')
             if not job.get(source): raise OperationError('되돌릴 편집이 없습니다.')
@@ -1444,6 +1693,13 @@ class ProcessEditors:
                 preview["preview_anchor"] = copy.deepcopy(step["image_target"]["anchor"])
             preview["review_mode"] = step.get("review_mode", "human")
             preview["review_origin"] = step.get("review_origin", "explicit")
+            preview["completion_editable"] = step["operation"] in {*IMAGE_ACTIONS.values(), "click", "double_click", "right_click", "set_value", "select_option", "set_checked", "press_key", "hotkey", "wait_for_state", "menu_command"}
+            if preview["completion_editable"]:
+                preview["completion_targets"] = draft.completion_targets(index)
+                preview["completion_window_ref"] = step.get("completion_window_ref", "main" if step["operation"] == "menu_command" else step.get("window_ref", "main"))
+                preview["completion_conditions"] = copy.deepcopy(step.get("expect", []))
+            if step.get("operation") == "open_grid_menu":
+                preview['grid_export'] = {key: copy.deepcopy(step[key]) for key in ('grid_intent', 'menu_target', 'query_step_id')}
             preview["editable"] = {key: copy.deepcopy(step[key]) for key in ("value", "message", "key", "keys", "duration_ms", "timeout_ms", "checked") if key in step}
             if len(step.get("expect", [])) == 1:
                 preview["editable"]["expected"] = copy.deepcopy(step["expect"][0]["equals"])
@@ -1502,9 +1758,18 @@ class ProcessEditors:
             step_index = None
             if action == "pick_completion":
                 step_index = payload.get("index")
-                if set(payload) != {"index"} or type(step_index) is not int or not 0 <= step_index < len(draft.steps): raise OperationError("완료 기준을 지정할 단계를 선택하세요.")
+                if set(payload) - {"index", "completion_window_ref", "condition_index"} or type(step_index) is not int or not 0 <= step_index < len(draft.steps): raise OperationError("완료 기준을 지정할 단계를 선택하세요.")
                 step = draft.steps[step_index]
-                picked_target = draft.targets[(step["program_id"], step.get("window_ref", "main"))]
+                condition_index = payload.get("condition_index")
+                if "condition_index" in payload and (type(condition_index) is not int or not -1 <= condition_index < len(step.get("expect", []))):
+                    raise OperationError("수정할 완료 조건을 다시 선택하세요.", "completion_condition_unavailable")
+                completion_ref = payload.get("completion_window_ref", step.get("completion_window_ref", step.get("window_ref", "main")))
+                if not isinstance(completion_ref, str) or completion_ref not in {row["window_ref"] for row in draft.completion_targets(step_index)}:
+                    raise OperationError("같은 프로그램의 이미 연결된 결과 창을 선택하세요.", "completion_window_unavailable")
+                if (len(step.get("expect", [])) - (condition_index is not None and condition_index >= 0)
+                        and completion_ref != step.get("completion_window_ref", step.get("window_ref", "main"))):
+                    raise OperationError("기존 완료 조건과 같은 결과 창에서 요소를 선택하세요.", "completion_window_in_use")
+                picked_target = draft.targets[(step["program_id"], completion_ref)]
                 payload = {**picked_target, "purpose": "expect"}
                 payload.pop("label", None)
             if set(payload) - {"program_id", "pid", "window_id", "window_ref", "purpose"} or payload.get("purpose") not in {"action", "expect"}:
@@ -1529,7 +1794,18 @@ class ProcessEditors:
                     raise OperationError("이 영역은 값 정보를 제공하지 않습니다. 자동 확인은 값이 읽히는 요소를 선택하거나 화면 확인 단계를 사용하세요.", "completion_not_exposed")
                 picked = draft.remember_image(target, native)
             extra = {"purpose": payload["purpose"], "selection": picked}
-            if step_index is not None: extra["completion_index"] = step_index
+            if step_index is not None:
+                extra["completion_index"] = step_index
+                extra["selection"]["completion_window_ref"] = completion_ref
+                extra["selection"]["completion_for_menu"] = draft.steps[step_index]["operation"] == "menu_command"
+                other_change = any(check.get("require_change") for i, check in enumerate(draft.steps[step_index].get("expect", [])) if i != condition_index)
+                extra["selection"]["completion_change_required"] = (draft.steps[step_index]["operation"].startswith("image_")
+                    or draft.steps[step_index]["operation"] == "menu_command" and not other_change)
+                if condition_index is not None:
+                    extra["selection"]["condition_index"] = condition_index
+                    if condition_index >= 0:
+                        extra["selection"]["completion_condition"] = copy.deepcopy(draft.steps[step_index]["expect"][condition_index])
+                extra["selection"]["completion_condition_count"] = len(draft.steps[step_index].get("expect", []))
             message = "선택한 대상을 기억했습니다. 요소 정보가 있으면 요소로, 없으면 같은 선택 이미지를 사용합니다."
         elif action in {"pick_element", "pick_image"}:
             if set(payload) - {"program_id", "pid", "window_id", "window_ref", "purpose"} or payload.get("purpose") not in {"action", "expect"}:
@@ -1684,6 +1960,7 @@ class ProcessEditors:
             draft.completion(payload)
             message = ("자동 완료 기준을 지정했습니다. 이 동작의 자동 생성 화면 확인을 생략합니다."
                 if len(draft.steps) < previous_count else "자동 완료 기준을 지정했습니다. 명시적으로 남긴 화면 확인은 유지합니다.")
+            message += " 다른 완료 조건은 유지했습니다."
         elif action == "test_run":
             if not {'name', 'description'} <= set(payload) or set(payload) - {'name', 'description', 'inputs'}: raise OperationError('프로세스 이름과 설명을 확인하세요.')
             from task_inputs import resolve_values

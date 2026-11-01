@@ -47,6 +47,7 @@ VISUAL_TOOLS_NAME = "Computer Use MCP 이미지 도구.exe"
 SCOPED_CONTROLS_NAME = "Computer Use MCP 빠른 확인.exe"
 CHECKPOINT_REVIEW_NAME = "Computer Use MCP 화면 확인.exe"
 APP_FILES = (
+    "grid_intent.py", "grid_context.py", "INTENT_REPLAY.md",
     "semantic_menus.py", "menu_guard.py", "menu_accessibility.py", "local_result_details.py",
     "menu_expansion.py", "recorded_menus.py",
     "authoring_inputs.py", "local_skill.py", "local_delivery.py", "local_runs.py", "local_task_ids.py",
@@ -69,6 +70,8 @@ APP_FILES = (
 )
 OPTIONAL_APP_FILES = ()
 SOURCE_SUPPORT_FILES = (
+    "test_grid_intent.py", "test_grid_context.py", "test_grid_workflow.py", "test_grid_native.py", "test_completion_workflow.py",
+    "test_intent_recording.py", "test_intent_menu_observation.py", "fixtures/GridIntentFixture.cs",
     "MenuAccessibility.cs", "test_menu_accessibility.py", "test_menu_guard.py", "test_semantic_menus.py",
     "test_menu_semantic_authoring.py", "test_image_appearance_diagnostics.py",
     "fixtures/MenuAccessibilityFixture.cs", "tools/test_menu_accessibility_native.py",
@@ -141,7 +144,7 @@ APPLICATION_IMPORT_CHECK = (
     "checkpoint_review,image_delivery,replay_preflight,vendor.guard,vendor.windows,"
     "authoring_inputs,local_skill,local_delivery,local_runs,local_task_ids,accessibility_diagnostics,accessibility_report,"
     "business_windows,window_readiness,window_contexts,smartfx_profiles,combo_popup,menu_expansion,recorded_menus,"
-    "semantic_menus,menu_guard,menu_accessibility,local_result_details; "
+    "semantic_menus,menu_guard,menu_accessibility,local_result_details,grid_intent,grid_context; "
     "print('Application imports passed')"
 )
 IMAGE_BACKEND_CHECK = r'''

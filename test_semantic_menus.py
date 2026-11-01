@@ -238,5 +238,155 @@ class SemanticMenuExpansionTests(unittest.TestCase):
         self.assertEqual(runtime.calls,[])
 
 
+class MenuCompletionTests(unittest.TestCase):
+    def setUp(self):
+        import test_operations as fixtures
+        self.fixtures = fixtures
+        class ResultRuntime(fixtures.Runtime):
+            def __init__(self, observations, acknowledgement=None):
+                super().__init__(observations)
+                self.menu_calls = []
+                self.acknowledgement = acknowledgement if acknowledgement is not None else {"input_dispatched": True}
+            def menu_action(self, actual, path, operation, **kwargs):
+                self.check_active()
+                self.menu_calls.append((copy.deepcopy(actual), copy.deepcopy(path), operation))
+                if isinstance(self.acknowledgement, Exception): raise self.acknowledgement
+                return copy.deepcopy(self.acknowledgement)
+        self.Runtime = ResultRuntime
+        self.owner = dict(fixtures.TARGET)
+        self.popup = {**self.owner, "window_id": self.owner["window_id"] + 100}
+        self.states = []
+
+    def view(self, value):
+        return self.fixtures.snapshot(self.fixtures.element(value=value))
+
+    def command(self, **extra):
+        return {"operation": "menu_command", "menu_target": target(PARENT_NAME, LEAF_NAME),
+            "completion_mode": "conditions", "expect": [{"selector": self.fixtures.FIELD,
+                "property": "value", "equals": "Ready", "require_change": True}],
+            "verification_timeout_ms": 0, **extra}
+
+    def execute(self, runtime, step=None, **extra):
+        from operations import Operations
+        return Operations(runtime).execute(step or self.command(), self.popup, completion_target=self.owner,
+            save_verification=lambda state: self.states.append(copy.deepcopy(state)), **extra)
+
+    def test_authored_result_conditions_verify_owner_without_reopening_popup(self):
+        runtime = self.Runtime([self.view("Pending"), self.view("Ready")])
+        result = self.execute(runtime)
+        self.assertTrue(result["task_verified"], result)
+        self.assertTrue(result["business_result_verified"])
+        self.assertTrue(result["input_dispatched"])
+        self.assertEqual(len(runtime.menu_calls), 1)
+        self.assertEqual(runtime.menu_calls[0][0], self.popup)
+        self.assertTrue(all(args["window_id"] == self.owner["window_id"] for _, args in runtime.calls))
+        self.assertEqual(len(self.states), 2)
+        self.assertEqual(result["verification_scope"], "authored_menu_postconditions")
+
+    def test_busy_seen_before_pause_survives_read_only_resume(self):
+        runtime = self.Runtime([self.view("Ready"), self.view("Busy")])
+        first = self.execute(runtime)
+        self.assertFalse(first["task_verified"])
+        self.assertTrue(first["input_dispatched"])
+        self.assertTrue(self.states[-1]["change_seen"])
+        runtime.observations = [self.view("Ready")]
+        resumed = self.execute(runtime, verification_state=self.states[-1], verify_only=True)
+        self.assertTrue(resumed["task_verified"], resumed)
+        self.assertTrue(resumed["verification_only"])
+        self.assertFalse(resumed["input_dispatched"])
+        self.assertEqual(len(runtime.menu_calls), 1)
+
+    def test_ready_only_is_not_a_new_output_generation(self):
+        runtime = self.Runtime([self.view("Ready"), self.view("Ready")])
+        first = self.execute(runtime)
+        self.assertFalse(first["task_verified"])
+        runtime.observations = [self.view("Ready")]
+        second = self.execute(runtime, verification_state=self.states[-1], verify_only=True)
+        self.assertFalse(second["task_verified"])
+        self.assertEqual(second["checks"][0]["reason"], "change_not_observed")
+        self.assertEqual(len(runtime.menu_calls), 1)
+
+    def test_missing_or_changed_baseline_never_recreates_it_or_repeats_command(self):
+        runtime = self.Runtime([self.view("Ready")])
+        missing = self.execute(runtime, verify_only=True)
+        self.assertEqual(missing["diagnostic"]["code"], "change_baseline_required")
+        self.assertEqual(runtime.calls, [])
+        runtime = self.Runtime([self.view("Pending"), self.view("Busy")])
+        self.execute(runtime)
+        for mutation in (lambda state: state.update(assertions_hash="0"*64),
+                         lambda state: state["target"].update(window_id=999),
+                         lambda state: state.update(baselines={})):
+            state = copy.deepcopy(self.states[-1]); mutation(state)
+            invalid = self.execute(runtime, verification_state=state, verify_only=True)
+            self.assertEqual(invalid["diagnostic"]["code"], "invalid_verification_state")
+        self.assertEqual(len(runtime.menu_calls), 1)
+
+    def test_unknown_acknowledgement_keeps_delivery_unknown_until_result_only_resume(self):
+        runtime = self.Runtime([self.view("Pending"), self.view("Ready")], {"input_dispatched": None})
+        first = self.execute(runtime)
+        self.assertIsNone(first["input_dispatched"])
+        self.assertFalse(first["task_verified"])
+        self.assertTrue(first["postconditions_satisfied"])
+        runtime.observations = [self.view("Ready")]
+        resumed = self.execute(runtime, verification_state=self.states[-1], verify_only=True)
+        self.assertTrue(resumed["task_verified"])
+        self.assertEqual(len(runtime.menu_calls), 1)
+
+    def test_explicit_no_delivery_never_runs_postinput_checks(self):
+        runtime = self.Runtime([self.view("Pending")], {"input_dispatched": False})
+        result = self.execute(runtime)
+        self.assertFalse(result["input_dispatched"])
+        self.assertFalse(result["task_verified"])
+        self.assertEqual(len(runtime.calls), 1)
+        self.assertEqual(len(runtime.menu_calls), 1)
+
+    def test_observation_or_persistence_failure_before_command_sends_nothing(self):
+        runtime = self.Runtime([RuntimeError("result target unavailable")])
+        result = self.execute(runtime)
+        self.assertFalse(result["input_dispatched"])
+        self.assertEqual(runtime.menu_calls, [])
+        runtime = self.Runtime([self.view("Pending")])
+        from operations import Operations
+        result = Operations(runtime).execute(self.command(), self.popup, completion_target=self.owner,
+            save_verification=lambda state: (_ for _ in ()).throw(OSError("disk error")))
+        self.assertEqual(result["diagnostic"]["code"], "verification_state_save_failed")
+        self.assertFalse(result["input_dispatched"])
+        self.assertEqual(runtime.menu_calls, [])
+
+    def test_save_failure_after_command_and_native_error_never_retry(self):
+        runtime = self.Runtime([self.view("Pending"), self.view("Ready")])
+        from operations import Operations
+        states = []
+        def persist(state):
+            if states: raise OSError("disk error")
+            states.append(state)
+        result = Operations(runtime).execute(self.command(), self.popup, completion_target=self.owner,
+            save_verification=persist)
+        self.assertTrue(result["input_dispatched"])
+        self.assertFalse(result["task_verified"])
+        self.assertEqual(result["diagnostic"]["code"], "verification_state_save_failed")
+        self.assertEqual(len(runtime.menu_calls), 1)
+        runtime = self.Runtime([self.view("Pending")], RuntimeError("native response lost"))
+        result = self.execute(runtime)
+        self.assertIsNone(result["input_dispatched"])
+        self.assertEqual(len(runtime.menu_calls), 1)
+
+    def test_human_mode_is_preserved_and_cannot_be_combined_with_conditions(self):
+        human = {"operation": "menu_command", "menu_target": target(PARENT_NAME, LEAF_NAME), "completion_mode": "human"}
+        runtime = self.Runtime([])
+        result = menus.execute_menu_command(runtime, human, self.popup)
+        self.assertFalse(result["task_verified"])
+        self.assertTrue(result["verification_deferred"])
+        for bad in ({**human, "expect": self.command()["expect"]}, {**self.command(), "expect": []},
+                    {**self.command(), "completion_mode": "automatic"}, {**self.command(), "poll_interval_ms": 0}):
+            with self.assertRaises(OperationError): menus.validate_menu_command(bad)
+        static = self.command()
+        static["expect"][0].pop("require_change")
+        with self.assertRaises(OperationError): menus.validate_menu_command(static)
+        resumed = menus.execute_menu_command(runtime, human, self.popup, verify_only=True)
+        self.assertEqual(resumed["diagnostic"]["code"], "human_review_required")
+        self.assertEqual(len(runtime.menu_calls), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

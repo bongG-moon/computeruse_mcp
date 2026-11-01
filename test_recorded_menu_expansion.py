@@ -143,6 +143,40 @@ class RecordedMenuExpansionTests(unittest.TestCase):
         self.assertIn("menu_target", expansion)
         self.assertNotIn("image_target", expansion)
 
+    def test_image_free_parent_and_child_survive_save_and_reopen_with_closed_menus(self):
+        from server import TaskStore
+        for representation in ("logical", "hwnd"):
+            with self.subTest(representation=representation):
+                draft = self.draft(); events, windows = recording()
+                events[1]["menu_evidence"]["child_representation"] = representation
+                if representation == "logical":
+                    windows = windows[:1]
+                    events[1]["menu_evidence"].pop("child_window_ref")
+                    events[2]["window_ref"] = "menu"
+                events[2]["native_target"] = {"pid": TARGET["pid"], "window_id": windows[-1]["window_id"],
+                    "element": {"role": "MenuItem", "name": "Active sheet"}}
+                for event in events[1:]:
+                    for key in ("template_png", "width", "height", "anchor", "capture_window"):
+                        event.pop(key, None)
+                original = copy.deepcopy(events)
+                draft.recorded(events, windows=windows, snapshots={}, auto_popup=True)
+                expansion = next(row for row in draft.steps if row["operation"] == "expand_menu")
+                command = next(row for row in draft.steps if row["operation"] == "menu_command")
+                self.assertNotIn("image_target", expansion)
+                self.assertNotIn("child_image_target", expansion)
+                self.assertEqual(command["menu_target"]["path"][-1]["name"], "Active sheet")
+                self.assertFalse(any(row["operation"] == "manual_entry" for row in draft.steps))
+                self.assertEqual(events, original)
+                self.assertEqual(draft.steps[-1]["review_mode"], "human")
+                draft.validate()
+                with tempfile.TemporaryDirectory() as directory:
+                    config = {"programs": [{"id": "editor"}]}
+                    saved = TaskStore(directory, config).save({"name": "Semantic menu", "instructions": "Use the observed menu path",
+                        "expected": "Review the actual output", "program_ids": ["editor"], "steps": draft.steps, "variables": {}})
+                    reopened = TaskStore(directory, config).get(saved["id"])
+                    self.assertEqual(reopened["steps"], saved["steps"])
+                    self.assertEqual(next(row for row in reopened["steps"] if row["operation"] == "expand_menu"), expansion)
+
     def test_unproven_child_and_changed_input_epoch_are_not_guessed(self):
         for change in ("child_ref", "input_epoch", "foreign_native", "child_image"):
             draft = self.draft(); events, windows = recording()

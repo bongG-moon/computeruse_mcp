@@ -45,14 +45,22 @@ class PopupReviewRevisionTests(unittest.TestCase):
         return self.api.update(self.saved["id"], 1,
             [{"op": "use_popup_image_conditions", "checkpoint_ids": ids or ["one-opened"]}])
 
+    def assert_linked_input_preserved(self, current, original, checkpoint):
+        # The revision adds only the explicit reciprocal condition link to
+        # the input. Its operation, ID, scope, image and other payload stay exact.
+        self.assertEqual(current, {**original, "precondition_step_id": checkpoint["step_id"]})
+        self.assertEqual(checkpoint["linked_step_id"], original["step_id"])
+        self.assertEqual(current["precondition_step_id"], checkpoint["step_id"])
+
     def test_explicit_revision_preserves_original_reviews_ids_and_input_images(self):
         answer = self.convert()
         self.assertEqual(answer["revision"], 2)
         self.assertEqual(self.api.get(self.saved["id"], 1)["steps"], self.saved["steps"])
         current = answer["task"]["steps"]
         self.assertEqual([s["step_id"] for s in current], [s["step_id"] for s in self.saved["steps"]])
-        for index in (0, 1, 3, 4):
+        for index in (0, 1, 4):
             self.assertEqual(current[index], self.saved["steps"][index])
+        self.assert_linked_input_preserved(current[3], self.saved["steps"][3], current[2])
         self.assertEqual(current[2]["review_mode"], "popup_image")
         self.assertEqual(current[2]["review_origin"], "user_grouped")
         self.assertEqual(current[2]["image_target"], current[3]["image_target"])
@@ -70,7 +78,7 @@ class PopupReviewRevisionTests(unittest.TestCase):
             original = copy.deepcopy(steps)
             changed = use_popup_image_conditions(steps, ["one-opened"])
             self.assertEqual(steps, original)
-            self.assertEqual(changed[3], original[3])
+            self.assert_linked_input_preserved(changed[3], original[3], changed[2])
             self.assertEqual(changed[2]["review_origin"], origin or "user_grouped")
             validate_recipe(changed, {}, ["editor"])
 
@@ -116,8 +124,16 @@ class PopupReviewRevisionTests(unittest.TestCase):
         ])["task"]
         self.assertEqual(sum(s.get("review_mode") == "visual" for s in changed["steps"]), 4)
         self.assertEqual(sum(s.get("review_mode") == "popup_image" for s in changed["steps"]), 4)
-        self.assertEqual([s for s in changed["steps"] if s["operation"] != "checkpoint"],
-                         [s for s in saved["steps"] if s["operation"] != "checkpoint"])
+        current_inputs = [s for s in changed["steps"] if s["operation"] != "checkpoint"]
+        original_inputs = [s for s in saved["steps"] if s["operation"] != "checkpoint"]
+        self.assertEqual(len(current_inputs), len(original_inputs))
+        linked_inputs = {p+"-choose": p+"-opened" for p in ("a", "b", "c", "d")}
+        current_checks = {s["step_id"]: s for s in changed["steps"] if s["operation"] == "checkpoint"}
+        for current, original in zip(current_inputs, original_inputs):
+            if original["step_id"] in linked_inputs:
+                self.assert_linked_input_preserved(current, original, current_checks[linked_inputs[original["step_id"]]])
+            else:
+                self.assertEqual(current, original)
         self.assertEqual(self.api.get("nine-checks", 1)["steps"], saved["steps"])
 
 

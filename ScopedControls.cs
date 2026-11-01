@@ -149,6 +149,112 @@ class ScopedControls {
             if (row.ContainsKey(key) && Convert.ToString(row[key]).Length > 16000) throw new InvalidOperationException("property_too_large");
         return row;
     }
+    static Dictionary<string, object> PatternFailure(Exception error) {
+        return new Dictionary<string, object> { { "status", "unknown" },
+            { "reason", "provider_read_failed" }, { "hresult", "0x" + error.HResult.ToString("X8") } };
+    }
+    static Dictionary<string, object> GridState(AutomationElement element) {
+        object raw;
+        try {
+            if (!element.TryGetCurrentPattern(GridPattern.Pattern, out raw))
+                return new Dictionary<string, object> { { "status", "unsupported" } };
+            var value = ((GridPattern)raw).Current;
+            return new Dictionary<string, object> { { "status", "supported" },
+                { "row_count", value.RowCount }, { "column_count", value.ColumnCount } };
+        } catch (Exception error) { return PatternFailure(error); }
+    }
+    static Dictionary<string, object> GridItemState(AutomationElement element, int pid, Dictionary<string, int> indices) {
+        object raw;
+        try {
+            if (!element.TryGetCurrentPattern(GridItemPattern.Pattern, out raw))
+                return new Dictionary<string, object> { { "status", "unsupported" } };
+            var value = ((GridItemPattern)raw).Current;
+            var containing = value.ContainingGrid; int index;
+            if (containing == null || containing.Current.ProcessId != pid || !indices.TryGetValue(Identity(containing), out index))
+                return new Dictionary<string, object> { { "status", "unknown" }, { "reason", "containing_grid_outside_scope" } };
+            return new Dictionary<string, object> { { "status", "supported" }, { "containing_grid", index },
+                { "row", value.Row }, { "column", value.Column }, { "row_span", value.RowSpan }, { "column_span", value.ColumnSpan } };
+        } catch (Exception error) { return PatternFailure(error); }
+    }
+    static Dictionary<string, object> GridSelection(AutomationElement grid, int pid, int index,
+                                                   Dictionary<string, int> indices, bool truncated) {
+        object raw;
+        try {
+            if (!grid.TryGetCurrentPattern(SelectionPattern.Pattern, out raw))
+                return new Dictionary<string, object> { { "status", "unsupported" }, { "complete", false }, { "grid_element_index", index } };
+            var pattern = ((SelectionPattern)raw).Current;
+            var selected = pattern.GetSelection();
+            var items = new List<int>(); bool complete = !truncated;
+            string reason = truncated ? "scope_truncated" : null;
+            if (selected.Length > 5000) return new Dictionary<string, object> { { "status", "supported" },
+                { "complete", false }, { "reason", "selection_limit" }, { "grid_element_index", index } };
+            var unique = new HashSet<int>();
+            foreach (var item in selected) {
+                int selectedIndex;
+                if (item.Current.ProcessId != pid || item.Current.IsPassword || !indices.TryGetValue(Identity(item), out selectedIndex)) {
+                    complete = false; reason = "selected_item_outside_scope"; continue;
+                }
+                if (!unique.Add(selectedIndex)) { complete = false; reason = "duplicate_selected_item"; continue; }
+                items.Add(selectedIndex);
+            }
+            items.Sort();
+            var result = new Dictionary<string, object> { { "status", "supported" }, { "complete", complete },
+                { "grid_element_index", index }, { "selected_items", items },
+                { "can_select_multiple", pattern.CanSelectMultiple }, { "is_selection_required", pattern.IsSelectionRequired } };
+            if (reason != null) result["reason"] = reason;
+            return result;
+        } catch (Exception error) {
+            var result = PatternFailure(error); result["complete"] = false; result["grid_element_index"] = index; return result;
+        }
+    }
+    // Opt-in only: normal property checks do not enumerate grid patterns or
+    // selections. All references below are response-local, read-only indices.
+    static Dictionary<string, object> AddGridEvidence(AutomationElement scope, int pid,
+            List<Dictionary<string, object>> rows, Dictionary<string, int> indices,
+            Dictionary<string, AutomationElement> elements, bool truncated) {
+        var initial = GridSelection(scope, pid, 0, indices, truncated);
+        foreach (var identity in indices) {
+            var element = elements[identity.Key]; var row = rows[identity.Value];
+            if (row.ContainsKey("protected")) continue;
+            if (Identity(element) != identity.Key || element.Current.ProcessId != pid)
+                throw new InvalidOperationException("grid_identity_changed");
+            var value = element.Current; var bounds = value.BoundingRectangle;
+            row["bounds"] = new Dictionary<string, object> { { "x", bounds.X }, { "y", bounds.Y },
+                { "width", bounds.Width }, { "height", bounds.Height } };
+            row["coordinate_space"] = "desktop_physical"; row["focused"] = value.HasKeyboardFocus;
+            row["patterns"] = new Dictionary<string, object> { { "Grid", GridState(element) } };
+            row["grid_item"] = GridItemState(element, pid, indices);
+        }
+        var after = GridSelection(scope, pid, 0, indices, truncated);
+        if (Json.Serialize(initial) != Json.Serialize(after)) {
+            after["complete"] = false; after["reason"] = "selection_changed_during_observation";
+        }
+        return after;
+    }
+    static void AddGridConditions(AutomationElement metadataRoot, ArrayList selectors, int pid,
+            List<Dictionary<string, object>> rows, Dictionary<string, int> indices,
+            Dictionary<string, AutomationElement> elements) {
+        if (selectors.Count > 41) throw new InvalidOperationException("invalid_condition_count");
+        foreach (object item in selectors) {
+            var selector = Obj(item); var parent = metadataRoot;
+            if (selector.ContainsKey("within")) {
+                parent = Unique(metadataRoot, Obj(selector["within"]), true, true);
+                if (parent == null) continue;
+                string parentKey = Identity(parent);
+                if (!indices.ContainsKey(parentKey)) {
+                    int index = rows.Count; rows.Add(Read(parent, index, -1, pid));
+                    indices[parentKey] = index; elements[parentKey] = parent;
+                }
+            }
+            var element = Unique(parent, selector, !selector.ContainsKey("within"), true);
+            if (element == null) continue;
+            string key = Identity(element);
+            if (!indices.ContainsKey(key)) {
+                int index = rows.Count; rows.Add(Read(element, index, -1, pid));
+                indices[key] = index; elements[key] = element;
+            }
+        }
+    }
     // A bounded raw-tree walk within an already unique parent. The root lookup
     // can still traverse provider metadata, but sibling subtree properties are
     // never read. Python terminates this helper when a provider call hangs.
@@ -157,9 +263,18 @@ class ScopedControls {
         int maxDepth = Convert.ToInt32(request["max_depth"]), maxElements = Convert.ToInt32(request["max_elements"]);
         if (maxDepth < 1 || maxDepth > 32 || maxElements < 1 || maxElements > 5000) throw new InvalidOperationException("invalid_inspection_limits");
         var within = Obj(request["within"]);
-        if (within.ContainsKey("within")) throw new InvalidOperationException("invalid_selector");
+        bool includeGrid = request.ContainsKey("include_grid") && request["include_grid"] is bool && (bool)request["include_grid"];
+        if (within.ContainsKey("within") && !includeGrid) throw new InvalidOperationException("invalid_selector");
         CheckWindow(hwnd, pid); var root = AutomationElement.FromHandle(hwnd); string rootIdentity = Identity(root);
-        var scope = Unique(root, within, true); int lookupCount = LookupVisited;
+        var metadataRoot = includeGrid ? Metadata(root) : null;
+        var lookupParent = includeGrid ? metadataRoot : root;
+        if (within.ContainsKey("within")) {
+            var parentSelector = Obj(within["within"]);
+            if (parentSelector.ContainsKey("within")) throw new InvalidOperationException("invalid_selector");
+            lookupParent = Unique(metadataRoot, parentSelector, true, true);
+            if (lookupParent == null) throw new InvalidOperationException("selector_not_found");
+        }
+        var scope = Unique(lookupParent, within, !within.ContainsKey("within"), includeGrid); int lookupCount = LookupVisited;
         if (scope == null) throw new InvalidOperationException("selector_not_found");
         var rows = new List<Dictionary<string, object>>();
         var seen = new Dictionary<string, int>();
@@ -198,12 +313,41 @@ class ScopedControls {
             within.ContainsKey("role") && currentScope.ControlType.ProgrammaticName != "ControlType." + Convert.ToString(within["role"]))
             throw new InvalidOperationException("scope_identity_changed");
         ConnectParents(root, rows, seen, elements);
+        Dictionary<string, object> gridSelection = null;
+        if (includeGrid) gridSelection = AddGridEvidence(scope, pid, rows, seen, elements, truncated);
+        if (includeGrid && request.ContainsKey("condition_selectors")) {
+            AddGridConditions(metadataRoot, (ArrayList)request["condition_selectors"], pid, rows, seen, elements);
+            // Include the actual containing panel for an explicit within path,
+            // even if none of the condition selectors requested that panel.
+            if (within.ContainsKey("within")) {
+                string key = Identity(lookupParent);
+                if (!seen.ContainsKey(key)) {
+                    int index = rows.Count; rows.Add(Read(lookupParent, index, -1, pid));
+                    seen[key] = index; elements[key] = lookupParent;
+                }
+            }
+            ConnectParents(root, rows, seen, elements);
+        }
+        if (includeGrid) {
+            var finalSelection = GridSelection(scope, pid, 0, seen, truncated);
+            if (Json.Serialize(gridSelection) != Json.Serialize(finalSelection)) {
+                finalSelection["complete"] = false;
+                finalSelection["reason"] = "selection_changed_during_observation";
+            }
+            gridSelection = finalSelection;
+        }
         CheckWindow(hwnd, pid);
         if (Identity(AutomationElement.FromHandle(hwnd)) != rootIdentity) throw new InvalidOperationException("target_mismatch");
-        return new Dictionary<string, object> { { "pid", pid }, { "window_id", hwnd.ToInt64() }, { "elements", rows },
+        var result = new Dictionary<string, object> { { "pid", pid }, { "window_id", hwnd.ToInt64() }, { "elements", rows },
             { "read_only", true }, { "scoped_observation", true }, { "scoped_inspection", true }, { "within", within },
             { "scope_complete", true }, { "truncated", truncated }, { "visited_controls", rows.Count },
             { "lookup_metadata_count", lookupCount }, { "scope_lookup", "whole_window_identity_metadata" } };
+        if (includeGrid) {
+            result["grid_selection"] = gridSelection;
+            result["target"] = new Dictionary<string, object> { { "pid", pid }, { "window_id", hwnd.ToInt64() } };
+            result["grid_evidence_read_only"] = true;
+        }
+        return result;
     }
     static object Query(Dictionary<string, object> request) {
         if (Text(request, "operation") == "inspect") return Inspect(request);

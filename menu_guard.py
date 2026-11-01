@@ -112,6 +112,12 @@ def act(guard, target, menu_target, operation, check_active, revalidate_identity
         ready()
         if guard.action_count >= guard.policy["max_actions"]:
             raise GuardError("Maximum action count reached.")
+        export_revalidate = getattr(guard, "_grid_export_revalidate", None)
+        if purpose == "command" and export_revalidate is not None:
+            # The local grid context is not a menu capability. Recheck it
+            # after approval, then let the native helper recheck its own item.
+            export_revalidate()
+            ready()
         remaining = min(30, remaining_ms()/1000)
         if remaining < .2:
             raise OperationError("메뉴 입력 전에 단계 시간이 지났습니다.", "menu_action_timeout")

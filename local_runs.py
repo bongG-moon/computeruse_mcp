@@ -222,7 +222,7 @@ class LocalRuns:
     def _show_result(self, job):
         from process_editor import ProcessEditors, HELPER_NAME
         from menu_expansion import local_menu_summary
-        from local_result_details import project_local_diagnostics
+        from local_result_details import project_local_diagnostics, local_recognition_summary
         if job.get('result_displayed') or job['result'].get('status') in {'awaiting_input', 'cancelled', 'editing', 'starting'}:
             return
         raw = job.get('local_result') or job['result']
@@ -230,11 +230,16 @@ class LocalRuns:
         visible = {key: job['result'][key] for key in ('status', 'task_verified', 'completed_steps', 'total_steps') if key in job['result']}
         visible.update(local_menu_summary(raw))
         visible.update(project_local_diagnostics(raw))
+        recognition_summary = local_recognition_summary(visible)
         last = raw.get('last_result', {}) if isinstance(raw, dict) else {}
         if 'menu_expansion' in visible and not isinstance(raw.get('menu_expansion'), dict) and isinstance(last, dict) and isinstance(last.get('diagnostic'), dict):
             diagnostic = last['diagnostic']
         summary = raw.get('summary') or raw.get('message')
-        if isinstance(summary, str):
+        if recognition_summary:
+            # The existing native result form renders summary text. Keep this
+            # projection in that local IPC only, never in job['result']/receipt.
+            visible['summary'] = (recognition_summary + ('\n\n' + summary[:2200] if isinstance(summary, str) else ''))[:4000]
+        elif isinstance(summary, str):
             visible['summary'] = summary[:4000]
         message = job.get('local_error') or diagnostic.get('message')
         if diagnostic.get('code') or message:

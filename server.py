@@ -175,6 +175,7 @@ MANAGEMENT["computer_use_element"]["inputSchema"]["properties"]["step"] = learne
 recipe_step_schema = copy.deepcopy(OPERATION_SCHEMA)
 recipe_step_schema["properties"]["program_id"] = STRING
 recipe_step_schema["properties"]["window_ref"] = {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$", "description": "Named current window within this program; default main. Never a stored PID/HWND."}
+recipe_step_schema["properties"]["completion_window_ref"] = {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$", "description": "menu_command with conditions only: an already bound result window in the same program. Prebound before input; no automatic permission for Excel or another app."}
 recipe_step_schema["required"] = ["operation", "program_id"]
 recipe_step_schema["properties"]["operation"]["enum"] += ["delay", "wait_for_element", "wait_for_state", "checkpoint"]
 from image_steps import IMAGE_OPERATIONS

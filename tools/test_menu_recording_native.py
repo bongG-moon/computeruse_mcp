@@ -77,6 +77,46 @@ class NativeMenuRecordingTests(unittest.TestCase):
         self.assertNotIn("child_window_ref", result["evidence"])
         self.assertEqual(result["evidence"]["child_items"][0]["name"], "Active sheet test")
 
+    def test_proven_semantic_expansion_does_not_require_an_image(self):
+        for mode in ("logical", "hwnd"):
+            with self.subTest(mode=mode):
+                result = self.run_fixture("no_image_" + mode)
+                self.assertEqual(result["queued"], 1)
+                self.assertEqual(result["candidate_operation"], "expand_menu")
+                self.assertEqual(result["operation"], "expand_menu")
+                self.assertIsNone(result["reason"])
+                self.assertTrue(result["semantic_expansion"])
+                self.assertFalse(result["retained_original_frame"])
+                self.assertEqual(result["evidence"]["child_representation"], mode)
+                self.assertEqual(result["saved_event"]["operation"], "expand_menu")
+                self.assertNotIn("reason", result["saved_event"])
+                self.assertNotIn("capture_issue", result["saved_event"])
+                self.assertIn("native_target", result["saved_event"])
+                self.assertEqual(result["saved_event"]["menu_evidence"], result["evidence"])
+
+    def test_no_image_missing_menu_labels_still_requires_repair(self):
+        for mode in ("nameless", "ancestor"):
+            with self.subTest(mode=mode):
+                result = self.run_fixture("no_image_" + mode)
+                self.assertEqual(result["queued"], 1)
+                self.assertEqual(result["operation"], "manual_entry")
+                self.assertEqual(result["reason"], "image_capture_required")
+                self.assertFalse(result["semantic_expansion"])
+                self.assertEqual(result["saved_event"]["operation"], "manual_entry")
+                self.assertEqual(result["saved_event"]["capture_issue"], "image_capture_required")
+
+    def test_no_image_does_not_relax_transition_scope_and_lifetime_checks(self):
+        for mode in ("identity", "incomplete", "disabled", "epoch", "moved", "unrelated", "two_children", "hidden", "retired"):
+            with self.subTest(mode=mode):
+                self.assertEqual(self.run_fixture("no_image_" + mode)["queued"], 0)
+
+    def test_no_image_unproved_show_remains_a_repair_before_child_input(self):
+        result = self.run_fixture("no_image_repair")
+        self.assertEqual(result["queued"], 2)
+        self.assertEqual(result["operation"], "manual_entry")
+        self.assertEqual(result["reason"], "menu_expansion_unverified")
+        self.assertFalse(result["semantic_expansion"])
+
     def test_ambiguous_children_and_duplicate_live_episode_are_rejected(self):
         for mode in ("duplicate", "two_children"):
             with self.subTest(mode=mode):

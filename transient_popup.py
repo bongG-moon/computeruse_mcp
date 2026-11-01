@@ -286,6 +286,16 @@ def hover(target, point, geometry, check):
 
 
 def _pointer_input(target, point, geometry, check, *, hover_only=False):
+    receipt = None
+    def cleanup(action, phase):
+        try:
+            action()
+        except (OSError, RuntimeError, ValueError):
+            # Closing a probe/restoring DPI cannot undo a queued input. Keep
+            # the exact delivery receipt, including an already unknown result.
+            if receipt is None:
+                raise
+            receipt["structuredContent"].setdefault("cleanup_failures", []).append(phase)
     check()
     import os
     from privileges import input_integrity_preflight
@@ -329,12 +339,14 @@ def _pointer_input(target, point, geometry, check, *, hover_only=False):
                 "pointer_aligned": False}
             phase, attempted = "pointer", False
             def refusal(code, message):
-                return {"isError": True, "structuredContent": {
+                nonlocal receipt
+                receipt = {"isError": True, "structuredContent": {
                     "backend": "owned-popup-messages", "input_sent": None if attempted else False,
                     "task_verified": False, "code": code, "message": message,
                     **({"operation": "expand_menu", "expansion_method": "hover"} if hover_only else {}),
                     "delivery_phase": phase, "release_delivery": "not_queued",
                     "point_evidence": dict(evidence), "automatic_retry": False}}
+                return receipt
             def validate_point():
                 check()
                 current_pid = W.DWORD()
@@ -369,16 +381,18 @@ def _pointer_input(target, point, geometry, check, *, hover_only=False):
                     if not accepted:
                         return refusal("popup_input_unknown", "메시지 전달 결과가 불명확합니다. 자동 재시도하지 않습니다.")
                 # Queue acceptance is delivery evidence, never business success.
-                return {"structuredContent": {"backend": "owned-popup-messages", "input_sent": True,
+                receipt = {"structuredContent": {"backend": "owned-popup-messages", "input_sent": True,
                     "task_verified": False, "delivery_phase": "move" if hover_only else "up",
                     "release_delivery": "not_queued" if hover_only else "queued_once",
                     **({"operation": "expand_menu", "expansion_method": "hover"} if hover_only else {}),
                     "point_evidence": evidence}, "content": []}
+                return receipt
             except (OperationError, OSError, RuntimeError, ValueError) as error:
                 return refusal(getattr(error, "code", "popup_input_preflight_failed"), str(error))
-        finally: probe.close()
+        finally: cleanup(probe.close, "probe_close")
     finally:
-        if previous: user.SetThreadDpiAwarenessContext(previous)
+        if previous:
+            cleanup(lambda: user.SetThreadDpiAwarenessContext(previous), "dpi_restore")
 
 
 def popup_diagnostic(target):

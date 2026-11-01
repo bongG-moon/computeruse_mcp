@@ -6,6 +6,7 @@ task success, and uncertain mutations are never replayed by this module.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import time
@@ -54,7 +55,9 @@ OPERATION_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "properties": {
         "operation": {"enum": ["set_value", "select_option", "select_item", "set_checked",
-                                 "click", "double_click", "right_click", "press_key", "hotkey", "assert", "expand_menu", "menu_command"]},
+                                 "click", "double_click", "right_click", "press_key", "hotkey", "assert", "expand_menu", "menu_command", "open_grid_menu"]},
+        "grid_intent": {"type": "object", "description": "Explicit current grid export contract. Validated locally against actual Grid/GridItem/Selection properties; never inferred from cell text."},
+        "query_step_id": {"type": "string", "description": "Earlier same-window query action with a verified require_change completion in this saved run."},
         "menu_target": dict(copy.deepcopy(MENU_TARGET_SCHEMA), description="Observed menu labels and hierarchy scoped to the current approved menu. Never an internal field Name or persisted native handle."),
         "child_menu_target": copy.deepcopy(MENU_TARGET_SCHEMA),
         "selector": SELECTOR_SCHEMA,
@@ -84,7 +87,7 @@ OPERATION_SCHEMA = {
         "edit_selector": SELECTOR_SCHEMA,
         "commit_key": {"enum": ["ENTER", "TAB"]},
         "expect": {"type": "array", "minItems": 1, "maxItems": 20, "items": ASSERTION_SCHEMA},
-        "completion_mode": {"enum": ["human"], "description": "Explicit recorded click/double_click/right_click only: dispatch once and defer completion to a separate human screenshot checkpoint. Never returns task_verified. Cannot combine with expect or window_transition."},
+        "completion_mode": {"enum": ["human", "conditions"], "description": "human preserves an explicit later human checkpoint. conditions is menu_command only and requires authored expect postconditions in an approved result window; delivery alone is never success."},
         "window_transition": WINDOW_TRANSITION_SCHEMA,
         "verification_timeout_ms": {"type": "integer", "minimum": 0, "maximum": 60000,
             "description": "Completion observation/polling deadline, default 10000ms. A running observation keeps its normal read budget within step_timeout_ms; late results do not pass. Zero means one normal bounded read."},
@@ -150,6 +153,11 @@ def validate_assertions(assertions):
 
 
 def validate_step(step):
+    if isinstance(step, dict) and step.get("operation") == "open_grid_menu":
+        from grid_context import validate_grid_step
+        return validate_grid_step(step)
+    if isinstance(step, dict) and set(step) & {"grid_intent", "query_step_id"}:
+        raise OperationError("표 내보내기 의도는 open_grid_menu에만 사용할 수 있습니다.", "invalid_grid_step")
     if isinstance(step, dict) and step.get("operation") == "menu_command":
         from semantic_menus import validate_menu_command
         return validate_menu_command(step)
@@ -257,6 +265,31 @@ def verification_step(step):
     return {"operation": "assert", "expect": checks,
             "verification_timeout_ms": step.get("verification_timeout_ms", 10000),
             **{key: step[key] for key in ("poll_interval_ms", "step_timeout_ms") if key in step}}
+
+
+def validate_operation_verification(state):
+    """Validate private local runner state; this is not public approval evidence."""
+    fields = {"format", "target", "assertions_hash", "baselines", "change_seen"}
+    if (not isinstance(state, dict) or set(state) != fields
+            or state.get("format") != "computer-operation-verification/v1"
+            or not isinstance(state.get("target"), dict) or set(state["target"]) != {"pid", "window_id"}
+            or any(type(value) is not int or value < 1 for value in state["target"].values())
+            or not isinstance(state.get("assertions_hash"), str) or len(state["assertions_hash"]) != 64
+            or any(character not in "0123456789abcdef" for character in state["assertions_hash"])
+            or not isinstance(state.get("baselines"), dict) or len(state["baselines"]) > 20
+            or any(not isinstance(key, str) or not 1 <= len(key) <= 10000 for key in state["baselines"])
+            or not isinstance(state.get("change_seen"), list) or len(state["change_seen"]) > 20
+            or any(not isinstance(key, str) or key not in state["baselines"] for key in state["change_seen"])
+            or len(state["change_seen"]) != len(set(state["change_seen"]))
+            or any(type(value) not in (str, bool, int, float, type(None))
+                or type(value) is float and not math.isfinite(value) for value in state["baselines"].values())):
+        raise OperationError("검증 기록 형식이 올바르지 않습니다.", "invalid_verification_state")
+    try:
+        if len(json.dumps(state, ensure_ascii=False, allow_nan=False)) > 1000000:
+            raise ValueError("too large")
+    except (ValueError, TypeError) as error:
+        raise OperationError("검증 기록 크기 또는 형식이 올바르지 않습니다.", "invalid_verification_state") from error
+    return copy.deepcopy(state)
 
 
 def _payload(answer):
@@ -421,7 +454,8 @@ class Operations:
         self.runtime = runtime
         self._verified_observation = None
 
-    def execute(self, step, target, delivery_mode="background", reuse_verified=False):
+    def execute(self, step, target, delivery_mode="background", reuse_verified=False, *,
+                completion_target=None, verification_state=None, save_verification=None, verify_only=False):
         # Reuse is exclusively for adjacent steps in one caller-locked recipe.
         # Standalone calls and resume assertions always observe again.
         previous = self._verified_observation
@@ -433,11 +467,23 @@ class Operations:
             raise OperationError("delivery_mode는 background 또는 foreground여야 합니다.")
         if self.runtime.mode != "uia":
             raise OperationError("검증 작업은 uia 세션에서만 사용할 수 있습니다.", "unsupported_mode")
+        if type(verify_only) is not bool or verification_state is not None and not verify_only:
+            raise OperationError("저장된 검증 근거는 입력 없는 재개에서만 사용할 수 있습니다.", "invalid_verification_state")
+        if completion_target is not None and step["operation"] != "menu_command":
+            raise OperationError("별도 결과 창은 명시한 메뉴 완료 조건에서만 사용할 수 있습니다.", "invalid_completion_target")
+        if step["operation"] == "open_grid_menu":
+            # Only WorkflowRunner can supply same-run query evidence. A direct
+            # request must not manufacture it from a currently visible table.
+            from grid_context import execute_grid_menu
+            return execute_grid_menu(self.runtime, step, target)
         if step["operation"] == "menu_command":
             from semantic_menus import execute_menu_command
-            return execute_menu_command(self.runtime, step, target)
+            return execute_menu_command(self.runtime, step, target, completion_target=completion_target,
+                verification_state=verification_state, save_verification=save_verification, verify_only=verify_only)
         if step["operation"] == "expand_menu":
-            from menu_expansion import execute_menu_expansion
+            from menu_expansion import execute_menu_expansion, verify_menu_expansion
+            if verify_only:
+                return verify_menu_expansion(self.runtime, step, target)
             return execute_menu_expansion(self.runtime, step, target, delivery_mode=delivery_mode)
         initial = None
         guard = getattr(self.runtime, "guard", None)
@@ -447,7 +493,8 @@ class Operations:
                 and previous["target"] == target and time.monotonic() - previous["observed_at"] < 0.5
                 and (target["pid"], target["window_id"]) in observed_targets):
             initial = previous
-        execution = _Execution(self.runtime, step, dict(target), delivery_mode, initial)
+        execution = _Execution(self.runtime, step, dict(target), delivery_mode, initial,
+            verification_state=verification_state, save_verification=save_verification, verify_only=verify_only)
         result = execution.run()
         if (result["status"] == "verified" and step["operation"] != "assert" and execution.snapshot is not None
                 and execution.snapshot_target == target):
@@ -477,7 +524,8 @@ class Operations:
 
 
 class _Execution:
-    def __init__(self, runtime, step, target, delivery, initial_observation=None, baseline_at_start=False):
+    def __init__(self, runtime, step, target, delivery, initial_observation=None, baseline_at_start=False, *,
+                 verification_state=None, save_verification=None, verify_only=False):
         self.runtime, self.step, self.target, self.delivery = runtime, step, target, delivery
         self.started = time.monotonic()
         self.deadline = self.started + step.get("step_timeout_ms", 30000) / 1000
@@ -511,6 +559,54 @@ class _Execution:
         self.action_acknowledgement_error = None
         self.scoped_fallback_reason = None
         self.combo_popup = None
+        self.verify_only = verify_only
+        self.save_verification = save_verification
+        if save_verification is not None and not callable(save_verification):
+            raise OperationError("검증 기록 저장 경로가 올바르지 않습니다.", "invalid_verification_state")
+        if verification_state is not None:
+            self._restore_verification(verification_state)
+
+    def _verification_assertions(self):
+        return verification_step(self.step)["expect"]
+
+    def _verification_hash(self):
+        return hashlib.sha256(json.dumps(self._verification_assertions(), sort_keys=True,
+            ensure_ascii=False, allow_nan=False).encode("utf-8")).hexdigest()
+
+    def _restore_verification(self, state):
+        """Private runner evidence, tied to an unchanged recipe and target lifetime by the caller."""
+        state = validate_operation_verification(state)
+        assertions = self._verification_assertions()
+        keys = {self._assertion_key(check) for check in assertions if check.get("require_change")}
+        if (state["target"] != self.target or state["assertions_hash"] != self._verification_hash()
+                or set(state["baselines"]) != keys):
+            raise OperationError("동일 작업과 결과 창의 이전 검증 근거를 확인하지 못했습니다. 입력을 반복하지 않습니다.", "invalid_verification_state")
+        self.baselines = copy.deepcopy(state["baselines"])
+        self.change_seen = set(state["change_seen"])
+
+    def _persist_verification(self):
+        if self.save_verification is not None:
+            state = {"format": "computer-operation-verification/v1", "target": copy.deepcopy(self.target),
+                "assertions_hash": self._verification_hash(), "baselines": copy.deepcopy(self.baselines),
+                "change_seen": sorted(self.change_seen)}
+            try:
+                self.save_verification(state)
+            except Exception as error:
+                raise OperationError("검증 근거를 저장하지 못했습니다. 입력을 반복하지 않습니다.", "verification_state_save_failed") from error
+
+    def prepare_completion(self):
+        """Read and persist pre-input evidence without activating the result window."""
+        assertions = self._verification_assertions()
+        self._remaining()
+        snapshot = self._observe_assertions(assertions)
+        self._baseline(snapshot, assertions)
+        self._remaining()
+
+    def verify_completion(self):
+        assertions = self._verification_assertions()
+        if any(self._assertion_key(check) not in self.baselines for check in assertions if check.get("require_change")):
+            raise OperationError("이전 입력 전의 기준값이 없어 변화 여부를 확인하지 못했습니다. 입력을 반복하지 않습니다.", "change_baseline_required")
+        return self._verify(assertions)
 
     def _progress(self, stage):
         report = getattr(self.runtime, "report_progress", None)
@@ -769,6 +865,7 @@ class _Execution:
 
     def _evaluate(self, snapshot, assertions):
         checks = []
+        previous_changes = set(self.change_seen)
         for assertion in assertions:
             check = dict(copy.deepcopy(assertion), passed=False)
             try:
@@ -797,6 +894,8 @@ class _Execution:
                 check["reason"] = error.code
             checks.append(check)
         self.checks = checks
+        if self.change_seen != previous_changes:
+            self._persist_verification()
         return bool(checks) and all(c["passed"] for c in checks)
 
     @staticmethod
@@ -813,6 +912,7 @@ class _Execution:
             if not present:
                 raise OperationError("변화 검증에 필요한 입력 전 속성을 읽지 못했습니다.", "change_baseline_unavailable")
             self.baselines[self._assertion_key(assertion)] = copy.deepcopy(_name(element) if prop == "name" else element[prop])
+        self._persist_verification()
 
     def _observe_assertions(self, assertions):
         self._progress("verifying")
@@ -1076,8 +1176,9 @@ class _Execution:
         assertions = [] if human_completion else verification_step(self.step)["expect"]
         try:
             self.runtime.check_active()
-            if self.step["operation"] == "assert":
-                if any(check.get("require_change") for check in assertions) and not self.baseline_at_start:
+            if self.step["operation"] == "assert" or self.verify_only:
+                if (any(self._assertion_key(check) not in self.baselines for check in assertions if check.get("require_change"))
+                        and not self.baseline_at_start):
                     raise OperationError("이전 동작 전의 기준값이 없어 변화 여부를 재검증할 수 없습니다. 입력을 재실행하지 않았습니다.", "change_baseline_required")
                 passed = self._verify(assertions)
             else:

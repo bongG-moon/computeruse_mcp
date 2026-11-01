@@ -2736,6 +2736,9 @@ internal static class VisualTools
                 if (p.MenuEvidence != null) {
                     item["expansion_method"] = "hover"; item["menu_evidence"] = p.MenuEvidence;
                     if (p.Semantic != null) item["native_target"] = p.Semantic.Native;
+                    if (p.Source == null && SemanticMenuExpansion(p)) {
+                        item.Remove("reason"); item.Remove("capture_issue");
+                    }
                 }
                 if (p.Reason == "focus_target_requires_selection" && !p.DraftInputTarget) foreach (string key in new string[] { "template_png", "width", "height", "anchor", "capture_window", "source_size" }) item.Remove(key);
                 if (p.Operation == "scroll") { item["wheel"] = p.Wheel; item["direction"] = p.Wheel < 0 ? "down" : "up"; item["amount"] = Math.Max(1, Math.Abs(p.Wheel) / 120); label = "스크롤"; }
@@ -2812,7 +2815,12 @@ internal static class VisualTools
                         } else {
                             item["capture_issue"] = failure;
                             if (rejected != null) item["rejected_capture"] = rejected;
-                            if (!item.ContainsKey("native_target") || pointer.RequestedOperation == "expand_menu") { item["operation"] = "manual_entry"; item["reason"] = failure; }
+                            if (!payloadLimited && SemanticMenuExpansion(pointer)) {
+                                // Image authoring is optional for an independently
+                                // witnessed semantic menu path. Keep its diagnostic,
+                                // but do not turn that path into an image-only repair.
+                                item.Remove("capture_issue"); item.Remove("reason");
+                            } else if (!item.ContainsKey("native_target") || pointer.RequestedOperation == "expand_menu") { item["operation"] = "manual_entry"; item["reason"] = failure; }
                             if (pointer.CaptureDiagnostic != null) { pointer.CaptureDiagnostic["status"] = "rejected"; pointer.CaptureDiagnostic["code"] = failure; }
                         }
                         int index = events.IndexOf(item);
@@ -2899,10 +2907,40 @@ internal static class VisualTools
             if (menuCandidate != null && menuCandidate.Target == preFrame.Target && menuCandidate.Semantic.Identity == sample.Identity
                     && DateTime.UtcNow.Subtract(menuCandidate.ClickAt).TotalMilliseconds <= 2500) { DisposePending(preFrame); return; }
             ClearMenuCandidate(); preFrame.Semantic = sample; preFrame.SemanticBeforeInput = true;
-            preFrame.Operation = preFrame.Source == null ? "manual_entry" : "expand_menu";
+            // This remains only a candidate until the complete transition and
+            // child relationship below have been observed. Pixels are optional
+            // when actual menu labels can support a fresh semantic lookup.
+            preFrame.Operation = preFrame.Source != null || SemanticMenuPath(sample) ? "expand_menu" : "manual_entry";
             preFrame.RequestedOperation = "expand_menu";
-            if (preFrame.Source != null) preFrame.Reason = null;
+            if (preFrame.Operation == "expand_menu") preFrame.Reason = null;
             menuCandidate = preFrame;
+        }
+        static bool SemanticMenuPath(SemanticSample sample) {
+            if (sample == null || sample.Role != "MenuItem" || sample.Native == null) return false;
+            var element = Map(sample.Native, "element");
+            if (!NamedMenuIdentity(element)) return false;
+            object ancestors; int count = 1, depth = 0;
+            if (sample.Native.TryGetValue("ancestors", out ancestors)) {
+                var rows = ancestors as IEnumerable;
+                if (rows == null || ancestors is string) return false;
+                foreach (object value in rows) {
+                    var row = value as Dictionary<string, object>;
+                    if (row == null || ++depth > 16) return false;
+                    if (Str(row, "role", "") == "MenuItem" && (!NamedMenuIdentity(row) || ++count > 16)) return false;
+                }
+            }
+            return true;
+        }
+        static bool NamedMenuIdentity(Dictionary<string, object> row) {
+            if (row == null || Str(row, "role", "") != "MenuItem" || Str(row, "is_password", "False") == "True") return false;
+            string name = Str(row, "name", "");
+            return name.Trim().Length > 0 && name.Length <= 1000;
+        }
+        static bool SemanticMenuExpansion(Pending candidate) {
+            return candidate != null && candidate.Operation == "expand_menu" && SemanticMenuPath(candidate.Semantic)
+                && candidate.MenuEvidence != null && Str(candidate.MenuEvidence, "source", "") == "uia_menu_transition"
+                && Str(candidate.MenuEvidence, "before_state", "") == "collapsed"
+                && Str(candidate.MenuEvidence, "after_state", "") == "expanded";
         }
         void CompleteMenuCandidate(Pending candidate, SemanticSample after, int observedInput) {
             if (candidate == null || !Object.ReferenceEquals(candidate, menuCandidate) || after == null) return;
@@ -2933,7 +2971,9 @@ internal static class VisualTools
                 { "parent_identity", before.Identity }, { "parent_window_ref", candidate.Target.Window },
                 { "child_representation", logical ? "logical" : "hwnd" }, { "child_items", after.MenuItems } };
             if (child != null) candidate.MenuEvidence["child_window_ref"] = child.Window;
-            if (candidate.Source == null) { candidate.Operation = "manual_entry"; candidate.Reason = "image_capture_required"; }
+            if (candidate.Source == null && !SemanticMenuPath(before)) {
+                candidate.Operation = "manual_entry"; candidate.Reason = "image_capture_required";
+            } else { candidate.Operation = "expand_menu"; candidate.Reason = null; }
             Queue(candidate);
         }
         static bool SameBounds(Dictionary<string, object> before, Dictionary<string, object> after) {

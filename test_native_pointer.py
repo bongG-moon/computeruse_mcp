@@ -8,9 +8,12 @@ from test_image_steps import TARGET
 
 class NativePointerTests(unittest.TestCase):
     def run_click(self, *, occluded=False, align=True, fail_phase=None, changed_after_move=False,
-                  changed_after_pointer=False, stopped_after_down=False):
+                  changed_after_pointer=False, stopped_after_down=False, close_failed=False,
+                  dpi_restore_failed=False):
         user = mock.Mock()
         user.SetThreadDpiAwarenessContext.return_value = 0
+        if dpi_restore_failed:
+            user.SetThreadDpiAwarenessContext.side_effect = [1, OSError("DPI cleanup")]
         user.ScreenToClient.return_value = True
         user.ChildWindowFromPointEx.return_value = 300
         user.WindowFromPoint.return_value = 999 if occluded else 300
@@ -33,6 +36,9 @@ class NativePointerTests(unittest.TestCase):
             return fail_phase != "up"
         user.PostMessageW.side_effect = queued
         probe = mock.Mock()
+        if close_failed:
+            from closing import ProbeError
+            probe.close.side_effect = ProbeError("process_handle_close_failed")
         probe.ownership_path.side_effect = lambda child, owner: [300, 200] if child == 300 and owner == 200 else None
         proof = {"bounds": (0, 0, 100, 100)}
         def binding(_):
@@ -99,3 +105,27 @@ class NativePointerTests(unittest.TestCase):
         result, calls, user = self.run_click(stopped_after_down=True)
         self.assertEqual([row[0] for row in calls], ["pointer", "move", "down"])
         self.assertIsNone(result["structuredContent"]["input_sent"])
+
+    def test_cleanup_failure_preserves_queued_delivery_and_separate_result_check(self):
+        result, calls, user = self.run_click(close_failed=True, dpi_restore_failed=True)
+        receipt = result["structuredContent"]
+        self.assertIs(receipt["input_sent"], True)
+        self.assertFalse(receipt["task_verified"])
+        self.assertEqual(receipt["release_delivery"], "queued_once")
+        self.assertEqual(receipt["cleanup_failures"], ["probe_close", "dpi_restore"])
+        self.assertEqual(user.PostMessageW.call_count, 1)
+
+    def test_cleanup_failure_does_not_downgrade_uncertain_delivery(self):
+        for phase in ("move", "down", "up"):
+            with self.subTest(phase=phase):
+                result, calls, user = self.run_click(fail_phase=phase, close_failed=True)
+                receipt = result["structuredContent"]
+                self.assertIsNone(receipt["input_sent"])
+                self.assertEqual(receipt["delivery_phase"], phase)
+                self.assertEqual(receipt["cleanup_failures"], ["probe_close"])
+                self.assertEqual(user.PostMessageW.call_count, int(phase == "up"))
+
+    def test_cleanup_failure_preserves_proved_no_input(self):
+        result, calls, user = self.run_click(occluded=True, close_failed=True)
+        self.assertIs(result["structuredContent"]["input_sent"], False)
+        self.assertEqual(calls, [])

@@ -119,6 +119,33 @@ internal static class ProcessEditor
     static string ReviewLabel(string kind) { return kind == "human" ? "사람 확인" : kind == "visual" ? "모델 화면 판정" : kind == "popup_image" ? "팝업 자동 조건 확인" : kind == "menu_semantic" ? "메뉴 이름과 계층 확인" : "결과 확인"; }
     internal static List<string> LocalExecutionDetails(Dictionary<string, object> result) {
         var lines = new List<string>(); var menu = Map(result, "menu_expansion");
+        var recognition = Map(result, "menu_recognition");
+        if (recognition != null) {
+            string source = Str(recognition, "selected_source", "unknown");
+            lines.Add("메뉴 인식: 현재 이름과 부모 관계 / " + (source == "uia_raw" ? "UIA" : source == "direct_msaa" ? "MSAA" : "출처 미확인"));
+            lines.Add("메뉴 확인: " + ShortText(Str(recognition, "outcome", "unknown"), 80));
+            string fallback = Str(recognition, "fallback_reason", "");
+            if (fallback.Length > 0) lines.Add("인식 경로 변경 사유: " + ShortText(fallback, 100));
+            var sources = Map(recognition, "sources");
+            foreach (string backend in new[] { "uia_raw", "direct_msaa" }) {
+                var details = Map(sources, backend); if (details == null) continue;
+                lines.Add((backend == "uia_raw" ? "UIA" : "MSAA") + ": " + ShortText(Str(details, "outcome", Str(details, "status", "unknown")), 80)
+                    + " / 경로 후보 " + (details.ContainsKey("path_candidates") ? Num(details, "path_candidates", 0).ToString() : "미확인"));
+            }
+            if (Str(recognition, "local_ocr", "") == "not_implemented" && Str(recognition, "outcome", "") != "matched")
+                lines.Add("접근성 정보가 부족합니다. 이 버전에는 메뉴 OCR 경로가 없어 추측해서 누르지 않습니다.");
+        }
+        var gridRecognition = Map(result, "grid_recognition");
+        if (gridRecognition != null) {
+            string scope = Str(gridRecognition, "export_scope", "");
+            lines.Add("표 인식: 현재 표와 업무 상태 / " + (scope == "whole_active_sheet" ? "활성 시트 전체" : scope == "selected_ranges" ? "선택 범위" : "범위 미확인"));
+            foreach (string key in new[] { "query_verified", "grid_context_verified" })
+                if (gridRecognition.ContainsKey(key)) lines.Add((key == "query_verified" ? "이번 조회 완료" : "표와 선택 상태") + ": " + (Object.Equals(gridRecognition[key], true) ? "확인됨" : "미확인"));
+            if (Object.Equals(gridRecognition.ContainsKey("data_values_compared") ? gridRecognition["data_values_compared"] : null, false))
+                lines.Add("결과 셀 값과 녹화 화면의 동일성은 비교하지 않았습니다.");
+            lines.Add("표 확인 사유: " + ShortText(Str(gridRecognition, "fallback_reason", Str(gridRecognition, "outcome", "unknown")), 100));
+            lines.Add("표 또는 메뉴 확인은 출력 파일 생성 완료를 뜻하지 않습니다.");
+        }
         var image = Map(result, "image_comparison");
         if (image != null) {
             lines.Add("이미지 비교: " + ShortText(Str(image,"stage","unknown"),60) + " / " + ShortText(Str(image,"status","unknown"),60));
@@ -476,6 +503,10 @@ internal static class ProcessEditor
         readonly PictureBox thumbnail = new PictureBox();
         readonly List<Choice> allActions = new List<Choice>();
         Dictionary<string, object> selection, expectation, recordingReview;
+        Dictionary<string, object> gridExportSetup, gridExportGrid, gridExportSheet;
+        readonly List<Dictionary<string, object>> gridExportViews = new List<Dictionary<string, object>>();
+        string gridExportScope = "", gridExportQuery = "", gridExportProperty = "selected", gridExportValue = "";
+        bool gridExportBoolean = true, gridExportEmpty, gridExportViewConfirmed;
         int seq, pendingSeq, stepCount, externalTrialSequence, maximumSteps;
         string pendingAction, pendingPurpose;
         bool busy, done, hiddenForPicker, loadingActions, pendingInputs, pendingRecordingReview;
@@ -1098,15 +1129,96 @@ internal static class ProcessEditor
                 if (busy) { hiddenForPicker = true; Hide(); }
             }
         }
+        void ShowGridExportDialog()
+        {
+            if (gridExportSetup == null) return;
+            string nextPick = ""; bool apply = false;
+            using (var dialog = new Form()) {
+                dialog.Text = "표 내보내기 의도 지정"; dialog.Font = Font; dialog.BackColor = Color.FromArgb(245, 247, 251);
+                dialog.StartPosition = FormStartPosition.CenterParent; dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
+                dialog.MaximizeBox = dialog.MinimizeBox = false; dialog.ClientSize = new Size(Px(650), Px(670));
+                dialog.Controls.Add(new Label { Text = "지원 경로: Export to excel → Active sheet\n표와 시트, 선택 상태를 읽지 못하면 기존 기록을 유지합니다.", Bounds = Box(24, 16, 602, 50), ForeColor = muted });
+                var query = new ComboBox(); ConfigureCombo(query); query.DisplayMember = "Label";
+                var queries = List(gridExportSetup, "query_steps");
+                if (queries != null) foreach (object raw in queries) {
+                    var row = raw as Dictionary<string, object>; if (row == null) continue;
+                    query.Items.Add(new Choice { Code = Str(row, "step_id", ""), Label = (Num(row, "index", 0)+1) + "단계: " + Str(row, "label", "조회") });
+                }
+                dialog.Controls.Add(new Label { Text = "이번 조회의 완료 단계", Bounds = Box(24, 76, 205, 26), ForeColor = ink });
+                Input(query, "GridExportQuery", Box(240, 71, 386, 34), dialog);
+                for (int i=0; i<query.Items.Count; i++) if (((Choice)query.Items[i]).Code == gridExportQuery) query.SelectedIndex=i;
+                var grid = new Button(); ButtonStyle(grid, "PickExportGrid", "대상 표 선택", Box(24, 119, 166, 34), false, dialog);
+                dialog.Controls.Add(new Label { Text = Str(gridExportGrid, "label", "선택 안 됨: 데이터 셀 대신 표 컨테이너를 선택하세요"), Bounds = Box(202, 119, 424, 36), ForeColor = muted, AutoEllipsis = true });
+                var sheet = new Button(); ButtonStyle(sheet, "PickExportSheet", "활성 시트 탭 선택", Box(24, 165, 166, 34), false, dialog);
+                dialog.Controls.Add(new Label { Text = Str(gridExportSheet, "label", "선택 안 됨: 이 표의 현재 선택된 시트 탭을 선택하세요"), Bounds = Box(202, 165, 424, 36), ForeColor = muted, AutoEllipsis = true });
+                var property = new ComboBox(); ConfigureCombo(property); property.DisplayMember = "Label";
+                property.Items.AddRange(new object[] { new Choice { Code="selected", Label="탭 선택 상태" }, new Choice { Code="name", Label="선택된 탭 이름" } });
+                Input(property, "GridExportSheetProperty", Box(24, 212, 180, 34), dialog);
+                var text = new TextBox { Text = gridExportValue, MaxLength = 16000 }; Input(text, "GridExportSheetValue", Box(216, 212, 410, 34), dialog);
+                var boolean = new ComboBox(); ConfigureCombo(boolean); boolean.Items.Add("선택됨");
+                Input(boolean, "GridExportSheetSelected", Box(216, 212, 410, 34), dialog); boolean.SelectedIndex=0;
+                property.SelectedIndexChanged += delegate { bool b=((Choice)property.SelectedItem).Code=="selected";boolean.Visible=b;text.Visible=!b; };
+                property.SelectedIndex=gridExportProperty=="name"?1:0;
+                var scope = new ComboBox(); ConfigureCombo(scope); scope.DisplayMember="Label";
+                scope.Items.AddRange(new object[] {new Choice {Code="whole_active_sheet",Label="활성 시트 전체 (다중 선택이면 중단)"},new Choice {Code="selected_ranges",Label="현재 선택 범위 유지"}});
+                dialog.Controls.Add(new Label {Text="내보낼 범위",Bounds=Box(24,260,180,28),ForeColor=ink});Input(scope,"GridExportScope",Box(216,256,410,34),dialog);
+                for(int i=0;i<scope.Items.Count;i++)if(((Choice)scope.Items[i]).Code==gridExportScope)scope.SelectedIndex=i;
+                var empty=new CheckBox {Text="빈 결과 내보내기 허용 (사용 가능한 입력 영역은 별도 확인)",Checked=gridExportEmpty,Bounds=Box(24,300,602,28)};dialog.Controls.Add(empty);
+                var viewList=new ListBox {Bounds=Box(24,370,602,94)};Identify(viewList,"GridExportViewConditions","숨김 열과 필터 확인 조건");dialog.Controls.Add(viewList);
+                foreach(var condition in gridExportViews)viewList.Items.Add(Str(condition,"label","선택 조건")+" = "+Str(condition,"equals",""));
+                var addView=new Button();ButtonStyle(addView,"AddExportViewCondition","필터 / 숨김 상태 조건 추가",Box(24,332,300,32),false,dialog);
+                var clearViews=new Button();ButtonStyle(clearViews,"ClearExportViewConditions","조건 비우기",Box(338,332,140,32),false,dialog);
+                var confirmed=new CheckBox {Text="출력에 영향을 주는 필터 / 숨김 조건을 지정했습니다.\n조건이 없으면 현재 작업에 추가 확인할 상태가 없음을 확인합니다.",Checked=gridExportViewConfirmed,Bounds=Box(24,474,602,52)};dialog.Controls.Add(confirmed);
+                dialog.Controls.Add(new Label {Text="다른 메뉴나 상단 엑셀 버튼은 이 기능의 대체 경로가 아닙니다.\n파일 생성 완료는 별도 조건으로 확인합니다.\n조회 단계가 없으면 먼저 ‘완료 기준 지정’에서 결과 변화를 설정하세요.",Bounds=Box(24,536,602,60),ForeColor=muted});
+                var saveIntent=new Button();ButtonStyle(saveIntent,"ApplyGridExportIntent","현재 상태 확인 후 반영",Box(300,612,220,36),true,dialog);
+                var cancel=new Button();ButtonStyle(cancel,"CancelGridExportIntent","취소",Box(532,612,94,36),false,dialog);cancel.DialogResult=DialogResult.Cancel;dialog.CancelButton=cancel;
+                Action remember=delegate {gridExportQuery=query.SelectedItem==null?"":((Choice)query.SelectedItem).Code;gridExportScope=scope.SelectedItem==null?"":((Choice)scope.SelectedItem).Code;
+                    gridExportProperty=((Choice)property.SelectedItem).Code;gridExportValue=text.Text;gridExportBoolean=boolean.SelectedIndex==0;gridExportEmpty=empty.Checked;gridExportViewConfirmed=confirmed.Checked;};
+                Action<string> pick=delegate(string kind){remember();nextPick=kind;dialog.DialogResult=DialogResult.OK;dialog.Close();};
+                grid.Click+=delegate{pick("grid");};sheet.Click+=delegate{pick("sheet");};addView.Click+=delegate{pick("view");};
+                clearViews.Click+=delegate{gridExportViews.Clear();viewList.Items.Clear();confirmed.Checked=false;};
+                saveIntent.Click+=delegate{
+                    remember();
+                    if(gridExportGrid==null||gridExportSheet==null||gridExportQuery.Length==0||gridExportScope.Length==0||!gridExportViewConfirmed){MessageBox.Show(dialog,"대상 표, 활성 시트, 조회 완료 단계, 출력 범위와 조건 확인을 모두 지정하세요.","입력 확인",MessageBoxButtons.OK,MessageBoxIcon.Information);return;}
+                    apply=true;dialog.DialogResult=DialogResult.OK;dialog.Close();};
+                Rectangle working=Screen.FromControl(this).WorkingArea;if(dialog.Height>working.Height){dialog.AutoScroll=true;dialog.AutoScrollMinSize=dialog.ClientSize;dialog.Height=working.Height;}
+                dialog.ShowDialog(this);
+            }
+            if(nextPick.Length>0){Send("pick_grid_export",new Dictionary<string,object>{{"index",Num(gridExportSetup,"index",-1)},{"purpose",nextPick}},null);if(busy){hiddenForPicker=true;Hide();}}
+            else if(apply){
+                var views=new List<Dictionary<string,object>>();foreach(var item in gridExportViews)views.Add(new Dictionary<string,object>{{"selection_id",Str(item,"selection_id","")},{"property",Str(item,"property","")},{"equals",item["equals"]}});
+                Send("define_grid_export_selection",new Dictionary<string,object>{{"index",Num(gridExportSetup,"index",-1)},{"grid_selection_id",Str(gridExportGrid,"selection_id","")},
+                    {"sheet_selection_id",Str(gridExportSheet,"selection_id","")},{"query_step_id",gridExportQuery},{"export_scope",gridExportScope},
+                    {"sheet_condition",new Dictionary<string,object>{{"property",gridExportProperty},{"equals",gridExportProperty=="selected"?(object)gridExportBoolean:gridExportValue}}},
+                    {"view_conditions",views},{"view_conditions_confirmed",gridExportViewConfirmed},{"allow_empty",gridExportEmpty}},null);
+            }
+        }
+        void AddGridViewCondition(Dictionary<string,object> chosen)
+        {
+            using(var dialog=new Form()){
+                dialog.Text="필터 / 숨김 상태 확인 조건";dialog.Font=Font;dialog.StartPosition=FormStartPosition.CenterParent;dialog.ClientSize=new Size(Px(540),Px(250));dialog.FormBorderStyle=FormBorderStyle.FixedDialog;dialog.MaximizeBox=dialog.MinimizeBox=false;
+                dialog.Controls.Add(new Label {Text=Str(chosen,"label","현재 요소"),Bounds=Box(24,20,492,36)});
+                var property=new ComboBox();ConfigureCombo(property);property.DisplayMember="Label";property.Items.AddRange(new object[]{new Choice{Code="value",Label="입력값 / 선택값"},new Choice{Code="name",Label="표시 글자"},new Choice{Code="selected",Label="선택 여부"},new Choice{Code="enabled",Label="사용 가능 여부"}});Input(property,"ExportViewProperty",Box(24,70,180,34),dialog);
+                var text=new TextBox{MaxLength=16000};Input(text,"ExportViewValue",Box(216,70,300,34),dialog);
+                var boolean=new ComboBox();ConfigureCombo(boolean);boolean.Items.AddRange(new object[]{"예","아니요"});Input(boolean,"ExportViewBoolean",Box(216,70,300,34),dialog);boolean.SelectedIndex=0;
+                property.SelectedIndexChanged+=delegate{string code=((Choice)property.SelectedItem).Code;bool b=code=="selected"||code=="enabled";boolean.Visible=b;text.Visible=!b;};property.SelectedIndex=0;
+                dialog.Controls.Add(new Label{Text="현재 앱에서 실제로 읽을 수 있는 값만 검증합니다.\n실행할 때 이 상태가 바뀌면 내보내기 전에 멈춥니다.",Bounds=Box(24,120,492,54),ForeColor=muted});
+                var accept=new Button();ButtonStyle(accept,"AcceptExportViewCondition","조건 추가",Box(300,196,120,34),true,dialog);accept.DialogResult=DialogResult.OK;
+                var cancel=new Button();ButtonStyle(cancel,"CancelExportViewCondition","취소",Box(432,196,84,34),false,dialog);cancel.DialogResult=DialogResult.Cancel;dialog.CancelButton=cancel;
+                if(dialog.ShowDialog(this)==DialogResult.OK)gridExportViews.Add(new Dictionary<string,object>{{"selection_id",Str(chosen,"selection_id","")},{"label",Str(chosen,"label","")},{"property",((Choice)property.SelectedItem).Code},{"equals",boolean.Visible?(object)(boolean.SelectedIndex==0):text.Text}});
+            }
+        }
         void ShowStepPreview(Dictionary<string, object> item)
         {
             if (IsInputCandidate(item)) { ShowInputCandidate(item); return; }
-            bool replace = false, completionRequested = false;
+            bool replace = false, completionRequested = false, gridRequested = false;
+            bool gridEditable = Object.Equals(item.ContainsKey("grid_intent_editable") ? item["grid_intent_editable"] : null, true);
             string repairAction = Str(item, "repair_action", ""), repairValue = "", repairMethod = "auto";
             bool manual = Str(item, "action", "") == "manual_entry";
             using (Form dialog = new Form()) {
                 dialog.Text = "기록한 동작과 대상 확인"; dialog.Font = Font; dialog.BackColor = Color.FromArgb(245, 247, 251);
-                dialog.StartPosition = FormStartPosition.CenterParent; dialog.FormBorderStyle = FormBorderStyle.FixedDialog; dialog.MaximizeBox = dialog.MinimizeBox = false; dialog.ClientSize = new Size(Px(540), Px(360));
+                dialog.StartPosition = FormStartPosition.CenterParent; dialog.FormBorderStyle = FormBorderStyle.FixedDialog; dialog.MaximizeBox = dialog.MinimizeBox = false; dialog.ClientSize = new Size(Px(540), Px(gridEditable ? 410 : 360));
+                if(gridEditable){var gridButton=new Button();ButtonStyle(gridButton,"DefineGridExportIntent","표 내보내기 의도 지정",Box(24,360,372,34),false,dialog);gridButton.Click+=delegate{gridRequested=true;dialog.DialogResult=DialogResult.OK;dialog.Close();};}
                 dialog.Controls.Add(new Label { Text = Str(item, "program", "") + " · " + Str(item, "action_label", "") + "\n" + Str(item, "detail", ""), Bounds = Box(24, 18, 492, 80), ForeColor = ink });
                 using (var picture = new PictureBox { Bounds = Box(24, 106, 492, 182), SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.White }) {
                     dialog.Controls.Add(picture); string encoded = Str(item, "thumbnail_png", "");
@@ -1133,8 +1245,8 @@ internal static class ProcessEditor
                         };
                         var choose = new Button(); ButtonStyle(choose, "RetargetStep", "이 단계만 다시 지정", Box(24, 307, 184, 34), false, dialog);
                         choose.Click += delegate { confirmRepair("auto"); };
-                        if (!manual) { var completion = new Button(); ButtonStyle(completion, "SetStepCompletion", "완료 기준 지정", Box(216, 307, 180, 34), false, dialog); completion.Click += delegate { completionRequested = true; dialog.DialogResult = DialogResult.OK; dialog.Close(); }; }
                     }
+                    if (!manual && Object.Equals(item.ContainsKey("completion_editable") ? item["completion_editable"] : null, true)) { var completion = new Button(); ButtonStyle(completion, "SetStepCompletion", "완료 기준 지정", Box(216, 307, 180, 34), false, dialog); completion.Click += delegate { completionRequested = true; dialog.DialogResult = DialogResult.OK; dialog.Close(); }; }
                     dialog.ShowDialog(this); if (picture.Image != null) picture.Image.Dispose();
                 }
             }
@@ -1144,13 +1256,69 @@ internal static class ProcessEditor
                 if (manual) { repair["action"] = repairAction; if (repairAction == "set_value") repair["value"] = repairValue; }
                 Send("retarget_step", repair, null); if (busy) { hiddenForPicker = true; Hide(); }
             }
-            if (completionRequested) { Send("pick_completion", new Dictionary<string, object> { { "index", Num(item, "index", -1) } }, null); if (busy) { hiddenForPicker = true; Hide(); } }
+            if (completionRequested) ChooseCompletionTarget(item);
+            if(gridRequested){Send("grid_export_setup",new Dictionary<string,object>{{"index",Num(item,"index",-1)}},null);}
+        }
+        void ChooseCompletionTarget(Dictionary<string, object> item)
+        {
+            string resultRef = Str(item, "completion_window_ref", "main");
+            var existing = new List<Dictionary<string, object>>();
+            foreach (object value in List(item, "completion_conditions")) {
+                var check = value as Dictionary<string, object>; if (check != null) existing.Add(check);
+            }
+            int conditionIndex = -1;
+            if (existing.Count > 0) {
+                using (var dialog = new Form()) {
+                    dialog.Text = "완료 조건 수정 또는 추가"; dialog.Font = Font; dialog.BackColor = Color.FromArgb(245,247,251);
+                    dialog.StartPosition = FormStartPosition.CenterParent; dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
+                    dialog.MaximizeBox = dialog.MinimizeBox = false; dialog.ClientSize = new Size(Px(620),Px(350));
+                    dialog.Controls.Add(new Label { Text = "수정할 조건을 선택하거나 새 조건을 추가하세요.\n모든 완료 조건을 만족해야 실행이 완료됩니다.", Bounds = Box(24,20,572,60), ForeColor = ink });
+                    var conditions = new ListBox { HorizontalScrollbar = true };
+                    Input(conditions,"CompletionConditions",Box(24,88,572,150),dialog);
+                    for (int i=0; i<existing.Count; i++) {
+                        var check=existing[i]; var selector=Map(check,"selector");
+                        string label=Str(selector,"name",Str(selector,"automation_id","확인 요소"));
+                        conditions.Items.Add(new Choice {Code=i.ToString(),Label=(i+1)+". "+label+" / "+Str(check,"property","")+" = "+Str(check,"equals","")});
+                    }
+                    conditions.Items.Add(new Choice {Code="-1",Label="+ 새 완료 조건 추가"}); conditions.SelectedIndex=0;
+                    dialog.Controls.Add(new Label {Text="선택한 조건만 수정합니다. 다른 완료 조건과 사람 확인은 유지합니다.",Bounds=Box(24,250,572,38),ForeColor=muted});
+                    var accept=new Button(); ButtonStyle(accept,"ChooseCompletionCondition","이 조건의 확인 요소 선택",Box(276,298,224,36),true,dialog);accept.DialogResult=DialogResult.OK;
+                    var cancel=new Button(); ButtonStyle(cancel,"CancelCompletionCondition","취소",Box(512,298,84,36),false,dialog);cancel.DialogResult=DialogResult.Cancel;dialog.CancelButton=cancel;
+                    if(dialog.ShowDialog(this)!=DialogResult.OK || conditions.SelectedItem==null)return;
+                    conditionIndex=Int32.Parse(((Choice)conditions.SelectedItem).Code,CultureInfo.InvariantCulture);
+                }
+            }
+            bool sharedResultWindow = existing.Count > (conditionIndex >= 0 ? 1 : 0);
+            if (Str(item, "action", "") == "menu_command") {
+                using (var dialog = new Form()) {
+                    dialog.Text = "메뉴 명령의 결과 확인 창"; dialog.Font = Font; dialog.BackColor = Color.FromArgb(245, 247, 251);
+                    dialog.StartPosition = FormStartPosition.CenterParent; dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
+                    dialog.MaximizeBox = dialog.MinimizeBox = false; dialog.ClientSize = new Size(Px(540), Px(265));
+                    dialog.Controls.Add(new Label { Text = "메뉴가 닫힌 뒤 결과를 확인할 창을 선택하세요.\n같은 프로그램에서 이미 연결한 창만 선택할 수 있습니다.", Bounds = Box(24,20,492,60), ForeColor = ink });
+                    var targets = new ComboBox(); ConfigureCombo(targets); Input(targets, "MenuCompletionTarget", Box(24,92,492,34), dialog);
+                    foreach (object value in List(item,"completion_targets")) {
+                        var row = value as Dictionary<string, object>; if (row == null) continue;
+                        string reference = Str(row,"window_ref",""); if (reference.Length == 0) continue;
+                        if (sharedResultWindow && reference != resultRef) continue;
+                        targets.Items.Add(new Choice { Code = reference, Label = Str(row,"label",reference) });
+                        if (reference == resultRef) targets.SelectedIndex = targets.Items.Count-1;
+                    }
+                    if (targets.SelectedIndex < 0 && targets.Items.Count > 0) targets.SelectedIndex = 0;
+                    dialog.Controls.Add(new Label { Text = sharedResultWindow ? "다른 완료 조건도 이 창에서 확인하므로 결과 창을 유지합니다.\n이번 실행의 출력 상태나 완료 세대가 변하는 요소를 선택하세요." : "이번 실행의 출력 상태나 완료 세대가 변하는 요소를 선택합니다.\n메뉴 닫힘과 기존 완료 문구만으로 출력 성공을 판단하지 않습니다.", Bounds = Box(24,140,492,56), ForeColor = muted });
+                    var accept = new Button(); ButtonStyle(accept,"ChooseMenuCompletionTarget","이 창의 결과 요소 선택",Box(226,213,204,34),true,dialog);accept.Enabled=targets.Items.Count>0;accept.DialogResult=DialogResult.OK;
+                    var cancel = new Button(); ButtonStyle(cancel,"CancelMenuCompletionTarget","취소",Box(438,213,78,34),false,dialog);cancel.DialogResult=DialogResult.Cancel;dialog.CancelButton=cancel;
+                    if (dialog.ShowDialog(this) != DialogResult.OK || targets.SelectedItem == null) return;
+                    resultRef = ((Choice)targets.SelectedItem).Code;
+                }
+            }
+            Send("pick_completion", new Dictionary<string, object> { { "index", Num(item, "index", -1) }, {"completion_window_ref",resultRef}, {"condition_index",conditionIndex} }, null);
+            if (busy) { hiddenForPicker = true; Hide(); }
         }
         void ShowCompletionValue(int index, Dictionary<string, object> chosen)
         {
             using (var dialog = new Form()) {
                 dialog.Text = "자동 완료 기준"; dialog.Font = Font; dialog.BackColor = Color.FromArgb(245, 247, 251); dialog.StartPosition = FormStartPosition.CenterParent;
-                dialog.FormBorderStyle = FormBorderStyle.FixedDialog; dialog.MaximizeBox = dialog.MinimizeBox = false; dialog.ClientSize = new Size(Px(540), Px(330));
+                dialog.FormBorderStyle = FormBorderStyle.FixedDialog; dialog.MaximizeBox = dialog.MinimizeBox = false; dialog.ClientSize = new Size(Px(540), Px(370));
                 dialog.Controls.Add(new Label { Text = "확인 대상: " + Str(chosen, "label", "선택한 요소") + "\n동작 후 어떤 값이 되면 완료인가요?", Bounds = Box(24, 20, 492, 58), ForeColor = ink });
                 var property = new ComboBox(); ConfigureCombo(property); property.Items.AddRange(new object[] { new Choice { Code = "value", Label = "입력값 / 선택값" }, new Choice { Code = "name", Label = "표시된 글자 / 이름" }, new Choice { Code = "selected", Label = "체크 / 선택 여부" }, new Choice { Code = "enabled", Label = "사용 가능 여부" } });
                 Input(property, "CompletionProperty", Box(24, 90, 492, 34), dialog);
@@ -1158,10 +1326,22 @@ internal static class ProcessEditor
                 var boolean = new ComboBox(); ConfigureCombo(boolean); boolean.Items.AddRange(new object[] { "예", "아니요" }); Input(boolean, "CompletionBoolean", Box(24, 139, 492, 34), dialog); boolean.SelectedIndex = 0;
                 property.SelectedIndexChanged += delegate { bool isBoolean = ((Choice)property.SelectedItem).Code == "selected" || ((Choice)property.SelectedItem).Code == "enabled"; boolean.Visible = isBoolean; text.Visible = !isBoolean; };
                 property.SelectedIndex = Str(chosen, "role", "") == "Text" ? 1 : 0;
-                dialog.Controls.Add(new Label { Text = "조건을 실제로 확인하면 확인창 없이 이어갑니다.\n이미지 동작은 값이 동작 전과 달라졌는지도 확인합니다.", Bounds = Box(24, 194, 492, 52), ForeColor = muted });
-                var accept = new Button(); ButtonStyle(accept, "ApplyCompletion", "완료 기준 적용", Box(264, 270, 156, 36), true, dialog); accept.DialogResult = DialogResult.OK;
-                var cancel = new Button(); ButtonStyle(cancel, "CancelCompletion", "취소", Box(432, 270, 84, 36), false, dialog); cancel.DialogResult = DialogResult.Cancel; dialog.CancelButton = cancel;
-                if (dialog.ShowDialog(this) == DialogResult.OK) Send("set_completion", new Dictionary<string, object> { { "index", index }, { "selection_id", Str(chosen, "selection_id", "") }, { "property", ((Choice)property.SelectedItem).Code }, { "equals", boolean.Visible ? (object)(boolean.SelectedIndex == 0) : text.Text } }, null);
+                var previous = Map(chosen,"completion_condition");
+                if(previous!=null) {
+                    for(int i=0;i<property.Items.Count;i++) if(((Choice)property.Items[i]).Code==Str(previous,"property","")) property.SelectedIndex=i;
+                    text.Text=Str(previous,"equals","");
+                    boolean.SelectedIndex=Object.Equals(previous.ContainsKey("equals")?previous["equals"]:null,true)?0:1;
+                }
+                bool menuResult = Object.Equals(chosen.ContainsKey("completion_for_menu") ? chosen["completion_for_menu"] : null,true);
+                dialog.Controls.Add(new Label { Text = menuResult ? "이번 명령 이후 바뀐 출력 결과를 실제로 확인합니다.\n명시적인 사람 확인 단계는 유지합니다." : "조건을 실제로 확인하면 확인창 없이 이어갑니다.\n이미지 동작은 값이 동작 전과 달라졌는지도 확인합니다.", Bounds = Box(24, 194, 492, 52), ForeColor = muted });
+                var changed = new CheckBox {Text="동작 전과 달라진 결과만 완료로 인정 (조회에 사용)",Bounds=Box(24,251,492,32)};Identify(changed,"CompletionRequiresChange","실제 결과 변화 필요");dialog.Controls.Add(changed);
+                if(previous!=null)changed.Checked=Object.Equals(previous.ContainsKey("require_change")?previous["require_change"]:null,true);
+                if(Object.Equals(chosen.ContainsKey("completion_change_required")?chosen["completion_change_required"]:menuResult,true)) {
+                    changed.Checked=true;changed.Enabled=false;changed.Text="이번 동작 이후 결과 변화가 있어야 완료";
+                }
+                var accept = new Button(); ButtonStyle(accept, "ApplyCompletion", "완료 기준 적용", Box(264, 310, 156, 36), true, dialog); accept.DialogResult = DialogResult.OK;
+                var cancel = new Button(); ButtonStyle(cancel, "CancelCompletion", "취소", Box(432, 310, 84, 36), false, dialog); cancel.DialogResult = DialogResult.Cancel; dialog.CancelButton = cancel;
+                if (dialog.ShowDialog(this) == DialogResult.OK) Send("set_completion", new Dictionary<string, object> { { "index", index }, { "selection_id", Str(chosen, "selection_id", "") }, { "property", ((Choice)property.SelectedItem).Code }, { "equals", boolean.Visible ? (object)(boolean.SelectedIndex == 0) : text.Text }, {"require_change",changed.Checked}, {"completion_window_ref",Str(chosen,"completion_window_ref","main")}, {"condition_index",Num(chosen,"condition_index",-1)} }, null);
             }
         }
         void SetRecordingReview(Dictionary<string, object> value) {
@@ -1265,6 +1445,16 @@ internal static class ProcessEditor
             }
             if (pendingAction == "diagnose") ShowDiagnostic(result);
             if (pendingAction == "pick_completion") { var picked = Map(result, "selection"); if (picked != null) ShowCompletionValue(Num(result, "completion_index", -1), picked); }
+            if(pendingAction=="grid_export_setup"){
+                gridExportSetup=Map(result,"grid_export_setup");gridExportGrid=gridExportSheet=null;gridExportViews.Clear();
+                gridExportScope=gridExportQuery=gridExportValue="";gridExportProperty="selected";gridExportBoolean=true;gridExportEmpty=gridExportViewConfirmed=false;
+                ShowGridExportDialog();
+            }
+            else if(pendingAction=="pick_grid_export"){
+                var picked=Map(result,"selection");string purpose=Str(result,"grid_purpose","");
+                if(picked!=null){if(purpose=="grid")gridExportGrid=picked;else if(purpose=="sheet")gridExportSheet=picked;else if(purpose=="view")AddGridViewCondition(picked);}
+                ShowGridExportDialog();
+            }
             if (result.ContainsKey("steps")) UpdateSteps(List(result, "steps"));
             if (result.ContainsKey("recording_review")) SetRecordingReview(Map(result, "recording_review"));
             UpdateAuthoring(result);

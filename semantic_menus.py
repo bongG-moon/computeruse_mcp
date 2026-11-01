@@ -26,11 +26,24 @@ def validate_menu_target(value):
 
 
 def validate_menu_command(step):
-    allowed = {"operation", "menu_target", "completion_mode", "step_timeout_ms"}
+    allowed = {"operation", "menu_target", "completion_mode", "step_timeout_ms", "expect", "verification_timeout_ms", "poll_interval_ms"}
     if (not isinstance(step, dict) or set(step) - allowed or step.get("operation") != "menu_command"
-            or step.get("completion_mode") != "human"):
+            or not isinstance(step.get("completion_mode"), str) or step["completion_mode"] not in {"human", "conditions"}):
         raise OperationError("메뉴 명령에는 별도 결과 확인이 필요합니다.", "invalid_menu_command")
     validate_menu_target(step.get("menu_target"))
+    if step["completion_mode"] == "human":
+        if any(key in step for key in ("expect", "verification_timeout_ms", "poll_interval_ms")):
+            raise OperationError("명시적인 사람 확인과 자동 조건을 함께 지정하지 마세요.", "invalid_menu_command")
+    else:
+        from operations import validate_assertions
+        validate_assertions(step.get("expect"))
+        if not any(condition.get("require_change") is True for condition in step["expect"]):
+            raise OperationError("이번 출력 결과를 이전 결과와 구분할 실제 변화 조건이 하나 이상 필요합니다.", "invalid_menu_command")
+        if (type(step.get("verification_timeout_ms", 10000)) is not int
+                or not 0 <= step.get("verification_timeout_ms", 10000) <= 60000
+                or type(step.get("poll_interval_ms", 150)) is not int
+                or not 100 <= step.get("poll_interval_ms", 150) <= 2000):
+            raise OperationError("메뉴 결과 관찰 제한 시간을 확인하세요.", "invalid_menu_command")
     if type(step.get("step_timeout_ms", 10000)) is not int or not 1 <= step.get("step_timeout_ms", 10000) <= 120000:
         raise OperationError("메뉴 명령 제한 시간을 확인하세요.", "invalid_menu_command")
     return copy.deepcopy(step)
@@ -54,56 +67,119 @@ def _path(row, rows):
     return list(reversed(found))
 
 
-def resolve_menu(observation, menu_target, *, purpose="presence"):
-    """Prefer a complete UIA source; independent MSAA is not a Driver handle."""
+def resolve_menu(observation, menu_target, *, purpose="presence", diagnostics=None):
+    """Resolve a current scoped path, keeping diagnostics outside input evidence.
+
+    The Guard compares the returned selection before input. Provider counts and
+    fallback diagnostics must not become part of that identity comparison: an
+    unrelated menu item can legitimately be added between observations.
+    """
+    recognition = {"method": "menu_semantic", "purpose": purpose,
+                   "selected_source": None, "sources": {}, "fallback_reason": None,
+                   "image_fallback": "not_attempted", "local_ocr": "not_implemented"}
+    try:
+        result = _resolve_menu(observation, menu_target, purpose=purpose, recognition=recognition)
+        recognition["outcome"] = "matched"
+        return result
+    except OperationError as error:
+        recognition["outcome"] = error.code
+        error.menu_recognition = copy.deepcopy(recognition)
+        raise
+    finally:
+        if diagnostics is not None:
+            diagnostics.clear()
+            diagnostics.update(copy.deepcopy(recognition))
+
+
+def _resolve_menu(observation, menu_target, *, purpose, recognition):
+    """Prefer complete UIA; independently read MSAA when UIA lacks evidence."""
+    if purpose not in {"presence", "parent", "command"}:
+        raise OperationError("메뉴 확인 목적을 확인하세요.", "invalid_menu_target")
     path = validate_menu_target(menu_target)["path"]
     sources = observation.get("sources", {}) if isinstance(observation, dict) else {}
+    if not isinstance(sources, dict):
+        raise OperationError("메뉴 접근성 출처를 확인하지 못했습니다.", "menu_observation_invalid")
     complete_count = 0
     statuses = {}
+    unavailable_capability = None
     for source_name in ("uia_raw", "direct_msaa"):
         source = sources.get(source_name, {})
-        statuses[source_name] = source.get("status", "unknown")
+        if not isinstance(source, dict):
+            raise OperationError("메뉴 접근성 출처를 확인하지 못했습니다.", "menu_observation_invalid")
+        status = source.get("status", "unknown")
+        statuses[source_name] = status if status in {"ok", "empty", "partial", "error", "unavailable", "timeout"} else "unknown"
+        detail = {"status": statuses[source_name], "complete": source.get("complete") is True,
+                  "truncated": source.get("truncated") is True, "menu_items": 0,
+                  "path_candidates": 0, "visible_candidates": 0, "outcome": "source_incomplete"}
+        recognition["sources"][source_name] = detail
+        if source_name == "direct_msaa":
+            recognition["fallback_reason"] = recognition["sources"]["uia_raw"]["outcome"]
         if source.get("complete") is not True or source.get("truncated") is not False:
             continue
+        if source.get("status") not in {"ok", "empty"} or source.get("provider_errors"):
+            detail["outcome"] = "invalid_completeness"
+            raise OperationError("메뉴 관찰의 완료 상태가 일치하지 않습니다.", "menu_observation_invalid")
         elements = source.get("elements")
         if not isinstance(elements, list) or len(elements) > 500:
+            detail["outcome"] = "invalid_elements"
             raise OperationError("메뉴 관찰 범위를 확인하지 못했습니다.", "menu_observation_invalid")
         complete_count += 1
         rows = {row.get("index"): row for row in elements if isinstance(row, dict)}
         if len(rows) != len(elements) or any(type(key) is not int for key in rows):
+            detail["outcome"] = "invalid_identity"
             raise OperationError("메뉴 관찰 식별자가 중복됐습니다.", "menu_observation_invalid")
+        detail["menu_items"] = sum(row.get("role") == "MenuItem" for row in elements)
         candidates = [row for row in elements if row.get("role") == "MenuItem"
                       and row.get("name") == path[-1]["name"] and _path(row, rows) == path]
         visible = [row for row in candidates if row.get("visible") is True]
+        detail.update(path_candidates=len(candidates), visible_candidates=len(visible), outcome="path_not_found")
         if len(visible) > 1:
+            detail["outcome"] = "ambiguous"
             raise OperationError("같은 메뉴 경로에 표시된 항목이 여러 개입니다.", "menu_item_ambiguous")
         if not visible:
             if candidates:
+                detail["outcome"] = "hidden_or_visibility_unknown"
                 raise OperationError("해당 메뉴 항목은 현재 표시되지 않습니다.", "menu_item_hidden")
             continue
         row = visible[0]
         if row.get("enabled") is not True:
+            detail["outcome"] = "disabled" if row.get("enabled") is False else "enabled_unknown"
             raise OperationError("현재 메뉴 항목이 비활성 상태이거나 상태를 읽지 못했습니다.", "menu_item_disabled")
         bounds = row.get("bounds", {})
         if (not isinstance(bounds, dict) or set(bounds) != {"x", "y", "width", "height"}
                 or any(type(v) not in (int, float) or not (-2**30 < v < 2**30) for v in bounds.values())
                 or bounds["width"] <= 0 or bounds["height"] <= 0):
+            detail["outcome"] = "bounds_unavailable"
             raise OperationError("현재 메뉴 항목의 화면 경계를 확인하지 못했습니다.", "menu_item_bounds_unavailable")
         actions = row.get("supported_actions", [])
+        if not isinstance(actions, list):
+            detail["outcome"] = "invalid_capabilities"
+            raise OperationError("메뉴 기능 관찰 형식을 확인하지 못했습니다.", "menu_observation_invalid")
         parent = row.get("has_children") is True or row.get("has_popup") is True or row.get("expansion_state") in {"expanded", "collapsed", "partially_expanded"} or "expand" in actions
         if purpose == "parent" and not parent:
             # A provider can expose a name while withholding submenu semantics.
             # Read the independent MSAA provider instead of inventing capability.
-            if row.get("has_children") is not False: continue
+            if row.get("has_children") is not False:
+                detail["outcome"] = "parent_capability_unknown"
+                unavailable_capability = "menu_parent_capability_unavailable"
+                continue
+            detail["outcome"] = "parent_capability_unavailable"
             raise OperationError("부모 메뉴의 실제 펼침 기능을 확인하지 못했습니다.", "menu_parent_capability_unavailable")
         if purpose == "command" and parent:
+            detail["outcome"] = "command_is_parent"
             raise OperationError("최종 명령인지 확인되지 않은 부모 항목은 실행하지 않습니다.", "menu_command_not_leaf")
-        if purpose == "command" and row.get("has_children") is not False: continue
+        if purpose == "command" and row.get("has_children") is not False:
+            detail["outcome"] = "leaf_capability_unknown"
+            unavailable_capability = "menu_leaf_capability_unavailable"
+            continue
         if not isinstance(row.get("locator"), dict) or not isinstance(row.get("evidence"), dict):
+            detail["outcome"] = "evidence_unavailable"
             raise OperationError("메뉴를 새로 연결할 관찰 증거가 없습니다.", "menu_evidence_unavailable")
+        detail["outcome"] = "matched"
+        recognition["selected_source"] = source_name
         return {"source": source_name, "item": copy.deepcopy(row), "menu_target": copy.deepcopy(menu_target),
                 "read_only": True, "authorizes_input": False}
-    code = "menu_item_not_found" if complete_count else "menu_observation_incomplete"
+    code = unavailable_capability or ("menu_item_not_found" if complete_count else "menu_observation_incomplete")
     raise OperationError("현재 메뉴 경로를 확인하지 못했습니다. 접근성 출처: " + str(statuses), code)
 
 
@@ -130,14 +206,17 @@ def _answer(operation, *, verified=False, sent=False, code, message, **extra):
 
 def verify_menu_precondition(runtime, step, target):
     started = time.monotonic()
+    recognition = {}
     try:
-        selected = resolve_menu(observe_menu(runtime, target), step["menu_target"], purpose="parent" if step.get("menu_purpose", "parent") == "parent" else "command")
+        selected = resolve_menu(observe_menu(runtime, target), step["menu_target"],
+            purpose="parent" if step.get("menu_purpose", "parent") == "parent" else "command", diagnostics=recognition)
         return _answer("checkpoint", verified=True, code="menu_parent_ready",
             message="현재 메뉴 경로, 표시 상태와 기능을 확인했습니다. 강조색은 사전 조건으로 사용하지 않았습니다.",
-            verification_scope="menu_semantic_presence_only", menu_source=selected["source"],
+            verification_scope="menu_semantic_presence_only", menu_source=selected["source"], menu_recognition=recognition,
             metrics={"elapsed_ms": round((time.monotonic()-started)*1000, 2), "image_comparisons": 0})
     except OperationError as error:
-        return _answer("checkpoint", code=error.code, message=str(error))
+        return _answer("checkpoint", code=error.code, message=str(error),
+                       menu_recognition=getattr(error, "menu_recognition", recognition))
 
 
 def choose_menu_window(runtime, probe, owner, candidates, menu_target, *, timeout_ms=4000):
@@ -175,8 +254,15 @@ def choose_menu_window(runtime, probe, owner, candidates, menu_target, *, timeou
     return selected[0] if selected else None
 
 
-def execute_menu_command(runtime, step, target):
+def execute_menu_command(runtime, step, target, *, completion_target=None, verification_state=None,
+                         save_verification=None, verify_only=False):
     validate_menu_command(step)
+    if step["completion_mode"] == "conditions":
+        return _execute_menu_with_conditions(runtime, step, target, completion_target=completion_target,
+            verification_state=verification_state, save_verification=save_verification, verify_only=verify_only)
+    if verify_only or verification_state is not None or save_verification is not None or completion_target is not None:
+        return _answer("menu_command", code="human_review_required",
+            message="명시적인 사람 확인은 자동 결과 조건으로 바꾸지 않습니다. 입력을 반복하지 않았습니다.")
     answer = runtime.menu_action(target, step["menu_target"], "command", timeout_ms=step.get("step_timeout_ms", 10000))
     sent = answer.get("input_dispatched", answer.get("input_sent"))
     diagnostic = answer.get("diagnostic", {})
@@ -189,6 +275,72 @@ def execute_menu_command(runtime, step, target):
         native_delivery=answer)
 
 
+def _execute_menu_with_conditions(runtime, step, target, *, completion_target=None, verification_state=None,
+                                  save_verification=None, verify_only=False):
+    """One command, then authored conditions in a caller-bound approved window.
+
+    This function never guesses an owner, adopts Excel or repeats a mutation.
+    The runner pins both logical targets to this run and checks result-window
+    lifetime before passing its private persisted verification state.
+    """
+    from operations import _Execution
+    result_target = target if completion_target is None else completion_target
+    if (not isinstance(result_target, dict) or set(result_target) != {"pid", "window_id"}
+            or any(type(value) is not int or value < 1 for value in result_target.values())):
+        raise OperationError("현재 승인된 결과 창을 지정하세요.", "invalid_completion_target")
+    result_target = dict(result_target)
+    if type(verify_only) is not bool or verification_state is not None and not verify_only:
+        raise OperationError("저장된 검증 근거는 읽기 전용 재개에서만 사용하세요.", "invalid_verification_state")
+    assertion = {"operation": "assert", "expect": copy.deepcopy(step["expect"]),
+                 **{key: step[key] for key in ("verification_timeout_ms", "poll_interval_ms", "step_timeout_ms") if key in step}}
+    assertion.setdefault("step_timeout_ms", 10000)
+    sent, native, execution = False, None, None
+    try:
+        execution = _Execution(runtime, assertion, result_target, "background",
+            verification_state=verification_state, save_verification=save_verification, verify_only=True)
+        execution.transition_spec = {"mode": "same_window"}
+        if not verify_only:
+            execution.prepare_completion()
+            runtime.check_active()
+            remaining = execution._remaining()
+            sent = None  # A raised native call cannot be declared untransmitted.
+            began = time.monotonic()
+            try:
+                native = runtime.menu_action(target, step["menu_target"], "command", timeout_ms=remaining)
+            finally:
+                execution.metrics["action_ms"] += round((time.monotonic()-began)*1000, 2)
+                execution.metrics["mutations"] += 1
+            if not isinstance(native, dict):
+                raise OperationError("메뉴 입력 응답을 확인하지 못했습니다.", "menu_input_unknown")
+            reported = native.get("input_dispatched", native.get("input_sent"))
+            sent = reported if type(reported) is bool else None
+            if sent is False:
+                diagnostic = native.get("diagnostic", {})
+                return _answer("menu_command", code=diagnostic.get("code", "menu_input_not_sent"),
+                    message=diagnostic.get("message", "메뉴 명령이 전달되지 않았습니다. 자동 재시도하지 않습니다."),
+                    native_delivery=native, verification_scope="authored_menu_postconditions")
+        execution.dispatched = not verify_only and sent is not False
+        passed = execution.verify_completion()
+        # An uncertain native acknowledgement remains distinct from the result
+        # evidence. A later read-only resume can accept the pinned condition.
+        verified = passed and (verify_only or sent is True)
+        execution.metrics["elapsed_ms"] = round((time.monotonic()-execution.started)*1000, 2)
+        return _answer("menu_command", verified=verified, sent=sent,
+            code="menu_result_verified" if verified else "menu_input_unknown" if sent is None else "menu_result_pending",
+            message="지정한 출력 결과 조건을 확인했습니다." if verified else "메뉴 입력을 반복하지 않고 현재 출력 결과 조건을 확인하세요.",
+            business_result_verified=verified, postconditions_satisfied=passed,
+            verification_scope="authored_menu_postconditions", verification_only=verify_only,
+            target=result_target, checks=execution.checks, metrics=execution.metrics,
+            native_delivery=native,
+            menu_command={"menu_path": [row["name"] for row in step["menu_target"]["path"]],
+                          "command_delivery": "not_sent" if verify_only else "sent" if sent is True else "unknown"})
+    except Exception as error:
+        return _answer("menu_command", sent=sent, code=getattr(error, "code", "menu_result_observation_failed"),
+            message=str(error)[:1000], verification_scope="authored_menu_postconditions", verification_only=verify_only,
+            target=result_target, checks=execution.checks if execution is not None else [],
+            metrics=execution.metrics if execution is not None else {}, native_delivery=native)
+
+
 def execute_semantic_expansion(runtime, step, target, *, verify_only=False):
     started = time.monotonic()
     sent = False
@@ -196,6 +348,7 @@ def execute_semantic_expansion(runtime, step, target, *, verify_only=False):
     child_target = None
     source = "unknown"
     last = {}
+    recognition = {}
     deadline = started+step.get("step_timeout_ms",10000)/1000
     def read_timeout(child_deadline=None):
         end = min(deadline, child_deadline) if child_deadline is not None else deadline
@@ -206,6 +359,7 @@ def execute_semantic_expansion(runtime, step, target, *, verify_only=False):
     def result(code, message, verified=False):
         return _answer("expand_menu", verified=verified, sent=sent, code=code, message=message,
             child_target=child_target, verification_scope="menu_child_visibility_only",
+            menu_recognition=copy.deepcopy(recognition),
             menu_expansion={"stage": "child_visible" if verified else "child_observation" if sent is not False else "parent_observation",
                 "menu_path": [row["name"] for row in step["menu_target"]["path"]], "menu_depth": step.get("menu_depth", 1),
                 "expansion_method": step["expansion_method"], "verify_only": verify_only,
@@ -223,7 +377,8 @@ def execute_semantic_expansion(runtime, step, target, *, verify_only=False):
             if _identity(state, target["window_id"]) != baseline:
                 raise OperationError("메뉴 창이 교체됐습니다.", "menu_parent_changed")
         identity()
-        parent = resolve_menu(observe_menu(runtime, target, timeout_ms=read_timeout()), step["menu_target"], purpose="parent")
+        parent = resolve_menu(observe_menu(runtime, target, timeout_ms=read_timeout()), step["menu_target"],
+                              purpose="parent", diagnostics=recognition)
         source = parent["source"]
         owner = dict(target)
         from transient_popup import proven_popup, popup_owner
@@ -234,7 +389,8 @@ def execute_semantic_expansion(runtime, step, target, *, verify_only=False):
             identity()
             if "child_window" not in step:
                 try:
-                    resolve_menu(observe_menu(runtime, target, timeout_ms=read_timeout(child_deadline)), step["child_menu_target"])
+                    resolve_menu(observe_menu(runtime, target, timeout_ms=read_timeout(child_deadline)),
+                                 step["child_menu_target"], diagnostics=recognition)
                     return dict(target)
                 except OperationError as error:
                     if error.code in {"menu_item_not_found", "menu_item_hidden"}: return None
@@ -289,6 +445,7 @@ def execute_semantic_expansion(runtime, step, target, *, verify_only=False):
             if interval == 0 or remaining <= 0: return result("menu_child_timeout", "자식 메뉴가 아직 확인되지 않습니다. 부모 입력은 반복하지 않습니다.")
             runtime.stop_event.wait(min(remaining, step.get("poll_interval_ms", 100)/1000))
     except (OperationError, OSError, RuntimeError) as error:
+        recognition = getattr(error, "menu_recognition", recognition)
         return result(getattr(error, "code", "menu_expansion_failed"), str(error))
     finally:
         if probe is not None: probe.close()

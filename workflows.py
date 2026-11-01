@@ -49,7 +49,7 @@ def _target_executable(guard, target):
 
 
 def operation_step(step):
-    return {k: v for k, v in step.items() if k not in {"program_id", "window_ref", "step_id", "iteration_id", "linked_step_id", "precondition_step_id"}}
+    return {k: v for k, v in step.items() if k not in {"program_id", "window_ref", "completion_window_ref", "step_id", "iteration_id", "linked_step_id", "precondition_step_id"}}
 
 
 def window_step(step):
@@ -156,7 +156,7 @@ def _validate_expanded(steps, program_ids):
             ancestor = popup_owners.get((image.get("program_id"), ancestor))
             if ancestor is None: break
             related = ancestor == owner
-        return (deferred_input(image)
+        return ((deferred_input(image) or image.get("operation") == "open_grid_menu")
             and wait.get("operation") == "wait_for_window" and checkpoint.get("operation") == "checkpoint"
             and wait.get("program_id") == image.get("program_id") == checkpoint.get("program_id")
             and related and source == checkpoint.get("opened_from")
@@ -168,14 +168,28 @@ def _validate_expanded(steps, program_ids):
         ref = step.get("window_ref", "main")
         if not isinstance(ref, str) or not WINDOW_REF.fullmatch(ref):
             raise WorkflowError("window_ref는 영문자로 시작하는 1~64자 창 이름이어야 합니다.")
+        if "completion_window_ref" in step:
+            result_ref = step["completion_window_ref"]
+            known_refs = {"main", ref} | {row["window_ref"] for row in steps[:index]
+                if row.get("program_id") == step["program_id"] and row.get("operation") == "wait_for_window"}
+            if (step.get("operation") != "menu_command" or step.get("completion_mode") != "conditions"
+                    or not isinstance(result_ref, str) or not WINDOW_REF.fullmatch(result_ref) or result_ref not in known_refs):
+                raise WorkflowError("메뉴 결과는 같은 프로그램에 이미 연결된 창으로 지정하세요. 새 앱을 자동 연결하지 않습니다.")
         validate_workflow_step(step)
+        if step.get("operation") == "open_grid_menu":
+            from grid_context import grid_chain
+            try:
+                grid_chain(steps, index)
+            except ValueError as error:
+                raise WorkflowError(str(error)) from error
         if step.get("review_mode") == "popup_image":
             if (index+1 >= len(steps) or steps[index+1].get("operation") not in IMAGE_MUTATIONS | {"expand_menu"}
                     or target_key(step) != target_key(steps[index+1])
                     or step.get("image_target") != steps[index+1].get("image_target")):
                 raise WorkflowError("자동 팝업 확인은 바로 다음 이미지 입력의 대상만 확인할 수 있습니다. 최종 업무 결과 확인으로 사용할 수 없습니다.")
         if step.get("review_mode") == "menu_semantic":
-            if (index+1 >= len(steps) or steps[index+1].get("operation") != "expand_menu"
+            expected_input = "menu_command" if step.get("menu_purpose", "parent") == "command" else "expand_menu"
+            if (index+1 >= len(steps) or steps[index+1].get("operation") != expected_input
                     or target_key(step) != target_key(steps[index+1])
                     or step.get("menu_target") != steps[index+1].get("menu_target")
                     or not step.get("linked_step_id") or not steps[index+1].get("precondition_step_id")):
@@ -185,7 +199,8 @@ def _validate_expanded(steps, program_ids):
             opened = index+2 < len(steps) and linked_popup_checkpoint(step, steps[index+1], steps[index+2])
             if not direct and not opened:
                 raise WorkflowError("직접 확인할 입력 뒤에는 같은 창의 화면 확인 또는 소유 팝업 연결과 해당 팝업의 화면 확인이 필요합니다.")
-        if step.get("return_from") is not None and (index == 0 or not deferred_input(steps[index-1])
+        if step.get("return_from") is not None and (index == 0 or not (deferred_input(steps[index-1])
+                or steps[index-1].get("operation") == "menu_command" and steps[index-1].get("completion_mode") == "conditions")
                 or not linked_image_checkpoint(steps[index-1], step)):
             raise WorkflowError("돌아온 창 확인은 해당 소유 팝업의 이미지 동작 바로 다음에만 사용할 수 있습니다.")
         if "opened_from" in step and (index < 2 or not linked_popup_checkpoint(steps[index-2], steps[index-1], step)):
@@ -286,7 +301,7 @@ class WorkflowRunner:
     FIELDS = {"format", "run_id", "task_id", "revision", "recipe_hash", "inputs_hash", "created_at", "updated_at",
               "completed_steps", "total_steps", "pending_step", "status", "task_verified", "session_id", "duration_ms"}
     OPTIONAL_FIELDS = {"checkpoint", "image_verification", "step_delivery", "snapshot_hash", "step_receipts", "visual_assessments", "target_recovery", "continuation",
-                       "target_review_refreshes", "visual_review_refreshes", "performance"}
+                       "target_review_refreshes", "visual_review_refreshes", "performance", "grid_verification", "operation_verification"}
     def __init__(self, state_dir):
         self.root = Path(state_dir) / "workflows"
         from repeat_profiles import RepeatProfiles
@@ -331,6 +346,15 @@ class WorkflowRunner:
                     or value["task_verified"] != (value["status"] == "verified")
                     or (value["task_verified"] and (value["completed_steps"] != value["total_steps"] or value["pending_step"] is not None))):
                 raise ValueError("metadata")
+            if "grid_verification" in value:
+                proofs = value["grid_verification"]
+                if (not isinstance(proofs, dict) or len(proofs) > value["total_steps"] or any(
+                        not isinstance(k, str) or not k.isdigit() or int(k) >= value["total_steps"]
+                        or not isinstance(v, dict) or not {"target_hash", "context_hash"} <= set(v)
+                        or set(v) - {"target_hash", "context_hash", "menu_episode"}
+                        or any(not isinstance(h, str) or not re.fullmatch(r"[a-f0-9]{64}", h) for h in v.values())
+                        for k, v in proofs.items())):
+                    raise ValueError("grid_verification")
             for field in ("target_review_refreshes", "visual_review_refreshes"):
                 if field in value:
                     counts = value[field]
@@ -368,6 +392,18 @@ class WorkflowRunner:
                         or type(proof["step_index"]) is not int or not 0 <= proof["step_index"] < value["total_steps"]):
                     raise ValueError("image_verification")
                 validate_image_verification(proof["state"])
+            if "operation_verification" in value:
+                from operations import validate_operation_verification
+                proof = value["operation_verification"]
+                if (not isinstance(proof, dict) or set(proof) != {"step_index", "input_target", "completion_target", "target_hash", "state", "input_sent"}
+                        or type(proof["step_index"]) is not int or not 0 <= proof["step_index"] < value["total_steps"]
+                        or not isinstance(proof["target_hash"], str) or not re.fullmatch(r"[a-f0-9]{64}", proof["target_hash"])
+                        or proof["input_sent"] is not None and type(proof["input_sent"]) is not bool
+                        or any(not isinstance(proof[field], dict) or set(proof[field]) != {"pid", "window_id"}
+                            or any(type(v) is not int or v < 1 for v in proof[field].values())
+                            for field in ("input_target", "completion_target"))):
+                    raise ValueError("operation_verification")
+                validate_operation_verification(proof["state"])
             if "step_delivery" in value:
                 proof = value["step_delivery"]
                 if (not isinstance(proof, dict) or set(proof) != {"step_index", "state"}
@@ -391,7 +427,7 @@ class WorkflowRunner:
                     raise ValueError("step_receipts")
                 for index, receipt in enumerate(receipts):
                     if (not isinstance(receipt, dict) or not {"step_index", "step_id", "iteration_id", "status"} <= set(receipt)
-                            or set(receipt) - {"step_index", "step_id", "iteration_id", "status", "target_hash"}
+                            or set(receipt) - {"step_index", "step_id", "iteration_id", "status", "target_hash", "query_input_verified"}
                             or receipt["step_index"] != index or not isinstance(receipt["step_id"], str)
                             or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}", receipt["step_id"])
                             or not (receipt["iteration_id"] is None or isinstance(receipt["iteration_id"], str)
@@ -402,6 +438,9 @@ class WorkflowRunner:
                     if "target_hash" in receipt and (not isinstance(receipt["target_hash"], str)
                             or not re.fullmatch(r"[a-f0-9]{64}", receipt["target_hash"])):
                         raise ValueError("step_receipt_target")
+                    if "query_input_verified" in receipt and (receipt["query_input_verified"] is not True
+                            or "target_hash" not in receipt or receipt["status"] != "verified"):
+                        raise ValueError("step_receipt_query")
             if "visual_assessments" in value:
                 assessments = value["visual_assessments"]
                 if not isinstance(assessments, list) or len(assessments) > value["total_steps"]: raise ValueError("visual_assessments")
@@ -785,6 +824,12 @@ class WorkflowRunner:
             resume_receipts = (copy.deepcopy(record.get("step_receipts", []))
                 if resume_run_id and "snapshot_hash" in record else [])
             verified_step_targets = {}
+            verified_query_inputs = set()
+            grid_sources_this_call = set()
+            from grid_context import grid_chain
+            grid_chains = {i: grid_chain(steps, i) for i, row in enumerate(steps)
+                           if row["operation"] == "open_grid_menu"}
+            grid_queries = {chain["query_index"] for chain in grid_chains.values()}
             # Receipts are derived from the frozen recipe and durable completed
             # cursor. Rebuild once when entering/resuming, then append only new
             # completions. In-flight checkpoints need not rewrite the whole
@@ -874,11 +919,15 @@ class WorkflowRunner:
                             original = resume_receipts[index] if index < len(resume_receipts) else {}
                             if ({key: original.get(key) for key in receipt} == receipt and original.get("target_hash")):
                                 receipt["target_hash"] = original["target_hash"]
+                                if original.get("query_input_verified") is True:
+                                    receipt["query_input_verified"] = True
                             # Do not manufacture absent target evidence from
                             # the cursor. Even if the ordinary status is rebuilt,
                             # a second resume still cannot relax require_change.
                         elif index in verified_step_targets:
                             receipt["target_hash"] = verified_step_targets[index]
+                            if index in verified_query_inputs:
+                                receipt["query_input_verified"] = True
                     receipts.append(receipt)
                     if deferred: awaiting_receipts.append(index)
 
@@ -889,7 +938,7 @@ class WorkflowRunner:
                 record.update(status=status, updated_at=utc_now(), duration_ms=round((time.monotonic()-started)*1000, 2))
                 sync_receipts()
                 atomic_json(path, {key: value for key, value in record.items() if key != "step_receipts"}
-                    if status == "running" else record)
+                    if status == "running" and not grid_chains and "operation_verification" not in record else record)
 
             def continuation(reason):
                 # Called only at a known unattempted next-step boundary, after
@@ -919,7 +968,49 @@ class WorkflowRunner:
                 return digest({"program_id": item["program_id"], "window_ref": item.get("window_ref", "main"),
                     "executable": current_executable(target), "identity": _native_target_identity(runtime, target)})
 
-            def prior_assertion(index, assertion, target):
+            def completion_item(item):
+                return {**item, "window_ref": item.get("completion_window_ref", item.get("window_ref", "main"))}
+
+            def tracked_operation(index, target=None, *, verify_only=False):
+                """Durable local condition evidence; resume reads only the approved result window."""
+                item = steps[index]
+                condition_item = completion_item(item)
+                result_target = resolve(condition_item)
+                proof = record.get("operation_verification", {})
+                expected_hash = receipt_target_hash(condition_item, result_target)
+                if verify_only:
+                    if (proof.get("step_index") != index or proof.get("target_hash") != expected_hash
+                            or proof.get("completion_target") != result_target):
+                        return {"task_verified": False, "input_dispatched": False,
+                            "diagnostic": {"code": "operation_verification_unavailable", "automatic_replay": False,
+                                "message": "같은 실행과 결과 창의 입력 전 검증 근거가 없습니다. 명령을 반복하지 않았습니다."}}
+                    target = proof["input_target"]
+                else:
+                    target = target or resolve(item)
+                def persist(state):
+                    record["operation_verification"] = {"step_index": index, "input_target": dict(target),
+                        "completion_target": dict(result_target), "target_hash": expected_hash,
+                        "state": copy.deepcopy(state), "input_sent": proof.get("input_sent") if verify_only else None}
+                    save("running")
+                kwargs = {"verification_state": proof.get("state") if verify_only else None,
+                    "save_verification": persist, "verify_only": verify_only}
+                if item["operation"] == "menu_command":
+                    kwargs["completion_target"] = result_target
+                result = engine.execute(operation_step(item), target, delivery_mode=delivery_mode, **kwargs)
+                current = record.get("operation_verification", {})
+                if not verify_only and current.get("step_index") == index:
+                    current["input_sent"] = result.get("input_dispatched") if type(result.get("input_dispatched")) is bool else None
+                if receipt_target_hash(condition_item, resolve(condition_item)) != expected_hash:
+                    return {**result, "task_verified": False, "business_result_verified": False,
+                        "diagnostic": {"code": "operation_result_window_changed", "automatic_replay": False,
+                            "message": "결과를 확인하는 동안 창이 교체됐습니다. 명령을 반복하지 않습니다."}}
+                if result.get("task_verified") is True:
+                    verified_step_targets[index] = expected_hash
+                    if index in grid_queries and current.get("input_sent") is True:
+                        verified_query_inputs.add(index)
+                return result
+
+            def prior_assertion(index, assertion, target, target_item=None):
                 if not any(check.get("require_change") for check in assertion.get("expect", [])):
                     return assertion
                 item = steps[index]
@@ -927,7 +1018,7 @@ class WorkflowRunner:
                     "iteration_id": item.get("iteration_id"), "status": "verified"}
                 original = resume_receipts[index] if index < len(resume_receipts) else {}
                 if (original.get("target_hash") and {key: original.get(key) for key in expected} == expected
-                        and original.get("target_hash") == receipt_target_hash(item, target)):
+                        and original.get("target_hash") == receipt_target_hash(target_item or item, target)):
                     # The transition was verified during the original action.
                     # Recheck its current equalities rather than demand that
                     # it happen a second time without repeating that action.
@@ -936,8 +1027,87 @@ class WorkflowRunner:
                         check.pop("require_change", None)
                 return assertion
 
+            def grid_open(index, verify_only=False):
+                from grid_context import grid_chain, execute_grid_menu
+                from operations import OperationError
+                item = steps[index]
+                attempted = False
+                try:
+                    chain = grid_chains[index]
+                    query_index = chain["query_index"]
+                    query = steps[query_index]
+                    target = resolve(item)
+                    receipt = (record["step_receipts"][query_index] if query_index < len(record["step_receipts"])
+                               else resume_receipts[query_index] if query_index < chunk_start
+                               and query_index < len(resume_receipts) else {})
+                    if (receipt.get("status") != "verified" or receipt.get("query_input_verified") is not True
+                            or receipt.get("step_id") != query["step_id"]
+                            or receipt.get("iteration_id") != query.get("iteration_id")
+                            or receipt.get("target_hash") != receipt_target_hash(query, target)):
+                        raise OperationError("같은 실행에서 조회 입력과 완료 변화를 확인한 근거가 없습니다.", "grid_query_freshness_unverified")
+                    proof = {"run_id": run_id, "query_step_id": query["step_id"], "target": target,
+                        "input_dispatched": True, "freshness_verified": True, "failed": False,
+                        "verification_method": "require_change", "completion_verified": True,
+                        "require_change_verified": True}
+                    existing = record.get("grid_verification", {}).get(str(index), {})
+                    target_hash = receipt_target_hash(item, target)
+                    if verify_only and existing.get("target_hash") != target_hash:
+                        raise OperationError("우클릭 전 업무 창의 수명을 확인하지 못했습니다.", "grid_window_changed")
+                    def persist(context_hash):
+                        record.setdefault("grid_verification", {})[str(index)] = {
+                            "target_hash": target_hash, "context_hash": context_hash}
+                        save("running")
+                    def persist_episode(episode):
+                        record["grid_verification"][str(index)]["menu_episode"] = episode
+                        save("running")
+                    attempted = not verify_only
+                    result = execute_grid_menu(runtime, operation_step(item), target,
+                        query_evidence=proof, run_id=run_id,
+                        menu_wait=window_step(chain["menu_wait"]) if chain["menu_wait"] else None,
+                        verify_only=verify_only, prior_context_hash=existing.get("context_hash"), save_context=persist,
+                        prior_menu_episode=existing.get("menu_episode"), save_menu_episode=persist_episode)
+                    if not verify_only and result.get("task_verified") is True and result.get("input_dispatched") is True:
+                        grid_sources_this_call.add(index)
+                    return result
+                except (ValueError, RuntimeError, OSError) as error:
+                    return {"task_verified": False, "input_dispatched": None if attempted else False,
+                        "recognition": "grid_semantic", "business_result_verified": False,
+                        "diagnostic": {"code": getattr(error, "code", "grid_context_unavailable"),
+                            "message": str(error), "automatic_replay": False}}
+
+            def grid_command_context(index, verify=False):
+                from grid_context import grid_chain, verify_export_context
+                from operations import OperationError
+                candidates = [i for i, chain in grid_chains.items() if i < index and chain["command_index"] == index]
+                if not candidates:
+                    return None
+                if len(candidates) != 1:
+                    raise OperationError("내보내기 명령에 연결된 표가 여러 개입니다.", "grid_export_ambiguous")
+                opening = candidates[0]
+                if verify:
+                    if opening not in grid_sources_this_call:
+                        # A provider identity is not a visibility-episode log.
+                        # After a pause another grid could reopen the same
+                        # ToolStrip instance. Do not execute a new command from
+                        # that unproved origin. Sent commands still resume at
+                        # their separate result checkpoint without repetition.
+                        raise OperationError("재개 전에 같은 메뉴가 다른 표에서 다시 열렸는지 확인할 근거가 없습니다. 최종 명령을 보내지 않았습니다.",
+                                             "grid_source_continuity_unverified")
+                    item = steps[opening]
+                    target = resolve(item)
+                    proof = record.get("grid_verification", {}).get(str(opening), {})
+                    if proof.get("target_hash") != receipt_target_hash(item, target):
+                        raise OperationError("메뉴를 연 업무 창의 수명이 바뀌었습니다.", "grid_window_changed")
+                    verify_export_context(runtime, target, item["grid_intent"], proof.get("context_hash"))
+                return opening
+
             def check_step(index, *, completed_receipt=False):
                 item = steps[index]
+                is_condition_menu = item["operation"] == "menu_command" and item.get("completion_mode") == "conditions"
+                if not completed_receipt and (is_condition_menu or index in grid_queries and item["operation"] not in IMAGE_MUTATIONS):
+                    return measured(tracked_operation(index, verify_only=True))
+                if item["operation"] == "open_grid_menu":
+                    return measured(grid_open(index, verify_only=True))
                 if item["operation"] == "expand_menu":
                     # Sent or uncertain expansion resumes with observation
                     # only. A duplicate hover/click could collapse or switch a
@@ -981,9 +1151,10 @@ class WorkflowRunner:
                     assertion = {"operation": "assert", "expect": item["expect"]}
                 else:
                     assertion = verification_step(operation_step(item))
-                target = resolve(item)
+                target_item = completion_item(item) if is_condition_menu else item
+                target = resolve(target_item)
                 if completed_receipt:
-                    assertion = prior_assertion(index, assertion, target)
+                    assertion = prior_assertion(index, assertion, target, target_item)
                 return measured(engine.execute(assertion, target, delivery_mode=delivery_mode))
             def recover_sent_transition(index):
                 # The frozen recipe must explicitly connect this input to the
@@ -1286,9 +1457,11 @@ class WorkflowRunner:
                     if not awaiting_receipts and _session_budget_exhausted(runtime):
                         return continuation("session_budget_exhausted")
                     runtime.check_active()
-                    if not awaiting_receipts and record["completed_steps"] > chunk_start and (
+                    if (not awaiting_receipts and record["completed_steps"] > chunk_start
+                            and not any(opening < index <= grid_chains[opening]["command_index"]
+                                        for opening in grid_sources_this_call) and (
                             record["completed_steps"] - chunk_start >= RUN_CHUNK_STEPS
-                            or time.monotonic() - started >= RUN_CHUNK_SECONDS):
+                            or time.monotonic() - started >= RUN_CHUNK_SECONDS)):
                         return continuation("workflow_chunk_complete")
                     item = steps[index]
                     progress_event("running_step", index, item["operation"])
@@ -1357,9 +1530,28 @@ class WorkflowRunner:
                                 save_verification=lambda state: save_image_state(index, state),
                                 prepare_foreground=delivery_mode == "foreground")
                         engine = Operations(runtime)
+                    elif item["operation"] == "open_grid_menu":
+                        latest = grid_open(index)
+                        engine = Operations(runtime)
+                    elif item["operation"] == "menu_command" and grid_command_context(index) is not None:
+                        from grid_context import guarded_export_input
+                        attempted = False
+                        try:
+                            with guarded_export_input(runtime, lambda: grid_command_context(index, verify=True)):
+                                attempted = True
+                                latest = (tracked_operation(index, target) if item.get("completion_mode") == "conditions" else
+                                    engine.execute(operation_step(item), target, delivery_mode=delivery_mode))
+                        except (ValueError, RuntimeError, OSError) as error:
+                            latest = {"task_verified": False, "input_dispatched": None if attempted else False,
+                                "recognition": "grid_semantic", "business_result_verified": False,
+                                "diagnostic": {"code": getattr(error, "code", "grid_context_unavailable"),
+                                               "message": str(error), "automatic_replay": False}}
                     elif item["operation"] in PROCESS_OPERATIONS:
                         latest = execute_process_step(runtime, operation_step(item), target)
                         engine = Operations(runtime)  # Never reuse a pre-wait observation for later input.
+                    elif (item["operation"] == "menu_command" and item.get("completion_mode") == "conditions"
+                            or index in grid_queries):
+                        latest = tracked_operation(index, target)
                     else:
                         latest = engine.execute(operation_step(item), target, delivery_mode=delivery_mode, reuse_verified=True)
                     measured(latest)
@@ -1419,7 +1611,10 @@ class WorkflowRunner:
                                 if record["step_delivery"]["state"] == "not_sent" else
                                 "현재 화면을 확인하세요. 같은 입력은 자동 반복하지 않습니다. 이어가기는 먼저 미확인 단계의 결과를 다시 검사합니다.")}
                     if latest.get("task_verified") is True and any(check.get("require_change") for check in item.get("expect", [])):
-                        verified_step_targets[index] = receipt_target_hash(item, resolve(item))
+                        result_item = completion_item(item)
+                        verified_step_targets[index] = receipt_target_hash(result_item, resolve(result_item))
+                        if index in grid_queries and latest.get("input_dispatched") is True:
+                            verified_query_inputs.add(index)
                     record["completed_steps"] = index + 1
                     record["pending_step"] = None
                     stage = "checkpoint_after_verification"

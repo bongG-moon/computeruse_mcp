@@ -68,6 +68,37 @@ class OperationsTests(unittest.TestCase):
     def write(self, **extra):
         return dict(operation="set_value", selector=FIELD, value="after", verification_timeout_ms=0, **extra)
 
+    def test_original_query_baseline_and_busy_transition_resume_without_input(self):
+        step = {"operation": "click", "selector": FIELD, "verification_timeout_ms": 0,
+            "expect": [{"selector": FIELD, "property": "value", "equals": "Ready", "require_change": True}]}
+        runtime = Runtime([snapshot(element(value="Ready")), snapshot(element(value="Busy"))])
+        saved = []
+        first = Operations(runtime).execute(step, TARGET, save_verification=lambda state: saved.append(state))
+        self.assertTrue(first["input_dispatched"])
+        self.assertFalse(first["task_verified"])
+        self.assertTrue(saved[-1]["change_seen"])
+        runtime.observations = [snapshot(element(value="Ready"))]
+        second = Operations(runtime).execute(step, TARGET, verification_state=saved[-1], verify_only=True)
+        self.assertTrue(second["task_verified"], second)
+        self.assertFalse(second["input_dispatched"])
+        self.assertEqual([name for name, _ in runtime.calls].count("click"), 1)
+
+    def test_verification_state_is_private_strict_and_never_authorizes_new_input(self):
+        from operations import validate_operation_verification
+        step = self.write(expect=[{"selector": FIELD, "property": "value", "equals": "after", "require_change": True}])
+        runtime = Runtime([snapshot(element()), snapshot(element(value="after"))])
+        saved = []
+        Operations(runtime).execute(step, TARGET, save_verification=lambda state: saved.append(state))
+        valid = saved[-1]
+        self.assertEqual(validate_operation_verification(valid), valid)
+        for changed in ({**valid, "extra": True}, {**valid, "target": {"pid": True, "window_id": 12}},
+                        {**valid, "change_seen": ["unknown"]}, {**valid, "change_seen": [{}]}):
+            with self.assertRaises(OperationError): validate_operation_verification(changed)
+        with self.assertRaises(OperationError): Operations(runtime).execute(step, TARGET, verification_state=valid)
+        changed_step = copy.deepcopy(step); changed_step["expect"][0]["equals"] = "other"
+        with self.assertRaises(OperationError): Operations(runtime).execute(changed_step, TARGET, verification_state=valid, verify_only=True)
+        self.assertEqual([name for name, _ in runtime.calls].count("set_value"), 1)
+
     def test_progress_stages_do_not_include_input_values_or_selectors(self):
         runtime = Runtime([snapshot(element()), snapshot(element(value="after"))])
         events = []

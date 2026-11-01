@@ -191,6 +191,42 @@ class DraftTests(unittest.TestCase):
         self.assertEqual(len(self.draft.steps), 2)
         self.assertEqual(self.draft.steps[1]["message"], "추가 업무 확인")
 
+    def test_completion_edits_only_explicit_item_and_keeps_other_change_requirement(self):
+        self.add("set_value", value="W")
+        first = {"selector": {"role": "Text", "automation_id": "generation"}, "property": "value",
+            "equals": "new", "require_change": True}
+        self.draft.steps[0]["expect"] = [first, {"selector": {"role": "Text", "name": "Scope"},
+            "property": "value", "equals": "whole"}]
+        self.draft.completion({"index": 0, "selection_id": self.selection["selection_id"],
+            "condition_index": 1, "property": "value", "equals": "W"})
+        self.assertEqual(self.draft.steps[0]["expect"][0], first)
+        self.assertEqual(len(self.draft.steps[0]["expect"]), 2)
+        self.assertEqual(self.draft.steps[0]["expect"][1]["selector"], FIELD_SELECTOR)
+
+    def test_completion_add_preserves_existing_checks_and_default_edit_preserves_change(self):
+        self.add("set_value", value="W")
+        original = {"selector": FIELD_SELECTOR, "property": "value", "equals": "W", "require_change": True}
+        self.draft.steps[0]["expect"] = [copy.deepcopy(original)]
+        self.draft.completion({"index": 0, "selection_id": self.selection["selection_id"],
+            "property": "value", "equals": "new"})
+        self.assertTrue(self.draft.steps[0]["expect"][0]["require_change"])
+        previous = copy.deepcopy(self.draft.steps[0]["expect"])
+        self.draft.completion({"index": 0, "selection_id": self.selection["selection_id"],
+            "condition_index": -1, "property": "enabled", "equals": True})
+        self.assertEqual(self.draft.steps[0]["expect"][:-1], previous)
+        self.assertEqual(self.draft.steps[0]["expect"][-1]["property"], "enabled")
+
+    def test_completion_invalid_or_ambiguous_index_does_not_change_any_condition(self):
+        self.add("set_value", value="W")
+        condition = {"selector": FIELD_SELECTOR, "property": "value", "equals": "W"}
+        self.draft.steps[0]["expect"] = [condition, copy.deepcopy(condition)]
+        previous = copy.deepcopy(self.draft.steps)
+        base = {"index": 0, "selection_id": self.selection["selection_id"], "property": "value", "equals": "new"}
+        for extra in ({}, {"condition_index": -2}, {"condition_index": 2}, {"condition_index": True}, {"condition_index": None}):
+            with self.subTest(extra=extra), self.assertRaises(OperationError):
+                self.draft.completion({**base, **extra})
+            self.assertEqual(self.draft.steps, previous)
+
     def test_visual_completion_is_explicit_and_existing_checks_remain_human(self):
         self.add("click", completion_mode="human")
         self.add("click", completion_mode="visual")

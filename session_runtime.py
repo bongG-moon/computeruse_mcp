@@ -176,6 +176,7 @@ class SessionRuntime:
         # even when this run has not reached its first expansion yet.
         import menu_expansion  # noqa: F401
         import semantic_menus, menu_guard, menu_accessibility  # noqa: F401
+        import grid_intent, grid_context  # noqa: F401
         self.code_identity = loaded_code_identity()
         self.minutes = max_minutes if max_minutes is not None else config["max_minutes"]
         self.max_actions = max_actions if max_actions is not None else config["max_actions"]
@@ -443,6 +444,27 @@ class SessionRuntime:
                 from scoped_controls import ScopedControls
                 self.scoped_reader = ScopedControls(self)
             return self.scoped_reader.observe(target, selectors, timeout_ms=timeout_ms)
+
+    def observe_grid_context(self, target, intent, *, timeout_ms=2000):
+        """Opt-in provider properties, with no focus change or Driver handles."""
+        from grid_intent import validate_grid_intent
+        from operations import _payload, OperationError
+        intent = validate_grid_intent(intent)
+        if self.mode != "uia":
+            raise OperationError("표 의미 관찰에는 UIA 세션이 필요합니다.", "unsupported_mode")
+        with self.execution_lock:
+            self.check_active()
+            self.report_progress("observing")
+            if self.scoped_reader is None:
+                from scoped_controls import ScopedControls
+                self.scoped_reader = ScopedControls(self)
+            from image_steps import _identity as identity
+            before = identity(self, target)
+            answer = _payload(self.scoped_reader.observe_grid(target, intent, timeout_ms=timeout_ms))
+            self.check_active()
+            if identity(self, target) != before:
+                raise OperationError("표를 관찰하는 동안 업무 창이 바뀌었습니다.", "grid_window_changed")
+            return {**answer, "target": dict(target), "read_only": True, "authorizes_input": False}
 
     def create_transition_probe(self, target):
         """Cheap native identity baseline; no input, UIA traversal or new approval."""

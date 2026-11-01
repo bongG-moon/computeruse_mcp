@@ -18,14 +18,17 @@ def link_popup_condition(checkpoint, action):
 
 def popup_condition(checkpoint, action):
     """Use proven menu identity when present; old image-only steps stay strict."""
-    semantic = action.get("operation") == "expand_menu" and isinstance(action.get("menu_target"), dict)
+    semantic = action.get("operation") in {"expand_menu", "menu_command"} and isinstance(action.get("menu_target"), dict)
     field = "menu_target" if semantic else "image_target"
     if not action.get(field):
         raise ValueError("다음 동작에 확인할 메뉴 경로 또는 이미지가 없습니다.")
     checkpoint.pop("image_target" if semantic else "menu_target", None)
+    checkpoint.pop("menu_purpose", None)
+    if semantic and action["operation"] == "menu_command":
+        checkpoint["menu_purpose"] = "command"
     checkpoint.update(review_mode="menu_semantic" if semantic else "popup_image",
         **{field: copy.deepcopy(action[field])},
-        message=("관련 팝업에서 다음 부모 메뉴의 실제 이름, 경로와 사용 가능 상태를 확인합니다. 업무 결과 성공 판정은 아닙니다."
+        message=("관련 팝업에서 다음 메뉴의 실제 이름, 경로와 사용 가능 상태를 확인합니다. 업무 결과 성공 판정은 아닙니다."
                  if semantic else "관련 팝업 안에서 다음 녹화 대상 이미지가 유일하게 보이는지 확인합니다. 업무 결과 성공 판정은 아닙니다."))
     link_popup_condition(checkpoint, action)
 
@@ -83,9 +86,9 @@ def use_popup_image_conditions(steps, checkpoint_ids):
             raise ValueError("열린 팝업의 모델 확인만 자동 이미지 조건으로 바꿀 수 있습니다. 사람·필수 확인과 업무 결과 확인은 유지하세요.")
         following = proposed[index+1]
         key = lambda row: (row.get("program_id"), row.get("window_ref", "main"))
-        if (following.get("operation") not in {"image_click", "image_right_click", "expand_menu"}
+        if (following.get("operation") not in {"image_click", "image_right_click", "expand_menu", "menu_command"}
                 or key(item) != key(following) or not (following.get("image_target") or following.get("menu_target"))):
-            raise ValueError("같은 팝업의 바로 다음 이미지 클릭 또는 메뉴 펼침 대상이 저장되어 있어야 합니다.")
+            raise ValueError("같은 팝업의 바로 다음 이미지 클릭, 메뉴 펼침 또는 최종 메뉴 명령이 저장되어 있어야 합니다.")
         if "image_target" in following:
             validate_image_target(following["image_target"])
         if "linked_step_id" in item or "precondition_step_id" in following:

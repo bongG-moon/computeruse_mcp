@@ -98,14 +98,16 @@ def _native(request, timeout, check):
 
 
 def _validate_source(data, max_elements):
-    if (data.get('status') not in {'ok', 'empty', 'partial', 'error', 'unavailable'}
+    if (data.get('source') not in SOURCES
+            or data.get('status') not in {'ok', 'empty', 'partial', 'error', 'unavailable'}
             or type(data.get('complete')) is not bool or type(data.get('truncated')) is not bool
             or data.get('read_only') is not True or not isinstance(data.get('elements'), list)
             or len(data['elements']) > max_elements):
         raise _invalid('menu_accessibility_invalid_response')
     rows = data['elements']
     for index, row in enumerate(rows):
-        if (not isinstance(row, dict) or row.get('element_index') != index
+        if (not isinstance(row, dict) or type(row.get('element_index')) is not int
+                or row['element_index'] != index or type(row.get('index')) is not int or row['index'] != index
                 or type(row.get('parent_index')) is not int or not -1 <= row['parent_index'] < index
                 or row.get('verification_only') is not True or row.get('authorizes_input') is not False
                 or row.get('identity_lifetime') != 'current_menu_observation_only'
@@ -118,8 +120,48 @@ def _validate_source(data, max_elements):
                 or any(value not in {'expand', 'invoke', 'hover', 'click_parent', 'click_leaf'} for value in row['supported_actions'])
                 or any(key in row for key in ('element_token', 'snapshot_id', 'actions', 'handle'))):
             raise _invalid('menu_accessibility_invalid_response')
+        _validate_locator_evidence(data, row, rows)
     if data['complete'] and (data['status'] in {'partial', 'error', 'unavailable'} or data['truncated']
                              or data.get('provider_errors')):
+        raise _invalid('menu_accessibility_invalid_response')
+
+
+def _validate_locator_evidence(data, row, rows):
+    """Presentation aliases cannot point at a different native evidence row.
+
+    This checks the helper's transport contract, not input authorization. The
+    native helper still reobserves the entire path and current HWND lifetime at
+    dispatch, under Guard policy, approval and budget checks.
+    """
+    locator, expected = row['locator'], row['expected']
+    if (row.get('source') != data['source'] or row.get('evidence') != expected
+            or set(locator) != {'source', 'path', 'root_object_id'}
+            or locator.get('source') != data['source'] or locator.get('root_object_id') != -4
+            or not isinstance(locator.get('path'), list) or len(locator['path']) > 32
+            or any(type(value) is not int or not 0 <= value < 2000 for value in locator['path'])
+            or set(expected) != {'target', 'path', 'observed_at_ms'}
+            or not isinstance(expected.get('target'), dict) or not isinstance(expected.get('path'), list)
+            or len(expected['path']) != len(locator['path']) + 1
+            or any(not isinstance(signature, dict) for signature in expected['path'])
+            or type(expected.get('observed_at_ms')) not in (int, float)
+            or not math.isfinite(expected['observed_at_ms'])
+            or any(expected['target'].get(key) != data.get(key) for key in ('pid', 'window_id'))):
+        raise _invalid('menu_accessibility_invalid_response')
+    # has_children and expansion presentation may be normalized from actual
+    # descendant evidence. These unchanged identity fields must still agree.
+    signature = expected['path'][-1]
+    if any(signature.get(key) != row.get(key) for key in
+           ('name', 'role', 'enabled', 'visible', 'bounds', 'identity', 'identity_kind', 'native_window_id')):
+        raise _invalid('menu_accessibility_invalid_response')
+    parent = row['parent_index']
+    if parent == -1:
+        valid_path = locator['path'] == []
+    else:
+        previous = rows[parent]
+        valid_path = (locator['path'][:-1] == previous['locator']['path']
+                      and len(locator['path']) == len(previous['locator']['path']) + 1
+                      and expected['path'][:-1] == previous['expected']['path'])
+    if not valid_path:
         raise _invalid('menu_accessibility_invalid_response')
 
 

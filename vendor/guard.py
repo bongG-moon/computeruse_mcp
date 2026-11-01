@@ -29,6 +29,13 @@ class GuardError(RuntimeError):
     pass
 
 
+class GridInputRefused(GuardError):
+    """Private provider revalidation failed before any input dispatch."""
+    def __init__(self, message, code="grid_input_changed"):
+        super().__init__(message)
+        self.code = code
+
+
 class ElevationRequired(GuardError):
     """A measured lower Driver token was blocked before any input dispatch."""
     pass
@@ -853,9 +860,13 @@ def native_delivery_evidence(source):
         evidence["capture_backend"] = source["capture_backend"]
     if "input_sent" in source and (source["input_sent"] is None or type(source["input_sent"]) is bool):
         evidence["input_sent"] = source["input_sent"]
-    for key, choices in {"delivery_phase": {"preflight", "pointer", "move", "down", "up"},
-                         "release_delivery": {"not_queued", "queued_once"}}.items():
+    for key, choices in {"delivery_phase": {"preflight", "pointer", "move", "down", "up", "native"},
+                         "release_delivery": {"not_queued", "queued_once", "unknown"}}.items():
         if isinstance(source.get(key), str) and source[key] in choices: evidence[key] = source[key]
+    failures = source.get("cleanup_failures")
+    if isinstance(failures, list):
+        clean = [phase for phase in ("probe_close", "dpi_restore") if phase in failures]
+        if clean: evidence["cleanup_failures"] = clean
     point = source.get("point_evidence")
     if isinstance(point, dict):
         clean = {}
@@ -1975,6 +1986,7 @@ class Guard:
 
     def call(self, name, arguments, *, timeout_seconds=None):
         started = time.monotonic()
+        grid_dispatch_attempted = False
         if name == "get_window_state":
             # An attempted observation invalidates the old capture, even if
             # validation, approval or the new capture subsequently fails.
@@ -2017,6 +2029,19 @@ class Guard:
                         raise ElevationRequired(blocked['message'])
             self.check_stop()
             target_evidence = {}
+            grid_contract = getattr(self, "_grid_input_contract", None)
+            if name not in OBSERVATIONS and grid_contract is not None:
+                expected, revalidate = grid_contract
+                try:
+                    if name != "right_click" or {k: args.get(k) for k in ("pid", "window_id")} != expected:
+                        raise GridInputRefused("표 입력 계약과 다른 동작을 보내지 않았습니다.")
+                    revalidate()
+                    self.check_stop()
+                    if self.action_count >= self.policy["max_actions"]:
+                        raise GridInputRefused("표 입력 전에 실행 예산을 초과했습니다.", "action_budget_exhausted")
+                except (ValueError, RuntimeError, OSError) as error:
+                    self.observed_targets.discard(target_key)
+                    raise GridInputRefused(str(error), getattr(error, "code", "grid_input_changed")) from error
             if deadline is not None and time.monotonic() >= deadline:
                 raise RequestDeadlineExceeded("단계 시간이 지나 입력을 전달하지 않았습니다. 현재 상태를 다시 확인하세요.")
             if name not in {"list_apps", "list_windows"}:
@@ -2059,6 +2084,7 @@ class Guard:
                             self._native_popup_frame = (*target_key, popup_geometry, proof)
                     elif native_route:
                         from transient_popup import click as click_popup, popup_proof
+                        native_entered = False
                         try:
                             check = self._popup_check_active
                             check()
@@ -2074,27 +2100,32 @@ class Guard:
                                 raise GuardError("Native popup lifetime changed; no input sent.")
                             if deadline is not None and time.monotonic() >= deadline:
                                 raise RequestDeadlineExceeded("단계 시간이 지나 네이티브 입력을 전달하지 않았습니다.")
+                            native_entered = True
                             raw = click_popup({key: args[key] for key in ("pid", "window_id")},
                                 {key: args[key] for key in ("x", "y")}, native_frame[2], check)
                             raw.setdefault("structuredContent", {})["capture_backend"] = "owned-popup-printwindow"
                         except (RuntimeError, OSError, ValueError) as error:
-                            # Native input reports its own uncertain delivery.
-                            # Exceptions from its preflight prove no click was sent.
+                            # Only failures before entering native input prove
+                            # non-delivery. An escaped exception may be cleanup
+                            # after UP was already queued; never permit a retry.
                             raw = {"isError": True, "structuredContent": {
-                                "backend": "owned-popup-messages", "input_sent": False,
-                                "task_verified": False, "delivery_phase": "preflight",
-                                "release_delivery": "not_queued", "automatic_retry": False,
-                                "code": getattr(error, "code", "popup_preflight_failed"), "message": str(error)}}
+                                "backend": "owned-popup-messages", "input_sent": None if native_entered else False,
+                                "task_verified": False, "delivery_phase": "native" if native_entered else "preflight",
+                                "release_delivery": "unknown" if native_entered else "not_queued", "automatic_retry": False,
+                                "code": getattr(error, "code", "popup_input_unknown" if native_entered else "popup_preflight_failed"),
+                                "message": str(error)}}
                     elif timeout_seconds is not None and isinstance(self.transport, DriverTransport):
                         configured = self.policy.get("observation_timeout_seconds", 20) if name in OBSERVATIONS else self.policy.get("request_timeout_seconds", 90)
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
                             raise RequestDeadlineExceeded("단계 시간이 지나 Driver 요청을 전달하지 않았습니다.")
+                        grid_dispatch_attempted = name not in OBSERVATIONS
                         raw = self.transport.driver_request("tools/call", request, timeout=min(configured, remaining))
                     elif name in OBSERVATIONS and isinstance(self.transport, DriverTransport):
                         raw = self.transport.driver_request("tools/call", request,
                             timeout=self.policy.get("observation_timeout_seconds", 20))
                     else:
+                        grid_dispatch_attempted = name not in OBSERVATIONS
                         raw = self.transport.driver_request("tools/call", request)
                 finally:
                     if name not in OBSERVATIONS:
@@ -2148,10 +2179,10 @@ class Guard:
                                     "owned-popup-printwindow" if getattr(self, "_native_popup_frame", None) else "cua-driver")
                             except (RuntimeError, OSError, ValueError) as error:
                                 raw = {"isError": True, "structuredContent": {
-                                    "backend": "owned-popup-messages", "input_sent": False,
-                                    "task_verified": False, "delivery_phase": "preflight",
-                                    "release_delivery": "not_queued", "automatic_retry": False,
-                                    "code": getattr(error, "code", "popup_preflight_failed"), "message": str(error)}}
+                                    "backend": "owned-popup-messages", "input_sent": None,
+                                    "task_verified": False, "delivery_phase": "native",
+                                    "release_delivery": "unknown", "automatic_retry": False,
+                                    "code": getattr(error, "code", "popup_input_unknown"), "message": str(error)}}
                             finally:
                                 self.observed_targets.discard(target_key)
                                 self._native_popup_frame = None
@@ -2171,7 +2202,10 @@ class Guard:
             return result
         except (GuardError, OSError, ValueError) as error:
             refused = {"isError": True, "content": [{"type": "text", "text": str(error)}]}
-            if isinstance(error, BackgroundShortcutUnavailable):
+            if isinstance(error, GridInputRefused):
+                refused["structuredContent"] = {"error_code": error.code, "input_sent": False,
+                                                "effect": "not_applied", "automatic_retry": False}
+            elif isinstance(error, BackgroundShortcutUnavailable):
                 refused["structuredContent"] = {"error_code": "background_unavailable", "input_sent": False,
                                                 "effect": "not_applied", "automatic_retry": False}
             elif isinstance(error, RequestDeadlineExceeded):
@@ -2181,6 +2215,9 @@ class Guard:
             elif isinstance(error, ElevationRequired):
                 refused['structuredContent'] = {'error_code': 'elevation_required', 'input_sent': False,
                                                'effect': 'not_applied', 'automatic_retry': False}
+            if (name == "right_click" and getattr(self, "_grid_input_contract", None) is not None
+                    and not grid_dispatch_attempted):
+                refused.setdefault("structuredContent", {}).update(input_sent=False, effect="not_applied", automatic_retry=False)
             refused = action_guidance(refused, name)
             metrics = add_metrics(refused, started)
             self.log("denied" if isinstance(error, GuardError) else "error", request_id=call_id,
