@@ -7,6 +7,7 @@ permissions:
   contents: read
 jobs:
   verify:
+    if: ${{ !startsWith(github.event.release.tag_name || github.ref_name, 'agent-desktop-local-') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,3 +33,26 @@ jobs:
         run: |
           status=$(python -c "import json,os; from pathlib import Path; print('prerelease' if json.loads((Path(os.environ['RUNNER_TEMP'])/'release.json').read_text())['prerelease'] else 'release')")
           python tools/publication.py check --repo . --assets "$RUNNER_TEMP/release-assets" --git-ref HEAD --release-json "$RUNNER_TEMP/release.json" --release-status "$status"
+  verify-addon:
+    if: ${{ startsWith(github.event.release.tag_name || github.ref_name, 'agent-desktop-local-') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Test local observer boundaries
+        run: python -B -m unittest discover -s addons/agent-desktop-local/tests -v
+      - name: Download standalone add-on assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || github.ref_name }}
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/addon-assets"
+          gh release download "$RELEASE_TAG" --dir "$RUNNER_TEMP/addon-assets" --pattern 'Agent-Desktop-Local-0.1.0-*.zip' --pattern 'SHA256SUMS.txt'
+      - name: Verify published add-on bytes against committed source
+        run: python -B addons/agent-desktop-local/tools/build.py --assets "$RUNNER_TEMP/addon-assets" --check
