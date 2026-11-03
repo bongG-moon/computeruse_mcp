@@ -13,7 +13,7 @@ from local_core import (EngineError, _Child, _identity, foreground, process_path
                         validate_local_directory)
 from recognition import derive
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 BINARY_SHA256 = "2c8e9a627d87649a4562bfe5678450d045b793ab6f3fdec8af05c9571f32d5ef"
 BINARY = Path(__file__).resolve().parents[1] / "bin" / "agent-desktop.exe"
 STAGES = ("window", "menu", "combo", "grid", "property")
@@ -260,6 +260,9 @@ def main(argv=None):
     try:
         args = parser.parse_args(argv)
         result = run_inventory(args) if args.command == "inventory" else run_observe(args)
+    except KeyboardInterrupt:
+        result = {"status": "interrupted", "read_only": True, "input_dispatched": False,
+                  "model_calls": 0, "network_requests_by_wrapper": 0}
     except EngineError:
         # Fixed public error. Detailed UI errors must not cross the local boundary.
         result = {"status": "blocked", "read_only": True, "input_dispatched": False,

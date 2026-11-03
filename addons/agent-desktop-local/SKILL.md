@@ -7,6 +7,8 @@ description: Windows 업무 앱의 메뉴, 콤보, 표와 속성 편집기를 ag
 
 이 패키지는 Windows x64용 agent-desktop 1.1.0과 별도 관찰 래퍼다. 기존 CUA 설치, MCP 연결, 녹화 및 보안 설정은 변경하지 않는다. Python 3.10 이상과 현재 로그인한 Windows 세션이 필요하다. CUA는 필수 의존성이 아니다.
 
+사용자가 설치나 첫 실행 방법을 요청하면 [사용가이드.html](사용가이드.html)을 안내한다. CUA Driver는 필요 없고 `bin/agent-desktop.exe`는 Windows용 ZIP에 포함된다. Python은 별도 필요하다. 기존 CUA v0.19.5 ZIP과 이 스킬의 배포 ZIP을 구분한다.
+
 ## 데이터 경계
 
 - `scripts/observe.py`만 실행한다. 포함된 원본 EXE의 다른 명령이나 내장 스킬로 우회하지 않는다. 래퍼는 `list-windows`와 `snapshot`만 구성하며 바이너리 해시를 확인한다.

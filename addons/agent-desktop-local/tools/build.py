@@ -7,9 +7,9 @@ import re
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '0.1.0'
+VERSION = '0.1.1'
 BASE = 'Agent-Desktop-Local-' + VERSION
-FILES = ('SKILL.md', 'README.md', 'VALIDATION.md', 'LICENSE', 'NOTICE.txt', 'UPSTREAM.json', 'THIRD_PARTY_NOTICES.txt',
+FILES = ('SKILL.md', 'README.md', '사용가이드.html', 'VALIDATION.md', 'LICENSE', 'NOTICE.txt', 'UPSTREAM.json', 'THIRD_PARTY_NOTICES.txt',
          'references/recognition.md', 'scripts/observe.py', 'scripts/local_core.py',
          'scripts/recognition.py', 'tests/test_observer.py', 'tools/build.py')
 PIN = '2c8e9a627d87649a4562bfe5678450d045b793ab6f3fdec8af05c9571f32d5ef'
@@ -43,7 +43,7 @@ def archive(path, files):
 
 def check(assets):
     expected = source()
-    names = (BASE + '-source.zip', BASE + '-windows-x64.zip')
+    names = (BASE + '-source.zip', BASE + '-windows-x64.zip', BASE + '-Guide.html')
     listed = {}
     for line in (assets / 'SHA256SUMS.txt').read_text().splitlines():
         digest, name = line.split('  ', 1)
@@ -55,6 +55,10 @@ def check(assets):
     for name in names:
         if sha((assets / name).read_bytes()) != listed[name]:
             raise ValueError('asset_hash_mismatch')
+        if name.endswith('-Guide.html'):
+            if (assets / name).read_bytes() != expected['사용가이드.html']:
+                raise ValueError('guide_source_mismatch')
+            continue
         with zipfile.ZipFile(assets / name) as z:
             if z.testzip() is not None or len(set(z.namelist())) != len(z.namelist()):
                 raise ValueError('invalid_archive')
@@ -69,7 +73,7 @@ def check(assets):
             raise ValueError('binary_in_source')
         if content != expected:
             raise ValueError('source_or_allowlist_mismatch')
-    print(json.dumps({'verified': True, 'assets': 3, 'source_files': len(expected)}))
+    print(json.dumps({'verified': True, 'assets': 4, 'source_files': len(expected)}))
 
 
 def main():
@@ -86,7 +90,8 @@ def main():
         args.assets.mkdir(parents=True, exist_ok=True)
         archive(args.assets / (BASE + '-source.zip'), files)
         archive(args.assets / (BASE + '-windows-x64.zip'), dict(files, **{'bin/agent-desktop.exe': binary}))
-        names = (BASE + '-source.zip', BASE + '-windows-x64.zip')
+        (args.assets / (BASE + '-Guide.html')).write_bytes(files['사용가이드.html'])
+        names = (BASE + '-source.zip', BASE + '-windows-x64.zip', BASE + '-Guide.html')
         (args.assets / 'SHA256SUMS.txt').write_text(''.join(sha((args.assets / n).read_bytes()) + '  ' + n + '\n' for n in names), encoding='ascii')
     check(args.assets)
 

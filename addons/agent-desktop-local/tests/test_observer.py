@@ -52,6 +52,16 @@ class ObserverTests(unittest.TestCase):
             self.assertEqual(observe.main(['inventory', '--exe-name', 'App.exe', '--output', 'PRIVATE PATH']), 2)
         self.assertNotIn('PRIVATE', stream.getvalue())
 
+    def test_user_interrupt_has_safe_response_without_traceback(self):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(observe, 'run_inventory', side_effect=KeyboardInterrupt), \
+             contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = observe.main(['inventory', '--exe-name', 'PRIVATE.exe', '--output', 'PRIVATE PATH'])
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(stdout.getvalue())['status'], 'interrupted')
+        self.assertEqual(stderr.getvalue(), '')
+        self.assertNotIn('PRIVATE', stdout.getvalue())
+
     def test_binary_tamper_is_rejected(self):
         with tempfile.TemporaryDirectory() as folder:
             binary = Path(folder) / 'agent-desktop.exe'

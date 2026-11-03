@@ -53,6 +53,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/addon-assets"
-          gh release download "$RELEASE_TAG" --dir "$RUNNER_TEMP/addon-assets" --pattern 'Agent-Desktop-Local-0.1.0-*.zip' --pattern 'SHA256SUMS.txt'
+          version="${RELEASE_TAG#agent-desktop-local-v}"
+          gh release download "$RELEASE_TAG" --dir "$RUNNER_TEMP/addon-assets" --pattern "Agent-Desktop-Local-$version-*.zip" --pattern "Agent-Desktop-Local-$version-Guide.html" --pattern 'SHA256SUMS.txt'
       - name: Verify published add-on bytes against committed source
         run: python -B addons/agent-desktop-local/tools/build.py --assets "$RUNNER_TEMP/addon-assets" --check

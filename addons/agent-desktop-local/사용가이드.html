@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<title>Agent Desktop Local 0.1.1 — 처음 사용하는 분을 위한 안내</title>
+<style>
+:root{--ink:#172c41;--muted:#576c7e;--line:#dbe5eb;--paper:#fff;--bg:#f0f5f8;--accent:#087f82;--tint:#e8f6f3;--warm:#fff5dc;--navy:#12364b}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:"Malgun Gothic","맑은 고딕","Segoe UI",sans-serif;font-size:16px;line-height:1.8;word-break:keep-all}a{color:#006d91;text-underline-offset:4px}main{max-width:1060px;margin:0 auto;padding:38px 28px 60px}.hero{background:var(--navy);color:#fff;border-radius:22px;padding:40px 44px;position:relative}.eyebrow{color:#a8dfd7;letter-spacing:.06em;font-size:13px;font-weight:700}.hero h1{margin:12px 0 18px;font-size:35px;line-height:1.4;letter-spacing:-.04em}.hero p{color:#d5e7ef;max-width:780px;margin:0}.tags{display:flex;gap:9px;flex-wrap:wrap;margin-top:25px}.tag{font-size:13px;border:1px solid #497080;border-radius:99px;padding:3px 12px;color:#e6f5f5}.answers{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin:22px 0}.answer{border:1px solid var(--line);background:var(--paper);border-radius:16px;padding:22px}.answer .label{font-size:13px;color:var(--muted);margin-bottom:7px}.answer strong{display:block;font-size:21px;line-height:1.4}.answer p{font-size:14px;margin:12px 0 0;color:var(--muted)}.section{background:var(--paper);border:1px solid var(--line);border-radius:18px;margin:20px 0;padding:30px 34px}.heading{display:flex;align-items:center;gap:13px;margin-bottom:18px}.number{flex-shrink:0;width:36px;height:36px;display:grid;place-items:center;border-radius:11px;background:var(--tint);color:var(--accent);font-weight:800}.section h2{font-size:23px;letter-spacing:-.03em;line-height:1.45;margin:0}.section h3{font-size:17px;margin:24px 0 9px}.section p{margin:10px 0}.section ul,.section ol{margin:10px 0;padding-left:24px}.section li{margin:5px 0}.note{background:var(--tint);border-left:4px solid var(--accent);padding:13px 17px;border-radius:0 9px 9px 0;font-size:15px;margin:18px 0}.note.warm{background:var(--warm);border-color:#bd8a25}.small{font-size:14px;color:var(--muted)}.code-label{font-size:13px;font-weight:700;color:var(--muted);margin-top:16px}pre{background:#122c3e;color:#ecf5fb;padding:18px 20px;border-radius:11px;overflow-x:auto;white-space:pre;word-break:normal;line-height:1.7;font-size:14px;margin:8px 0 15px}code{font-family:Consolas,"Cascadia Mono",monospace;font-size:.93em}p code,li code,td code{background:#edf3f6;color:#194b63;border-radius:4px;padding:2px 5px;overflow-wrap:anywhere}.tree{background:#f5f8fa;color:var(--ink);border:1px solid var(--line)}.request{background:#f3f8fc;border:1px solid #cddfe9;border-radius:12px;padding:20px 23px;font-size:15px}.flow{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:23px 0 5px}.flow div{border:1px solid var(--line);border-radius:11px;padding:14px;text-align:center;font-size:14px}.flow b{display:block;color:var(--accent);font-size:12px;margin-bottom:4px}.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;margin:14px 0;font-size:14px}th,td{padding:12px 13px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}th{background:#f2f7f9;font-weight:700}td:first-child{font-weight:700;min-width:115px}details{margin:16px 0;border:1px solid var(--line);border-radius:10px;padding:12px 16px}summary{cursor:pointer;font-weight:700}.footer{text-align:center;color:var(--muted);font-size:13px;padding:22px 10px}.footer a{display:inline-block;margin:4px 9px}.section,.answer,pre,.note{break-inside:avoid}strong{font-weight:700}
+@media(max-width:700px){main{padding:16px 14px 35px}.hero{padding:26px 24px;border-radius:16px}.hero h1{font-size:28px}.answers{grid-template-columns:1fr;gap:10px}.answer{padding:17px 20px}.section{padding:24px 21px}.section h2{font-size:20px}.flow{grid-template-columns:repeat(2,1fr)}pre{font-size:12px;padding:15px}.table-wrap{margin-right:-5px}body{font-size:15px}}
+@media print{body{background:#fff;font-size:11pt}main{max-width:none;padding:0}.hero{background:#fff;color:var(--ink);border:2px solid var(--navy);padding:20px}.hero p,.eyebrow,.tag{color:var(--ink)}.hero h1{font-size:25pt}.tag{border-color:var(--line)}.section{margin:14px 0;padding:20px;break-inside:auto}pre{background:#f3f6f8;color:#172c41;border:1px solid var(--line);white-space:pre-wrap;overflow-wrap:anywhere}details{display:block}.footer{padding:10px}a{color:inherit}.answers{gap:8px}.answer{padding:15px}}
+</style>
+</head>
+<body>
+<main>
+<header class="hero">
+<div class="eyebrow">처음 사용하는 분을 위한 안내 | 문서 배포 0.1.1</div>
+<h1>FX 화면을 읽어 보는<br>Agent Desktop Local 시작하기</h1>
+<p>이미 열려 있는 업무 창에서 메뉴, 콤보, 표의 접근성 정보를 읽는 별도 스킬입니다. FX를 직접 조작하는 기능은 포함하지 않으며, 기존 CUA와 나란히 사용할 수 있습니다.</p>
+<div class="tags"><span class="tag">Windows x64</span><span class="tag">읽기 전용</span><span class="tag">사내 모델에서 해석</span><span class="tag">오프라인 사용 안내</span></div>
+</header>
+
+<div class="answers">
+<div class="answer"><div class="label">최신 CUA에 들어 있나요?</div><strong>별도 ZIP입니다</strong><p>안내 기준 CUA 0.19.5 ZIP에는 이 스킬이 포함되어 있지 않습니다. 추가로 받아 압축을 풉니다.</p></div>
+<div class="answer"><div class="label">CUA Driver도 필요한가요?</div><strong>필요하지 않습니다</strong><p>이 ZIP에 들어 있는 <code>agent-desktop.exe</code>가 자체 관찰 엔진입니다.</p></div>
+<div class="answer"><div class="label">따로 준비할 것은?</div><strong>Python 3.10 이상</strong><p>Python은 이 ZIP에 포함되지 않습니다. 회사에서 승인한 기존 Python을 사용합니다.</p></div>
+</div>
+
+<section class="section">
+<div class="heading"><span class="number">1</span><h2>받을 파일을 확인하세요</h2></div>
+<p>릴리스에서 <strong><code>Agent-Desktop-Local-0.1.1-windows-x64.zip</code></strong>을 받으세요. <code>source.zip</code>이나 GitHub의 <code>Source code</code>는 개발 소스이므로 이 안내의 실행용 파일이 아닙니다.</p>
+<div class="table-wrap"><table><thead><tr><th>구분</th><th>기존 Computer Use MCP</th><th>이번 Agent Desktop Local</th></tr></thead><tbody>
+<tr><td>배포 버전</td><td>0.19.5</td><td>0.1.1 사용 안내 보완판</td></tr>
+<tr><td>역할</td><td>기존 CUA 업무 자동화 환경</td><td>지정한 창의 읽기 전용 인식 검토</td></tr>
+<tr><td>관찰 엔진</td><td>기존 CUA Driver 구성</td><td>함께 포함된 agent-desktop 1.1.0</td></tr>
+<tr><td>설치 관계</td><td>기존 구성 유지</td><td>별도 폴더 사용. CUA 없이도 실행 가능</td></tr>
+</tbody></table></div>
+<p class="small">0.1.1은 이 추가 스킬의 사용 안내를 보완한 버전입니다. 원본 agent-desktop 엔진은 1.1.0 그대로입니다. 커널 드라이버, 상시 서비스, npm, JEV를 설치할 필요가 없습니다.</p>
+</section>
+
+<section class="section">
+<div class="heading"><span class="number">2</span><h2>ZIP 전체를 로컬 폴더에 풀어 주세요</h2></div>
+<p>파일 탐색기에서 ZIP을 오른쪽 클릭한 뒤 <strong>모두 압축 풀기</strong>를 선택합니다. 회사에서 허용한, 본인이 쓸 수 있는 <strong>동기화되지 않는 로컬 디스크 폴더</strong>를 고르세요. 기존 CUA 폴더에 덮어쓰지 않습니다.</p>
+<p>압축을 푼 <code>agent-desktop-local</code> 폴더 안에 아래 항목이 함께 있어야 합니다. ZIP 내부에서 직접 실행하거나 EXE만 따로 옮기지 마세요.</p>
+<pre class="tree">agent-desktop-local
+├─ SKILL.md
+├─ 사용가이드.html       ← 지금 보고 있는 안내
+├─ bin
+│  └─ agent-desktop.exe
+└─ scripts
+   └─ observe.py</pre>
+<div class="note">OneDrive, 클라우드 동기화 폴더와 공유 드라이브는 결과 보관 위치로 사용하지 마세요. 이 도구는 네트워크 경로를 거부하지만, 로컬 폴더의 동기화 여부까지 알아내지는 못합니다.</div>
+</section>
+
+<section class="section">
+<div class="heading"><span class="number">3</span><h2>사내 에이전트가 있다면 이렇게 요청하세요</h2></div>
+<p>가장 쉬운 방법은 승인된 사내 에이전트에게 <code>SKILL.md</code>의 <strong>전체 경로</strong>를 알려 주는 것입니다. 파일 탐색기에서 해당 파일을 <strong>Shift + 오른쪽 클릭 → 경로로 복사</strong>하여 확인할 수 있습니다.</p>
+<div class="request">“아래 경로의 SKILL.md를 읽고 따라 줘.<br><strong>D:\LocalTools\agent-desktop-local\SKILL.md</strong><br><br>내가 열어 둔 <strong>APP.exe</strong>의 메뉴, 콤보와 표를 읽기 전용으로 확인해 줘. 실행파일 이름과 현재 창을 먼저 확인하고, 여러 창이 있으면 임의로 고르지 말아 줘. 결과는 이 스킬 폴더 아래 results에 보관해 줘. 기존 CUA 설정은 그대로 유지하고 원시 결과는 승인된 사내 환경 안에서만 해석해 줘.”</div>
+<p class="small">위 경로와 <code>APP.exe</code>는 예시입니다. 실제 압축 해제 위치와 대상 이름으로 바꿔 주세요.</p>
+<div class="note warm"><strong>모델만 연결한 대화창에서는 실행되지 않습니다.</strong> 사내 모델을 쓰는 에이전트에 로컬 파일 읽기와 명령 실행 도구가 있어야 합니다. 그런 도구가 없으면 아래 4~7번을 직접 따라 하면 됩니다. SKILL.md 자체가 모델이나 MCP 서버를 설치하지는 않습니다.</div>
+<div class="flow"><div><b>사용자</b>FX를 직접 열기</div><div><b>사내 에이전트</b>SKILL.md 읽기</div><div><b>로컬 래퍼</b>지정한 창 관찰</div><div><b>사내 모델</b>로컬 자료 해석</div></div>
+</section>
+
+<section class="section">
+<div class="heading"><span class="number">4</span><h2>직접 실행하려면 PowerShell을 여세요</h2></div>
+<ol><li>파일 탐색기에서 <code>SKILL.md</code>와 <code>scripts</code>가 보이는 폴더를 엽니다.</li><li>탐색기 위쪽 <strong>주소 표시줄</strong>을 클릭하고 <code>powershell</code>이라고 입력한 뒤 Enter를 누릅니다. 검색창이 아니라 폴더 경로가 적힌 곳입니다.</li><li>열린 PowerShell에서 아래 명령을 한 번 실행합니다.</li></ol>
+<pre><code>python --version</code></pre>
+<p><code>Python 3.10</code> 이상의 버전이 나오면 진행할 수 있습니다. Windows는 10 1809 이상 x64 환경이 필요합니다. 관리자 PowerShell은 열지 마세요.</p>
+<details><summary>“python을 찾을 수 없다”거나 설치 화면이 뜨면</summary><p>자동 설치를 진행하지 말고 회사에서 허용한 기존 <code>python.exe</code> 경로를 확인하세요. 아래처럼 명령 앞부분을 바꿀 수 있습니다. 공백이 있는 전체 경로는 따옴표로 감싸고 앞에 <code>&amp;</code>를 붙입니다.</p><pre><code>&amp; "D:\ApprovedPython\python.exe" --version</code></pre><p class="small">이 경로도 예시입니다. 이후 모든 명령의 첫 <code>python</code> 부분을 같은 방식으로 바꿉니다. 회사에서 사용할 수 있는 Python이 없으면 준비 단계에서 멈추세요. 보안 정책이나 PATH를 자동 변경할 필요는 없습니다.</p></details>
+<p>이제 결과를 저장할 폴더를 준비합니다. 아래 두 줄을 그대로 실행하세요. 이 작업은 스킬 폴더 안에 <code>results</code>만 만듭니다.</p>
+<pre><code>New-Item -ItemType Directory -Force .\results | Out-Null
+$outputDir = (Resolve-Path .\results).Path</code></pre>
+<p class="small">새 PowerShell 창을 열면 <code>$outputDir</code> 값이 사라지므로 두 줄을 다시 실행하세요. 공유 경로나 쓰기 권한이 없는 폴더라면 회사에서 허용한 로컬 위치로 압축 해제 위치를 바꿉니다.</p>
+</section>
+
+<section class="section">
+<div class="heading"><span class="number">5</span><h2>FX의 실행파일과 관찰할 창을 확인하세요</h2></div>
+<ol><li>FX를 평소처럼 직접 실행하고 읽으려는 업무 화면을 엽니다. 최소화하지 마세요.</li><li><strong>작업 관리자 → 세부 정보</strong>에서 해당 앱의 정확한 <code>.exe</code> 이름을 확인합니다. “관리자 권한으로 실행”은 필요하지 않습니다.</li><li>아래 명령의 <code>APP.exe</code>를 그 이름으로 바꾸고 실행합니다.</li></ol>
+<pre><code>python -X utf8 -B .\scripts\observe.py inventory --exe-name "APP.exe" --output "$outputDir"</code></pre>
+<p>이 명령은 앱 창 목록만 읽습니다. 화면에는 다음과 같은 짧은 결과가 표시됩니다. 아래 영수증 ID는 설명용 예시입니다.</p>
+<pre><code>{"status":"observed","receipt":"0123456789abcdef0123456789abcdef", ...}</code></pre>
+<p>탐색기로 <code>results</code>를 열고, 출력된 <code>receipt</code>와 같은 이름의 폴더를 엽니다. 그 안의 <code>inventory.json</code>을 <strong>메모장으로 로컬에서</strong> 확인하세요.</p>
+<div class="table-wrap"><table><thead><tr><th>항목</th><th>무엇인가요?</th><th>어디에 쓰나요?</th></tr></thead><tbody>
+<tr><td><code>title</code></td><td>현재 창 제목</td><td>읽으려는 업무 창인지 확인</td></tr><tr><td><code>pid</code></td><td>실행 중인 프로세스 번호</td><td>다음 명령의 <code>--pid</code></td></tr><tr><td><code>hwnd</code></td><td>현재 창의 숫자 식별자</td><td>다음 명령의 <code>--hwnd</code></td></tr>
+</tbody></table></div>
+<div class="note">같은 앱에 창이 여러 개면 제목과 실제 화면을 대조해 하나를 고릅니다. 창을 닫았다가 다시 열었으면 번호가 바뀔 수 있으므로 목록부터 다시 확인하세요. 원시 JSON을 외부 대화창에 붙여넣지 마세요.</div>
+</section>
+
+<section class="section">
+<div class="heading"><span class="number">6</span><h2>창 하나를 읽어 보세요</h2></div>
+<p>확인한 실행파일 이름, <code>pid</code>, <code>hwnd</code>를 아래 명령에 넣습니다. <strong><code>1234</code>와 <code>5678</code>은 예시 숫자</strong>이므로 그대로 실행하지 마세요.</p>
+<pre><code>python -X utf8 -B .\scripts\observe.py observe --exe-name "APP.exe" --pid 1234 --hwnd 5678 --stage grid --output "$outputDir"</code></pre>
+<div class="table-wrap"><table><thead><tr><th>읽을 내용</th><th><code>--stage</code> 뒤에 쓸 값</th></tr></thead><tbody><tr><td>창 전체</td><td><code>window</code></td></tr><tr><td>메뉴</td><td><code>menu</code></td></tr><tr><td>콤보와 선택 목록</td><td><code>combo</code></td></tr><tr><td>표</td><td><code>grid</code></td></tr><tr><td>속성 편집기</td><td><code>property</code></td></tr></tbody></table></div>
+<p class="small">stage는 결과를 어떤 종류로 해석할지 지정합니다. 모두 지정한 창만 읽으며 메뉴를 열거나 콤보를 펼치거나 표를 스크롤하지 않습니다.</p>
+<h3>PowerShell로 돌아오면 콤보나 메뉴가 닫히는 경우</h3>
+<p>명령을 먼저 준비하고, 아래처럼 <strong>8초 대기 후 관찰</strong>하도록 실행하세요. Enter를 누른 뒤 8초 안에 FX로 돌아가 원하는 메뉴나 콤보를 직접 엽니다. 관찰 중에는 다른 창으로 전환하지 마세요.</p>
+<pre><code>Start-Sleep -Seconds 8
+python -X utf8 -B .\scripts\observe.py observe --exe-name "APP.exe" --pid 1234 --hwnd 5678 --stage combo --output "$outputDir"</code></pre>
+<p class="small">이 예시도 이름과 숫자를 바꿉니다. 기본 창 하나를 읽는 경우 명령 시작 후 약 40초 정도 기다린 뒤 PowerShell에서 결과를 확인하면 진행 중에 창을 바꿀 가능성을 줄일 수 있습니다. 부모나 관련 창을 추가하면 시간이 더 걸릴 수 있습니다. 화면을 바꾼 결과가 <code>interrupted</code>이면 유효한 관찰로 취급하지 않습니다.</p>
+<div class="note warm">예전에 본 HWND를 다른 창에 재사용하거나, 조회/저장/내보내기 버튼을 자동 클릭하도록 요청하지 마세요. 이 스킬은 열린 화면의 인식 상태를 검토하는 용도입니다.</div>
+</section>
+
+<section class="section">
+<div class="heading"><span class="number">7</span><h2>로컬 결과에서 읽힌 내용을 확인하세요</h2></div>
+<p>관찰 명령이 반환한 새 <code>receipt</code> 폴더를 엽니다. 창 목록을 읽었을 때와 관찰했을 때의 영수증 폴더는 서로 다릅니다.</p>
+<div class="table-wrap"><table><thead><tr><th>파일</th><th>확인할 내용</th></tr></thead><tbody><tr><td><code>receipt.json</code></td><td>상태, 개수와 전경 유지 여부</td></tr><tr><td><code>observation.json</code></td><td>관찰한 창 범위와 각 범위의 상태</td></tr><tr><td><code>target-window.json</code></td><td>원시 트리와 <code>recognition</code>의 이름, 값, 선택 상태, 계층</td></tr><tr><td><code>inventory.json</code></td><td>이 관찰에서 대상으로 확인한 창</td></tr></tbody></table></div>
+<p>관찰되지 않은 범위의 <code>target-window.json</code>은 생기지 않을 수 있습니다. 결과 폴더의 다른 상태 파일에도 업무 내용이 남을 수 있으므로 <strong>폴더 전체를 사내 업무 자료로 취급</strong>하세요.</p>
+<p>사내 모델에는 “이 로컬 결과의 이름, 표시값과 선택 상태를 구분하고, 실제로 읽힌 근거만 정리해 줘”라고 요청할 수 있습니다. 코드값과 표시 문자열이 항상 같은 것은 아닙니다.</p>
+<div class="table-wrap"><table><thead><tr><th>상태</th><th>뜻과 다음 행동</th></tr></thead><tbody>
+<tr><td><code>observed</code></td><td>접근성 트리를 읽었습니다. 원하는 업무 항목을 정확히 인식했거나 업무가 완료됐다는 뜻은 아닙니다.</td></tr>
+<tr><td><code>partial</code></td><td>일부 창 범위만 읽었습니다. 실패한 범위를 확인하고 전체 성공으로 합치지 않습니다.</td></tr>
+<tr><td><code>no_matching_window</code></td><td>목록에서 일치하는 창이 없습니다. 앱 실행 상태와 정확한 실행파일 이름을 확인합니다.</td></tr>
+<tr><td><code>unavailable</code></td><td>대상 범위를 읽지 못했습니다. 없는 요소나 메뉴를 추측해서 채우지 않습니다.</td></tr>
+<tr><td><code>blocked</code></td><td>대상 식별, 경로, 바이너리 또는 실행 조건을 확인하지 못했습니다. 인수와 준비 상태부터 확인하고 보안 차단을 우회하지 않습니다.</td></tr>
+<tr><td><code>interrupted</code></td><td>관찰 전후에 전경 창이 달라졌습니다. 기록은 남을 수 있지만 이 관찰은 유효한 결과로 사용하지 않습니다.</td></tr>
+</tbody></table></div>
+<p class="small">멈추려면 PowerShell에서 Ctrl+C를 누를 수 있습니다. 중단 뒤에는 대상 상태를 다시 확인하세요. 같은 명령을 무작정 반복하거나 실패를 해결하려고 보안 설정을 낮추지 않습니다.</p>
+</section>
+
+<section class="section">
+<div class="heading"><span class="number">8</span><h2>팝업은 부모 창과 구분해서 읽습니다</h2></div>
+<p>콤보의 떠 있는 목록이나 속성 편집기는 단독으로 읽히지 않아도 부모 창에서 보일 수 있습니다. 실제로 확인한 부모 창이 있다면 <code>--parent-hwnd</code>로 함께 지정합니다. 별도 검색 창이나 업무 창은 <code>--related-hwnd</code>로 명시할 수 있습니다.</p>
+<pre><code>python -X utf8 -B .\scripts\observe.py observe --exe-name "APP.exe" --pid 1234 --hwnd 5678 --stage combo --parent-hwnd 9012 --output "$outputDir"</code></pre>
+<p>여기도 모든 숫자는 현재 <code>inventory.json</code>과 실제 창에서 확인한 값으로 바꿉니다. 부모/관련 창은 <strong>같은 PID</strong>여야 하며, 같은 PID라는 이유만으로 업무 관계를 추정하지 않습니다.</p>
+<p>결과는 <code>target-window.json</code>, <code>parent-window.json</code> 등으로 따로 남습니다. 목록에 없는 팝업은 미관찰로 남기며, PID 전체의 다른 업무 창을 훑어 메뉴를 찾는 기능은 사용하지 않습니다. 부모 창에서도 보이지 않으면 기존 별도 접근성 진단과 비교할 수 있지만 자동 클릭으로 해결하지 않습니다.</p>
+</section>
+
+<section class="section">
+<div class="heading"><span class="number">9</span><h2>확인된 범위와 보관 원칙</h2></div>
+<p>이번 패키지는 자체 WinForms/WPF 합성 화면 <strong>6개 상태</strong>에서 관찰과 데이터 경계를 검증했습니다. 실제 회사 FX/FxMenuAgent는 다른 PC에 있어 <strong>현장 인식률과 DPI별 동작은 아직 검증하지 않았습니다.</strong> 숨겨진 UI 요소를 복원하거나 실제 Infragistics/FarPoint의 모든 동작을 보장하는 결과는 아닙니다.</p>
+<ul><li>관찰 래퍼는 JEV, 외부 모델 호출, 자동 다운로드, 업데이트 확인과 원격 로그 전송을 실행하지 않습니다.</li><li>원시 결과는 승인된 사내 모델 환경에서만 읽고, 외부 대화나 공개 이슈에 첨부하지 않습니다.</li><li>이 도구가 호스트 모델의 전송 정책이나 폴더 동기화를 통제하지는 못합니다. OS 네트워크 차단을 보장하는 샌드박스도 아닙니다.</li><li>원본 EXE에는 이 래퍼 이외의 기능도 있으므로 <code>scripts/observe.py</code>를 통해 사용합니다. 원본 EXE를 직접 실행하는 방식으로 제한을 우회하지 않습니다.</li><li>Windows의 사용자별 interaction lock 같은 흔적이 결과 폴더 밖에 생길 수 있습니다. 기존 CUA 설정, UAC, 백신과 방화벽은 변경하지 않습니다.</li></ul>
+<div class="note">원본 바이너리는 Authenticode 서명이 없습니다. 회사 정책이 실행을 차단하면 중단하고 담당자에게 실행 가능 여부를 확인하세요. “차단 해제”나 관리자 권한 실행을 이 안내의 필수 단계로 요구하지 않습니다.</div>
+</section>
+
+<footer class="footer">
+<div>Agent Desktop Local 0.1.1 사용 안내 | 기준일 2026-11-03 | 외부 글꼴, 이미지, 스크립트 없음</div>
+<div>아래 링크는 클릭할 때만 웹페이지를 엽니다. 이 안내 파일은 인터넷 없이 읽을 수 있습니다.</div>
+<nav aria-label="참고 문서">
+<a href="https://github.com/bongG-moon/computeruse_mcp/blob/agent-desktop-local-v0.1.1/addons/agent-desktop-local/README.md" target="_blank" rel="noopener noreferrer">패키지 README</a>
+<a href="https://github.com/bongG-moon/computeruse_mcp/blob/agent-desktop-local-v0.1.1/addons/agent-desktop-local/VALIDATION.md" target="_blank" rel="noopener noreferrer">검증 기록</a>
+<a href="https://github.com/bongG-moon/computeruse_mcp/releases/tag/agent-desktop-local-v0.1.1" target="_blank" rel="noopener noreferrer">추가 스킬 릴리스</a>
+<a href="https://github.com/vercel-labs/agent-desktop" target="_blank" rel="noopener noreferrer">원본 agent-desktop</a>
+</nav>
+</footer>
+</main>
+</body>
+</html>
