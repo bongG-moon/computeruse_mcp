@@ -13,7 +13,7 @@ from local_core import (EngineError, _Child, _identity, foreground, process_path
                         validate_local_directory)
 from recognition import derive
 
-VERSION = "0.1.1"
+VERSION = "0.2.0"
 BINARY_SHA256 = "2c8e9a627d87649a4562bfe5678450d045b793ab6f3fdec8af05c9571f32d5ef"
 BINARY = Path(__file__).resolve().parents[1] / "bin" / "agent-desktop.exe"
 STAGES = ("window", "menu", "combo", "grid", "property")

@@ -7,11 +7,12 @@ import re
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '0.1.1'
+VERSION = '0.2.0'
 BASE = 'Agent-Desktop-Local-' + VERSION
 FILES = ('SKILL.md', 'README.md', '사용가이드.html', 'VALIDATION.md', 'LICENSE', 'NOTICE.txt', 'UPSTREAM.json', 'THIRD_PARTY_NOTICES.txt',
-         'references/recognition.md', 'scripts/observe.py', 'scripts/local_core.py',
-         'scripts/recognition.py', 'tests/test_observer.py', 'tools/build.py')
+         'references/recognition.md', 'references/actions.md', 'scripts/observe.py', 'scripts/local_core.py',
+         'scripts/recognition.py', 'scripts/interact.py', 'tests/test_observer.py', 'tests/test_interact.py',
+         'tests/fixtures/ActionFixture.cs', 'tools/smoke_actions.py', 'tools/build.py')
 PIN = '2c8e9a627d87649a4562bfe5678450d045b793ab6f3fdec8af05c9571f32d5ef'
 
 

@@ -43,7 +43,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - name: Test local observer boundaries
+      - name: Test observer and interaction boundaries
         run: python -B -m unittest discover -s addons/agent-desktop-local/tests -v
       - name: Download standalone add-on assets
         env:

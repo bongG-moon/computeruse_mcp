@@ -1,5 +1,5 @@
-Agent Desktop Local 0.1.1
-Local observation wrapper and adapted workflow guidance, 2026.
+Agent Desktop Local 0.2.0
+Local observation and scoped interaction wrappers with adapted workflow guidance, 2026.
 Distributed under the Apache License 2.0; see LICENSE.
 
 Includes an unmodified agent-desktop 1.1.0 Windows x64 binary.
@@ -8,7 +8,7 @@ Original work by the agent-desktop contributors; see upstream notices.
 Upstream license: Apache-2.0.
 Pinned source revision: d3dc190afbf34cd2377252398ddd5c30efbd093a
 
-Changes are separate Python observation wrappers and rewritten local-only
+Changes are separate Python observation/interaction wrappers and rewritten local-only
 skill instructions. No upstream binary changes. No JEV integration.
 Upstream source and dependency declarations are available at the pinned revision.
 Third-party dependency licenses remain those of their respective authors.
